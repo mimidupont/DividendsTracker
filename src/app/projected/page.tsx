@@ -18,7 +18,7 @@ export default function ProjectedPage() {
   const totalUSD = projections.filter(p => p.year === 2027).reduce((s, p) => s + (p.projected_total ?? 0) * (FX[p.currency] ?? 1), 0)
   const totalNet = totalUSD * 0.85
 
-  const years = [...new Set(projections.map(p => p.year))].sort()
+  const years = Array.from(new Set(projections.map(p => p.year))).sort()
 
   return (
     <div style={{ display: 'flex' }}>
