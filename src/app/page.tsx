@@ -3,6 +3,7 @@ import { useEffect, useState, useCallback } from 'react'
 import Sidebar from '@/components/Sidebar'
 import Badge from '@/components/Badge'
 import LogDividendModal from '@/components/LogDividendModal'
+import AddPositionModal from '@/components/AddPositionModal'
 import { supabase, Holding, DividendReceived, DividendProjection } from '@/lib/supabase'
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from 'recharts'
 
@@ -32,6 +33,7 @@ export default function Dashboard() {
   const [received, setReceived] = useState<DividendReceived[]>([])
   const [projections, setProjections] = useState<DividendProjection[]>([])
   const [showModal, setShowModal] = useState(false)
+  const [showAddModal, setShowAddModal] = useState(false)
   const [loading, setLoading] = useState(true)
 
   const load = useCallback(async () => {
@@ -63,6 +65,10 @@ export default function Dashboard() {
   const proj2027Gross = projections.reduce((sum, p) => sum + toUSD(p.projected_total ?? 0, p.currency), 0)
   const proj2027Net = proj2027Gross * 0.85
 
+  // Yield metrics
+  const portfolioYield = totalValueUSD > 0 ? (proj2027Gross / totalValueUSD) * 100 : 0
+  const portfolioYieldOnCost = totalCostUSD > 0 ? (proj2027Gross / totalCostUSD) * 100 : 0
+
   // Chart data — top 8 projected
   const chartData = projections.slice(0, 8).map(p => ({
     symbol: p.symbol,
@@ -93,6 +99,7 @@ export default function Dashboard() {
     <div style={{ display: 'flex' }}>
       <Sidebar />
       {showModal && <LogDividendModal onClose={() => setShowModal(false)} onSaved={load} />}
+      {showAddModal && <AddPositionModal onClose={() => setShowAddModal(false)} onSaved={load} />}
 
       <main style={{ marginLeft: 220, flex: 1, padding: '32px 36px', maxWidth: 1100 }}>
 
@@ -106,22 +113,46 @@ export default function Dashboard() {
               {new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })} · Portfolio snapshot
             </div>
           </div>
-          <button onClick={() => setShowModal(true)} style={{
-            padding: '8px 16px', borderRadius: 6, cursor: 'pointer',
-            background: 'var(--green-bg)', border: '1px solid var(--green-bd)',
-            color: 'var(--green)', fontFamily: 'DM Mono, monospace', fontSize: 12,
-          }}>
-            + Log dividend
-          </button>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button onClick={() => setShowAddModal(true)} style={{
+              padding: '8px 16px', borderRadius: 6, cursor: 'pointer',
+              background: 'var(--bg2)', border: '1px solid var(--border2)',
+              color: 'var(--text2)', fontFamily: 'DM Mono, monospace', fontSize: 12,
+            }}>
+              + Add position
+            </button>
+            <button onClick={() => setShowModal(true)} style={{
+              padding: '8px 16px', borderRadius: 6, cursor: 'pointer',
+              background: 'var(--green-bg)', border: '1px solid var(--green-bd)',
+              color: 'var(--green)', fontFamily: 'DM Mono, monospace', fontSize: 12,
+            }}>
+              + Log dividend
+            </button>
+          </div>
         </div>
 
         {/* Metric cards */}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 14, marginBottom: 24 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 14, marginBottom: 14 }}>
           {[
             { label: 'Portfolio value', value: `$${Math.round(totalValueUSD).toLocaleString()}`, sub: <Badge variant={unrealizedPL >= 0 ? 'green' : 'red'}>{unrealizedPL >= 0 ? '+' : ''}${Math.round(unrealizedPL).toLocaleString()} P&L</Badge>, accent: 'var(--green)' },
             { label: 'YTD dividends received', value: `$${ytdGross.toFixed(2)}`, sub: <Badge variant="green">${ytdNet.toFixed(2)} net after WHT</Badge>, accent: 'var(--green)' },
             { label: '2027 projected gross', value: `$${Math.round(proj2027Gross).toLocaleString()}`, sub: <Badge variant="amber">pre-withholding tax</Badge>, accent: 'var(--amber)' },
             { label: '2027 projected net', value: `$${Math.round(proj2027Net).toLocaleString()}`, sub: <Badge variant="blue">≈ CZK {Math.round(proj2027Net * 21.43).toLocaleString()}</Badge>, accent: 'var(--blue)' },
+          ].map((m, i) => (
+            <div key={i} style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 10, padding: '18px 20px', position: 'relative', overflow: 'hidden' }}>
+              <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 2, background: m.accent, opacity: 0.7 }} />
+              <div style={{ fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--text3)', marginBottom: 8 }}>{m.label}</div>
+              <div style={{ fontFamily: 'Fraunces, serif', fontSize: 24, fontWeight: 400, lineHeight: 1, marginBottom: 8 }}>{m.value}</div>
+              <div>{m.sub}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* Yield metric cards */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 14, marginBottom: 24 }}>
+          {[
+            { label: 'Portfolio yield', value: `${portfolioYield.toFixed(2)}%`, sub: <Badge variant="green">annual dividends / market value</Badge>, accent: 'var(--green)' },
+            { label: 'Yield on cost', value: `${portfolioYieldOnCost.toFixed(2)}%`, sub: <Badge variant="blue">annual dividends / cost basis</Badge>, accent: 'var(--blue)' },
           ].map((m, i) => (
             <div key={i} style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 10, padding: '18px 20px', position: 'relative', overflow: 'hidden' }}>
               <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 2, background: m.accent, opacity: 0.7 }} />
