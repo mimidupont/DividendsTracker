@@ -1,5 +1,5 @@
 'use client'
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { supabase } from '@/lib/supabase'
 
 export default function AddPositionModal({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
@@ -15,8 +15,57 @@ export default function AddPositionModal({ onClose, onSaved }: { onClose: () => 
   })
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
+  const [lookingUp, setLookingUp] = useState(false)
+  const [lookupStatus, setLookupStatus] = useState<'idle' | 'found' | 'notfound'>('idle')
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const set = (k: string, v: string | boolean) => setForm(f => ({ ...f, [k]: v }))
+
+  // Auto-lookup company name when ticker symbol changes
+  useEffect(() => {
+    const symbol = form.symbol.trim().toUpperCase()
+    if (!symbol || symbol.length < 1) {
+      setLookupStatus('idle')
+      return
+    }
+
+    // Debounce: wait 600ms after user stops typing
+    if (debounceRef.current) clearTimeout(debounceRef.current)
+    debounceRef.current = setTimeout(async () => {
+      setLookingUp(true)
+      setLookupStatus('idle')
+      try {
+        const res = await fetch(
+          `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(symbol)}&quotesCount=5&newsCount=0&enableFuzzyQuery=false&quotesQueryId=tss_match_phrase_query`,
+          { headers: { 'Accept': 'application/json' } }
+        )
+        if (!res.ok) throw new Error('fetch failed')
+        const data = await res.json()
+        const quotes = data?.finance?.result?.[0]?.quotes ?? []
+
+        // Find exact symbol match first, then fall back to first result
+        const exact = quotes.find((q: { symbol: string }) => q.symbol === symbol)
+        const match = exact ?? quotes[0]
+
+        if (match?.longname || match?.shortname) {
+          const name = match.longname || match.shortname
+          setForm(f => ({ ...f, name }))
+          setLookupStatus('found')
+        } else {
+          setLookupStatus('notfound')
+        }
+      } catch {
+        setLookupStatus('notfound')
+      } finally {
+        setLookingUp(false)
+      }
+    }, 600)
+
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.symbol])
 
   const handleSubmit = async () => {
     if (!form.symbol || !form.name || !form.shares || !form.avg_price) {
@@ -67,20 +116,70 @@ export default function AddPositionModal({ onClose, onSaved }: { onClose: () => 
         )}
 
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
+          {/* Ticker symbol with lookup indicator */}
           <div>
             <label style={labelStyle}>Ticker symbol</label>
-            <input style={inputStyle} placeholder="e.g. KO" value={form.symbol} onChange={e => set('symbol', e.target.value)} />
+            <div style={{ position: 'relative' }}>
+              <input
+                style={{ ...inputStyle, paddingRight: 28 }}
+                placeholder="e.g. KO"
+                value={form.symbol}
+                onChange={e => {
+                  set('symbol', e.target.value)
+                  setLookupStatus('idle')
+                }}
+              />
+              {/* Status indicator inside input */}
+              <div style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', fontSize: 12 }}>
+                {lookingUp && (
+                  <span style={{ color: 'var(--text3)', animation: 'spin 1s linear infinite', display: 'inline-block' }}>⟳</span>
+                )}
+                {!lookingUp && lookupStatus === 'found' && (
+                  <span style={{ color: 'var(--green)' }}>✓</span>
+                )}
+                {!lookingUp && lookupStatus === 'notfound' && (
+                  <span style={{ color: 'var(--amber)' }}>?</span>
+                )}
+              </div>
+            </div>
+            {!lookingUp && lookupStatus === 'notfound' && (
+              <div style={{ fontSize: 10, color: 'var(--amber)', marginTop: 4 }}>
+                Ticker not found — enter name manually
+              </div>
+            )}
+            {!lookingUp && lookupStatus === 'found' && (
+              <div style={{ fontSize: 10, color: 'var(--green)', marginTop: 4 }}>
+                Company name auto-filled ✓
+              </div>
+            )}
           </div>
+
           <div>
             <label style={labelStyle}>Currency</label>
             <select style={inputStyle} value={form.currency} onChange={e => set('currency', e.target.value)}>
               <option>USD</option><option>EUR</option><option>CZK</option><option>GBP</option>
             </select>
           </div>
+
+          {/* Company name — editable, auto-filled from lookup */}
           <div style={{ gridColumn: '1/-1' }}>
-            <label style={labelStyle}>Company name</label>
-            <input style={inputStyle} placeholder="e.g. Coca-Cola Co" value={form.name} onChange={e => set('name', e.target.value)} />
+            <label style={labelStyle}>
+              Company name
+              {lookingUp && <span style={{ color: 'var(--text3)', marginLeft: 6, fontStyle: 'italic' }}>looking up…</span>}
+            </label>
+            <input
+              style={{
+                ...inputStyle,
+                background: lookupStatus === 'found' ? 'var(--green-bg)' : 'var(--bg)',
+                borderColor: lookupStatus === 'found' ? 'var(--green-bd)' : undefined,
+                transition: 'background 0.3s, border-color 0.3s',
+              }}
+              placeholder="Auto-filled from ticker, or type manually"
+              value={form.name}
+              onChange={e => set('name', e.target.value)}
+            />
           </div>
+
           <div>
             <label style={labelStyle}>Shares bought</label>
             <input style={inputStyle} type="number" placeholder="e.g. 50" value={form.shares} onChange={e => set('shares', e.target.value)} />
