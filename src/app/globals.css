@@ -1,0 +1,74 @@
+@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=DM+Mono:wght@300;400;500&family=Geist:wght@300;400;500;600&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg:        #f5f4f0;
+  --bg2:       #ffffff;
+  --bg3:       #edecea;
+  --bg4:       #e5e3df;
+  --border:    rgba(0,0,0,0.07);
+  --border2:   rgba(0,0,0,0.12);
+  --border3:   rgba(0,0,0,0.18);
+  --text:      #18191a;
+  --text2:     #444749;
+  --text3:     #888c8e;
+  --text4:     #b0b4b6;
+
+  --green:     #2a6429;
+  --green-bg:  #e8f2e7;
+  --green-bd:  #afd0ad;
+  --green-mid: #4a9448;
+
+  --amber:     #7a5810;
+  --amber-bg:  #fdf4dc;
+  --amber-bd:  #e8cc7a;
+
+  --red:       #8a2b22;
+  --red-bg:    #fcecea;
+  --red-bd:    #e8b0a8;
+
+  --blue:      #1a4878;
+  --blue-bg:   #e8f0fa;
+  --blue-bd:   #a8c2e8;
+
+  --sidebar-w: 200px;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html { font-size: 13px; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Geist', system-ui, sans-serif;
+  font-size: 13px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+.serif { font-family: 'Instrument Serif', Georgia, serif; }
+.mono  { font-family: 'DM Mono', monospace; font-size: 12px; }
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 3px; height: 3px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+
+/* Input base */
+input, select, textarea {
+  font-family: 'Geist', sans-serif;
+  font-size: 13px;
+  color: var(--text);
+}
+
+/* Focus ring */
+input:focus, select:focus, textarea:focus {
+  outline: 2px solid var(--green-mid);
+  outline-offset: -1px;
+}
+
+button { font-family: 'Geist', sans-serif; }
