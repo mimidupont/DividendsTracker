@@ -26,23 +26,21 @@ export interface MarketDataResponse {
 const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 
-// ── Session/crumb ─────────────────────────────────────────────────────────────
+// ── Session / crumb ───────────────────────────────────────────────────────────
 
-async function getCrumb(): Promise<{ crumb: string; cookie: string } | null> {
+async function getSession(): Promise<{ crumb: string; cookie: string } | null> {
   try {
     const homeRes = await fetch('https://finance.yahoo.com/quote/AAPL/', {
       headers: { 'User-Agent': UA, Accept: 'text/html' },
       redirect: 'follow',
     })
-    // Parse the set-cookie header — keep only name=value pairs, join with '; '
-    const setCookie = homeRes.headers.getSetCookie?.() ?? []
-    const cookie = setCookie.length
-      ? setCookie.map(c => c.split(';')[0]).join('; ')
-      : (homeRes.headers.get('set-cookie') ?? '')
-          .split(',')
-          .map(s => s.split(';')[0].trim())
-          .filter(s => s.includes('='))
-          .join('; ')
+    // Use getSetCookie() (Node 18+) with fallback
+    const setCookies: string[] =
+      typeof (homeRes.headers as unknown as { getSetCookie?: () => string[] }).getSetCookie === 'function'
+        ? (homeRes.headers as unknown as { getSetCookie: () => string[] }).getSetCookie()
+        : (homeRes.headers.get('set-cookie') ?? '').split(',')
+
+    const cookie = setCookies.map(c => c.split(';')[0].trim()).filter(c => c.includes('=')).join('; ')
 
     const crumbRes = await fetch('https://query2.finance.yahoo.com/v1/test/getcrumb', {
       headers: { 'User-Agent': UA, Cookie: cookie },
@@ -56,7 +54,7 @@ async function getCrumb(): Promise<{ crumb: string; cookie: string } | null> {
   }
 }
 
-// ── Batch quote fetch (needs crumb) ──────────────────────────────────────────
+// ── Batch price/quote fetch ───────────────────────────────────────────────────
 
 async function fetchBatchQuotes(
   symbols: string[],
@@ -82,7 +80,7 @@ async function fetchBatchQuotes(
       next: { revalidate: 0 },
     })
     if (!res.ok) {
-      console.error(`[market] batch fetch ${res.status}: ${await res.text().catch(() => '')}`)
+      console.error(`[market] batch ${res.status}`)
       return null
     }
     const data = await res.json()
@@ -92,7 +90,7 @@ async function fetchBatchQuotes(
   }
 }
 
-// ── Per-symbol chart fallback (no auth needed) ────────────────────────────────
+// ── Per-symbol chart fallback (no auth) ───────────────────────────────────────
 
 async function fetchChartQuote(symbol: string): Promise<Partial<MarketQuote> | null> {
   try {
@@ -131,16 +129,19 @@ async function fetchChartQuote(symbol: string): Promise<Partial<MarketQuote> | n
   }
 }
 
-// ── Per-symbol dividend data via quoteSummary ─────────────────────────────────
+// ── quoteSummary — reliable dividend data ─────────────────────────────────────
+// Yahoo's v8/finance/quote often returns null for dividend fields even for
+// known payers. quoteSummary?modules=summaryDetail is the reliable source.
 
 async function fetchDividendSummary(
   symbol: string,
-  cookie: string
+  cookie: string,
+  crumb: string
 ): Promise<Partial<MarketQuote> | null> {
   try {
     const url =
       `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(symbol)}` +
-      `?modules=summaryDetail`
+      `?modules=summaryDetail&crumb=${encodeURIComponent(crumb)}`
     const res = await fetch(url, {
       headers: { 'User-Agent': UA, Accept: 'application/json', Cookie: cookie },
       next: { revalidate: 0 },
@@ -149,10 +150,17 @@ async function fetchDividendSummary(
     const data = await res.json()
     const sd = data?.quoteSummary?.result?.[0]?.summaryDetail
     if (!sd) return null
+
+    // Yahoo returns yield as decimal (0.0174 = 1.74%) in summaryDetail
+    const yieldRaw: number | null = sd.trailingAnnualDividendYield?.raw ?? null
+    const rateRaw: number | null  = sd.trailingAnnualDividendRate?.raw ?? null
+    const fwdRate: number | null  = sd.dividendRate?.raw ?? null
+
     return {
-      dividendYield: sd.trailingAnnualDividendYield?.raw ?? null,
-      trailingAnnualDividendRate: sd.trailingAnnualDividendRate?.raw ?? null,
-      forwardAnnualDividendRate: sd.dividendRate?.raw ?? null,
+      // Only override if the batch quote gave us nothing
+      dividendYield: yieldRaw,
+      trailingAnnualDividendRate: rateRaw,
+      forwardAnnualDividendRate: fwdRate,
       exDividendDate: sd.exDividendDate?.raw ?? null,
       payoutRatio: sd.payoutRatio?.raw ?? null,
     }
@@ -203,9 +211,10 @@ export async function POST(req: NextRequest) {
 
     const result: Record<string, MarketQuote> = {}
 
-    // Step 1: attempt crumb-authenticated batch fetch
-    const session = await getCrumb()
+    // Step 1: get Yahoo session
+    const session = await getSession()
 
+    // Step 2: batch price fetch
     if (session) {
       const BATCH = 50
       for (let i = 0; i < symbols.length; i += BATCH) {
@@ -220,25 +229,39 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Step 2: for any symbols with no price, fall back to chart API
-    const missing = symbols.filter(s => !result[s] || result[s].price === 0)
-    if (missing.length > 0) {
-      console.log(`[market] chart fallback for: ${missing.join(', ')}`)
+    // Step 3: chart fallback for any symbol that got no price
+    const noPriceSymbols = symbols.filter(s => !result[s] || result[s].price === 0)
+    if (noPriceSymbols.length > 0) {
+      console.log(`[market] chart fallback for: ${noPriceSymbols.join(', ')}`)
       await Promise.all(
-        missing.map(async sym => {
+        noPriceSymbols.map(async sym => {
           const chart = await fetchChartQuote(sym)
-          if (chart?.price) {
-            // Optionally enrich dividend data via quoteSummary
-            const div = session ? await fetchDividendSummary(sym, session.cookie) : null
-            result[sym] = { ...emptyQuote(sym), ...chart, ...(div ?? {}) }
-          } else {
-            result[sym] = emptyQuote(sym)
-          }
+          result[sym] = chart?.price
+            ? { ...emptyQuote(sym), ...chart }
+            : emptyQuote(sym)
         })
       )
     }
 
-    // Step 3: fill anything still missing
+    // Step 4: enrich dividend data via quoteSummary for ALL symbols that
+    // are missing yield — Yahoo's quote endpoint frequently omits these fields
+    // even for confirmed dividend payers like HPQ, O, KO, etc.
+    if (session) {
+      const noDivSymbols = symbols.filter(s => result[s] && result[s].dividendYield === null)
+      if (noDivSymbols.length > 0) {
+        console.log(`[market] enriching dividend data for: ${noDivSymbols.join(', ')}`)
+        await Promise.all(
+          noDivSymbols.map(async sym => {
+            const div = await fetchDividendSummary(sym, session.cookie, session.crumb)
+            if (div && result[sym]) {
+              result[sym] = { ...result[sym], ...div }
+            }
+          })
+        )
+      }
+    }
+
+    // Step 5: fill any still-missing symbols
     for (const sym of symbols) {
       if (!result[sym]) result[sym] = emptyQuote(sym)
     }
