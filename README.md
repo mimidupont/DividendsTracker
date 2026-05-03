@@ -1,68 +1,17 @@
-# Divvy — Dividend Tracker
+# Divvy — Dividend Tracker (Redesigned)
 
-Personal dividend portfolio tracker built with Next.js, Supabase, and Tailwind CSS.
-Deployed on Vercel.
+Personal dividend portfolio tracker built with Next.js 14, Supabase, and TypeScript.
 
 ---
 
 ## Stack
 
 - **Frontend**: Next.js 14 (App Router) + TypeScript
-- **Styling**: Tailwind CSS + inline styles
+- **Styling**: Inline styles with CSS variables · Instrument Serif + DM Mono + Geist
 - **Database**: Supabase (PostgreSQL)
-- **Hosting**: Vercel
+- **AI features**: Claude API with web search (live yields, DRIP, ex-dates)
 - **Charts**: Recharts
-
----
-
-## Deploy in 4 steps
-
-### 1. Supabase — set up the database
-
-1. Go to [supabase.com](https://supabase.com) and create a new project
-2. Once created, go to **SQL Editor** → **New query**
-3. Paste the entire contents of `supabase-schema.sql` and click **Run**
-4. This creates your tables and seeds your current portfolio data
-5. Go to **Settings → API** and copy:
-   - `Project URL`
-   - `anon public` key
-
-### 2. GitHub — push the code
-
-```bash
-# In this project folder:
-git init
-git add .
-git commit -m "initial commit"
-
-# Create a new repo on github.com, then:
-git remote add origin https://github.com/YOUR_USERNAME/dividend-tracker.git
-git branch -M main
-git push -u origin main
-```
-
-### 3. Vercel — deploy
-
-1. Go to [vercel.com](https://vercel.com) and click **Add New Project**
-2. Import your GitHub repository
-3. Under **Environment Variables**, add:
-   ```
-   NEXT_PUBLIC_SUPABASE_URL      = your-project-url
-   NEXT_PUBLIC_SUPABASE_ANON_KEY = your-anon-key
-   ```
-4. Click **Deploy** — Vercel auto-detects Next.js, no config needed
-
-### 4. Local development (optional)
-
-```bash
-# Copy env template
-cp .env.local.example .env.local
-# Fill in your Supabase URL and key in .env.local
-
-npm install
-npm run dev
-# Open http://localhost:3000
-```
+- **FX rates**: Frankfurter.app (free, no key needed)
 
 ---
 
@@ -70,34 +19,93 @@ npm run dev
 
 | Route | Description |
 |-------|-------------|
-| `/` | Dashboard — portfolio overview, metrics, charts |
-| `/holdings` | All positions with P&L, filterable by dividend/non-dividend |
-| `/received` | Dividend payments log with WHT tracking |
-| `/projected` | 2027 income projections by holding |
+| `/` | Dashboard — 5 metric cards, holdings table, dividend log |
+| `/holdings` | Full holdings table with live yields, edit, add lot, delete |
+| `/received` | Dividend payments log with DRIP tracking |
+| `/projected` | Multi-year income projections by holding |
+| `/calendar` | Ex-dividend calendar — upcoming dates via AI search |
+| `/currency` | Currency exposure breakdown with visual bars |
+| `/tax` | Czech tax summary — gross/WHT/net for daňové přiznání |
 
 ---
 
-## Updating your portfolio
+## Key features
 
-### Add a new holding
-In Supabase → Table Editor → `holdings` → Insert row
+### ✎ Edit positions
+Click the pencil icon on any row in Holdings to edit shares, price, currency, exchange.
 
-### Log a dividend payment
-Use the **+ Log dividend** button on the dashboard or `/received` page
+### + Add lot
+Click the + icon to add a new purchase lot to an existing holding.
+- Recalculates weighted average price automatically
+- Saves lot history to `holding_lots` table
 
-### Update projections
-In Supabase → Table Editor → `dividend_projections` → edit rows
+### ⟳ Check dividends (DRIP)
+Clicks Claude + web search to find confirmed dividend payments for all your holdings.
+- Shows pending DRIP events with reinvestment details
+- "Apply DRIP" button: logs the dividend + adds fractional shares to your position
+- Uses net-of-WHT amount for reinvestment calculation
 
-### Update current prices
-Edit the `PRICES` object in `src/app/page.tsx` and `src/app/holdings/page.tsx`
-(Future improvement: connect to a market data API)
+### Ex-dividend calendar
+Uses Claude + web search to find upcoming ex-dividend dates for all dividend payers.
+Color-coded urgency: red = within 7 days, amber = within 21 days, green = later.
+
+### Live dividend yields
+Holdings page fetches current yields via Claude + web search.
+Falls back to projected yield from the database if live fetch fails.
+
+### FX rates
+Click "↻ FX rates" on the dashboard to fetch live rates from frankfurter.app.
+Falls back to hardcoded defaults (USD 23.50, EUR 25.60) if unavailable.
 
 ---
 
-## Future improvements
+## Deploy
 
-- [ ] Connect to a free market data API (e.g. Yahoo Finance) for live prices
-- [ ] Add IBKR statement import (CSV upload)
-- [ ] Email/push alerts for upcoming ex-dividend dates
-- [ ] Multi-year projection charts
-- [ ] Tax report export for Czech tax return
+### 1. Supabase setup
+
+1. Create a new project at supabase.com
+2. SQL Editor → New query → paste `supabase-schema.sql` → Run
+3. Settings → API → copy Project URL and anon key
+
+### 2. Environment variables
+
+```bash
+cp .env.local.example .env.local
+# Fill in:
+NEXT_PUBLIC_SUPABASE_URL=your-project-url
+NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-key
+```
+
+### 3. Vercel deploy
+
+1. Push to GitHub
+2. Import at vercel.com
+3. Add the two env vars above
+4. Deploy — Next.js is auto-detected
+
+### 4. Local development
+
+```bash
+npm install
+npm run dev
+# Open http://localhost:3000
+```
+
+---
+
+## Updating prices
+
+Edit `src/lib/prices.ts` — the `PRICES` object maps ticker symbols to last-known prices in native currency.
+
+For live prices, connect a market data API (Yahoo Finance, Polygon.io) and replace `getPrice()` in `src/lib/prices.ts`.
+
+---
+
+## Database tables
+
+| Table | Purpose |
+|-------|---------|
+| `holdings` | Current positions with weighted avg price |
+| `holding_lots` | Individual purchase lots (for history) |
+| `dividends_received` | Logged dividend payments with DRIP tracking |
+| `dividend_projections` | Editable annual forecasts per ticker per year |

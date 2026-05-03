@@ -1,56 +1,70 @@
 -- ============================================================
--- Dividend Tracker — Supabase schema
+-- Divvy — Supabase schema (redesigned)
 -- Run this in your Supabase project: SQL Editor > New query
 -- ============================================================
 
 -- Holdings table
 create table if not exists holdings (
-  id            uuid primary key default gen_random_uuid(),
-  symbol        text not null,
-  name          text not null,
-  shares        numeric not null,
-  avg_price     numeric not null,
-  currency      text not null default 'USD',
-  exchange      text,
-  purchase_date date,
-  is_dividend_payer boolean default true,
-  created_at    timestamptz default now(),
-  updated_at    timestamptz default now()
-);
-
--- Dividends received log
-create table if not exists dividends_received (
   id              uuid primary key default gen_random_uuid(),
   symbol          text not null,
-  payment_date    date not null,
-  ex_date         date,
-  amount_per_share numeric not null,
-  shares_held     numeric not null,
-  gross_amount    numeric not null,
-  withholding_tax numeric default 0,
-  net_amount      numeric generated always as (gross_amount - withholding_tax) stored,
+  name            text not null,
+  shares          numeric not null,
+  avg_price       numeric not null,
   currency        text not null default 'USD',
+  exchange        text,
+  purchase_date   date,
+  is_dividend_payer boolean default true,
+  created_at      timestamptz default now(),
+  updated_at      timestamptz default now()
+);
+
+-- Individual purchase lots (for cost basis history)
+create table if not exists holding_lots (
+  id              uuid primary key default gen_random_uuid(),
+  holding_id      uuid references holdings(id) on delete cascade,
+  symbol          text not null,
+  shares          numeric not null,
+  purchase_price  numeric not null,
+  purchase_date   date,
   notes           text,
   created_at      timestamptz default now()
 );
 
--- Dividend projections (editable forecasts per holding per year)
+-- Dividends received log (with DRIP tracking)
+create table if not exists dividends_received (
+  id                uuid primary key default gen_random_uuid(),
+  symbol            text not null,
+  payment_date      date not null,
+  ex_date           date,
+  amount_per_share  numeric not null,
+  shares_held       numeric not null,
+  gross_amount      numeric not null,
+  withholding_tax   numeric default 0,
+  net_amount        numeric generated always as (gross_amount - withholding_tax) stored,
+  currency          text not null default 'USD',
+  drip_shares_added numeric,
+  drip_price        numeric,
+  notes             text,
+  created_at        timestamptz default now()
+);
+
+-- Dividend projections
 create table if not exists dividend_projections (
-  id                    uuid primary key default gen_random_uuid(),
-  symbol                text not null,
-  year                  int not null,
+  id                      uuid primary key default gen_random_uuid(),
+  symbol                  text not null,
+  year                    int not null,
   projected_div_per_share numeric,
-  projected_yield       numeric,
-  growth_rate           numeric default 0.04,
-  projected_total       numeric,
-  currency              text not null default 'USD',
-  notes                 text,
-  updated_at            timestamptz default now(),
+  projected_yield         numeric,
+  growth_rate             numeric default 0.04,
+  projected_total         numeric,
+  currency                text not null default 'USD',
+  notes                   text,
+  updated_at              timestamptz default now(),
   unique(symbol, year)
 );
 
 -- ============================================================
--- Seed data — your current portfolio (March 2026)
+-- Seed data — current portfolio (May 2026)
 -- ============================================================
 
 insert into holdings (symbol, name, shares, avg_price, currency, exchange, purchase_date, is_dividend_payer) values
@@ -75,12 +89,14 @@ insert into holdings (symbol, name, shares, avg_price, currency, exchange, purch
   ('SPYW',  'SPDR Euro Dividend Aristocrats', 45.0000,  27.77,   'EUR', 'IBIS2',  '2026-03-13', true),
   ('CSG1',  'CSG NV',                          3.0000,  33.47,   'EUR', 'AEB',    '2021-01-01', false),
   ('ERBAG', 'Erste Group Bank AG',            11.0000, 1850.82,  'CZK', 'PRA',    '2021-01-01', true),
-  ('MONET', 'Moneta Money Bank AS',           20.0000,  196.70,  'CZK', 'PRA',    '2021-01-01', true);
+  ('MONET', 'Moneta Money Bank AS',           20.0000,  196.70,  'CZK', 'PRA',    '2021-01-01', true)
+on conflict do nothing;
 
--- Dividends received so far in 2026
-insert into dividends_received (symbol, payment_date, ex_date, amount_per_share, shares_held, gross_amount, withholding_tax, currency) values
-  ('O',  '2026-03-13', '2026-02-27', 0.27, 20.225,  5.46,  0.82, 'USD'),
-  ('KO', '2026-04-01', '2026-03-13', 0.53, 53.952, 28.59,  4.29, 'USD');
+-- Dividends received
+insert into dividends_received (symbol, payment_date, ex_date, amount_per_share, shares_held, gross_amount, withholding_tax, currency, notes) values
+  ('O',  '2026-03-13', '2026-02-27', 0.27, 20.225,  5.46,  0.82, 'USD', 'Monthly dividend'),
+  ('KO', '2026-04-01', '2026-03-13', 0.53, 53.952, 28.59,  4.29, 'USD', 'Q1 2026 dividend')
+on conflict do nothing;
 
 -- 2027 projections
 insert into dividend_projections (symbol, year, projected_div_per_share, projected_yield, growth_rate, projected_total, currency) values
@@ -98,4 +114,5 @@ insert into dividend_projections (symbol, year, projected_div_per_share, project
   ('ICL',   2027,  0.28,  0.050, 0.00,   11.66, 'USD'),
   ('AAPL',  2027,  1.04,  0.004, 0.06,    8.37, 'USD'),
   ('ERBAG', 2027, 82.00,  0.032, 0.10,  902.00, 'CZK'),
-  ('MONET', 2027, 16.00,  0.080, 0.03,  320.00, 'CZK');
+  ('MONET', 2027, 16.00,  0.080, 0.03,  320.00, 'CZK')
+on conflict (symbol, year) do nothing;
