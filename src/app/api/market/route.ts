@@ -23,172 +23,230 @@ export interface MarketDataResponse {
   fetchedAt: string
 }
 
-const YF_HEADERS = {
-  'User-Agent':
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-  Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-  'Accept-Language': 'en-US,en;q=0.9',
+const UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+
+// ── Session/crumb ─────────────────────────────────────────────────────────────
+
+async function getCrumb(): Promise<{ crumb: string; cookie: string } | null> {
+  try {
+    const homeRes = await fetch('https://finance.yahoo.com/quote/AAPL/', {
+      headers: { 'User-Agent': UA, Accept: 'text/html' },
+      redirect: 'follow',
+    })
+    // Parse the set-cookie header — keep only name=value pairs, join with '; '
+    const setCookie = homeRes.headers.getSetCookie?.() ?? []
+    const cookie = setCookie.length
+      ? setCookie.map(c => c.split(';')[0]).join('; ')
+      : (homeRes.headers.get('set-cookie') ?? '')
+          .split(',')
+          .map(s => s.split(';')[0].trim())
+          .filter(s => s.includes('='))
+          .join('; ')
+
+    const crumbRes = await fetch('https://query2.finance.yahoo.com/v1/test/getcrumb', {
+      headers: { 'User-Agent': UA, Cookie: cookie },
+    })
+    if (!crumbRes.ok) return null
+    const crumb = (await crumbRes.text()).trim()
+    if (!crumb || crumb.startsWith('<') || crumb.length > 20) return null
+    return { crumb, cookie }
+  } catch {
+    return null
+  }
 }
 
-/**
- * Fetch a crumb + cookie from Yahoo Finance.
- * Yahoo now requires a valid session crumb for API calls.
- */
-async function getYahooCrumb(): Promise<{ crumb: string; cookie: string }> {
-  // Hit the consent/home page to get a cookie
-  const consentRes = await fetch('https://finance.yahoo.com/', {
-    headers: YF_HEADERS,
-    redirect: 'follow',
-  })
+// ── Batch quote fetch (needs crumb) ──────────────────────────────────────────
 
-  const cookie = consentRes.headers.get('set-cookie') ?? ''
-
-  // Now fetch the crumb endpoint
-  const crumbRes = await fetch('https://query2.finance.yahoo.com/v1/test/getcrumb', {
-    headers: {
-      ...YF_HEADERS,
-      Cookie: cookie,
-    },
-  })
-
-  if (!crumbRes.ok) {
-    throw new Error(`Crumb fetch failed: ${crumbRes.status}`)
-  }
-
-  const crumb = await crumbRes.text()
-  if (!crumb || crumb.includes('<')) {
-    throw new Error('Invalid crumb response')
-  }
-
-  return { crumb: crumb.trim(), cookie }
-}
-
-async function fetchYahooQuotes(
+async function fetchBatchQuotes(
   symbols: string[],
   crumb: string,
   cookie: string
-): Promise<Record<string, MarketQuote>> {
-  const joined = symbols.join(',')
+): Promise<Record<string, unknown>[] | null> {
   const fields = [
-    'symbol',
-    'longName',
-    'regularMarketPrice',
-    'regularMarketPreviousClose',
-    'regularMarketChangePercent',
-    'trailingAnnualDividendYield',
-    'trailingAnnualDividendRate',
-    'forwardAnnualDividendRate',
-    'payoutRatio',
-    'exDividendDate',
-    'fiftyTwoWeekHigh',
-    'fiftyTwoWeekLow',
-    'marketCap',
-    'currency',
+    'symbol', 'longName', 'regularMarketPrice', 'regularMarketPreviousClose',
+    'regularMarketChangePercent', 'trailingAnnualDividendYield',
+    'trailingAnnualDividendRate', 'forwardAnnualDividendRate',
+    'payoutRatio', 'exDividendDate', 'fiftyTwoWeekHigh', 'fiftyTwoWeekLow',
+    'marketCap', 'currency',
   ].join(',')
 
   const url =
     `https://query2.finance.yahoo.com/v8/finance/quote` +
-    `?symbols=${encodeURIComponent(joined)}` +
-    `&fields=${fields}` +
-    `&crumb=${encodeURIComponent(crumb)}` +
-    `&lang=en-US&region=US`
+    `?symbols=${encodeURIComponent(symbols.join(','))}` +
+    `&fields=${fields}&crumb=${encodeURIComponent(crumb)}&lang=en-US&region=US`
 
-  const res = await fetch(url, {
-    headers: {
-      ...YF_HEADERS,
-      Accept: 'application/json',
-      Cookie: cookie,
-    },
-    next: { revalidate: 0 },
-  })
-
-  if (!res.ok) {
-    throw new Error(`Yahoo Finance returned ${res.status}`)
-  }
-
-  const data = await res.json()
-  const result: Record<string, MarketQuote> = {}
-
-  const rawQuotes: Record<string, unknown>[] =
-    data?.quoteResponse?.result ?? []
-
-  for (const q of rawQuotes) {
-    const sym = q.symbol as string
-    result[sym] = {
-      symbol: sym,
-      price: (q.regularMarketPrice as number) ?? 0,
-      previousClose: (q.regularMarketPreviousClose as number) ?? 0,
-      changePercent: (q.regularMarketChangePercent as number) ?? 0,
-      dividendYield: (q.trailingAnnualDividendYield as number | null) ?? null,
-      trailingAnnualDividendRate:
-        (q.trailingAnnualDividendRate as number | null) ?? null,
-      forwardAnnualDividendRate:
-        (q.forwardAnnualDividendRate as number | null) ?? null,
-      payoutRatio: (q.payoutRatio as number | null) ?? null,
-      exDividendDate: (q.exDividendDate as number | null) ?? null,
-      fiftyTwoWeekHigh: (q.fiftyTwoWeekHigh as number) ?? 0,
-      fiftyTwoWeekLow: (q.fiftyTwoWeekLow as number) ?? 0,
-      marketCap: (q.marketCap as number | null) ?? null,
-      currency: (q.currency as string) ?? 'USD',
-      longName: (q.longName as string | null) ?? null,
+  try {
+    const res = await fetch(url, {
+      headers: { 'User-Agent': UA, Accept: 'application/json', Cookie: cookie },
+      next: { revalidate: 0 },
+    })
+    if (!res.ok) {
+      console.error(`[market] batch fetch ${res.status}: ${await res.text().catch(() => '')}`)
+      return null
     }
+    const data = await res.json()
+    return data?.quoteResponse?.result ?? null
+  } catch {
+    return null
   }
-
-  // Mark any symbols that came back empty
-  for (const sym of symbols) {
-    if (!result[sym]) {
-      result[sym] = {
-        symbol: sym,
-        price: 0,
-        previousClose: 0,
-        changePercent: 0,
-        dividendYield: null,
-        trailingAnnualDividendRate: null,
-        forwardAnnualDividendRate: null,
-        payoutRatio: null,
-        exDividendDate: null,
-        fiftyTwoWeekHigh: 0,
-        fiftyTwoWeekLow: 0,
-        marketCap: null,
-        currency: 'USD',
-        longName: null,
-        error: 'Not found',
-      }
-    }
-  }
-
-  return result
 }
+
+// ── Per-symbol chart fallback (no auth needed) ────────────────────────────────
+
+async function fetchChartQuote(symbol: string): Promise<Partial<MarketQuote> | null> {
+  try {
+    const url =
+      `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}` +
+      `?interval=1d&range=5d&includePrePost=false`
+    const res = await fetch(url, {
+      headers: { 'User-Agent': UA, Accept: 'application/json' },
+      next: { revalidate: 0 },
+    })
+    if (!res.ok) return null
+    const data = await res.json()
+    const meta = data?.chart?.result?.[0]?.meta
+    if (!meta?.regularMarketPrice) return null
+
+    const price: number = meta.regularMarketPrice
+    const prev: number = meta.previousClose ?? meta.chartPreviousClose ?? price
+    return {
+      symbol,
+      price,
+      previousClose: prev,
+      changePercent: prev ? ((price - prev) / prev) * 100 : 0,
+      currency: meta.currency ?? 'USD',
+      longName: meta.longName ?? meta.shortName ?? null,
+      fiftyTwoWeekHigh: meta.fiftyTwoWeekHigh ?? 0,
+      fiftyTwoWeekLow: meta.fiftyTwoWeekLow ?? 0,
+      dividendYield: null,
+      trailingAnnualDividendRate: null,
+      forwardAnnualDividendRate: null,
+      payoutRatio: null,
+      exDividendDate: null,
+      marketCap: null,
+    }
+  } catch {
+    return null
+  }
+}
+
+// ── Per-symbol dividend data via quoteSummary ─────────────────────────────────
+
+async function fetchDividendSummary(
+  symbol: string,
+  cookie: string
+): Promise<Partial<MarketQuote> | null> {
+  try {
+    const url =
+      `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(symbol)}` +
+      `?modules=summaryDetail`
+    const res = await fetch(url, {
+      headers: { 'User-Agent': UA, Accept: 'application/json', Cookie: cookie },
+      next: { revalidate: 0 },
+    })
+    if (!res.ok) return null
+    const data = await res.json()
+    const sd = data?.quoteSummary?.result?.[0]?.summaryDetail
+    if (!sd) return null
+    return {
+      dividendYield: sd.trailingAnnualDividendYield?.raw ?? null,
+      trailingAnnualDividendRate: sd.trailingAnnualDividendRate?.raw ?? null,
+      forwardAnnualDividendRate: sd.dividendRate?.raw ?? null,
+      exDividendDate: sd.exDividendDate?.raw ?? null,
+      payoutRatio: sd.payoutRatio?.raw ?? null,
+    }
+  } catch {
+    return null
+  }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function emptyQuote(symbol: string, err = 'Not found'): MarketQuote {
+  return {
+    symbol, price: 0, previousClose: 0, changePercent: 0,
+    dividendYield: null, trailingAnnualDividendRate: null,
+    forwardAnnualDividendRate: null, payoutRatio: null, exDividendDate: null,
+    fiftyTwoWeekHigh: 0, fiftyTwoWeekLow: 0, marketCap: null,
+    currency: 'USD', longName: null, error: err,
+  }
+}
+
+function rawToQuote(q: Record<string, unknown>): MarketQuote {
+  return {
+    symbol: q.symbol as string,
+    price: (q.regularMarketPrice as number) ?? 0,
+    previousClose: (q.regularMarketPreviousClose as number) ?? 0,
+    changePercent: (q.regularMarketChangePercent as number) ?? 0,
+    dividendYield: (q.trailingAnnualDividendYield as number | null) ?? null,
+    trailingAnnualDividendRate: (q.trailingAnnualDividendRate as number | null) ?? null,
+    forwardAnnualDividendRate: (q.forwardAnnualDividendRate as number | null) ?? null,
+    payoutRatio: (q.payoutRatio as number | null) ?? null,
+    exDividendDate: (q.exDividendDate as number | null) ?? null,
+    fiftyTwoWeekHigh: (q.fiftyTwoWeekHigh as number) ?? 0,
+    fiftyTwoWeekLow: (q.fiftyTwoWeekLow as number) ?? 0,
+    marketCap: (q.marketCap as number | null) ?? null,
+    currency: (q.currency as string) ?? 'USD',
+    longName: (q.longName as string | null) ?? null,
+  }
+}
+
+// ── Route handler ─────────────────────────────────────────────────────────────
 
 export async function POST(req: NextRequest) {
   try {
     const { symbols } = (await req.json()) as { symbols: string[] }
-
     if (!symbols?.length) {
       return NextResponse.json({ error: 'symbols array required' }, { status: 400 })
     }
 
-    // Get crumb + cookie first
-    const { crumb, cookie } = await getYahooCrumb()
+    const result: Record<string, MarketQuote> = {}
 
-    // Batch into groups of 50
-    const BATCH = 50
-    const batches: string[][] = []
-    for (let i = 0; i < symbols.length; i += BATCH) {
-      batches.push(symbols.slice(i, i + BATCH))
+    // Step 1: attempt crumb-authenticated batch fetch
+    const session = await getCrumb()
+
+    if (session) {
+      const BATCH = 50
+      for (let i = 0; i < symbols.length; i += BATCH) {
+        const batch = symbols.slice(i, i + BATCH)
+        const raw = await fetchBatchQuotes(batch, session.crumb, session.cookie)
+        if (raw) {
+          for (const q of raw) {
+            const sym = q.symbol as string
+            if (sym) result[sym] = rawToQuote(q)
+          }
+        }
+      }
     }
 
-    const results = await Promise.all(
-      batches.map(b => fetchYahooQuotes(b, crumb, cookie))
-    )
-    const merged = Object.assign({}, ...results)
+    // Step 2: for any symbols with no price, fall back to chart API
+    const missing = symbols.filter(s => !result[s] || result[s].price === 0)
+    if (missing.length > 0) {
+      console.log(`[market] chart fallback for: ${missing.join(', ')}`)
+      await Promise.all(
+        missing.map(async sym => {
+          const chart = await fetchChartQuote(sym)
+          if (chart?.price) {
+            // Optionally enrich dividend data via quoteSummary
+            const div = session ? await fetchDividendSummary(sym, session.cookie) : null
+            result[sym] = { ...emptyQuote(sym), ...chart, ...(div ?? {}) }
+          } else {
+            result[sym] = emptyQuote(sym)
+          }
+        })
+      )
+    }
 
-    const response: MarketDataResponse = {
-      quotes: merged,
+    // Step 3: fill anything still missing
+    for (const sym of symbols) {
+      if (!result[sym]) result[sym] = emptyQuote(sym)
+    }
+
+    return NextResponse.json({
+      quotes: result,
       fetchedAt: new Date().toISOString(),
-    }
-
-    return NextResponse.json(response)
+    } satisfies MarketDataResponse)
   } catch (err) {
     console.error('[market route]', err)
     return NextResponse.json({ error: String(err) }, { status: 500 })
