@@ -25,23 +25,51 @@ export default function AddPositionModal({
 
   useEffect(() => {
     const symbol = form.symbol.trim().toUpperCase()
-    if (!symbol) { setLookupStatus('idle'); return }
+    if (symbol.length < 1) { setLookupStatus('idle'); return }
+
     if (debounceRef.current) clearTimeout(debounceRef.current)
     debounceRef.current = setTimeout(async () => {
       setLookingUp(true)
       setLookupStatus('idle')
       try {
-        const res = await fetch(
-          `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(symbol)}&quotesCount=5&newsCount=0`,
-          { headers: { Accept: 'application/json' } }
-        )
+        const res = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: 'claude-sonnet-4-20250514',
+            max_tokens: 200,
+            tools: [{ type: 'web_search_20250305', name: 'web_search' }],
+            messages: [{
+              role: 'user',
+              content: `What is the full official company name for stock ticker "${symbol}"? Reply with ONLY a JSON object like: {"name":"Coca-Cola Co","exchange":"NYSE","currency":"USD","is_dividend_payer":true}. Use null for unknown fields. No markdown, no explanation.`,
+            }],
+          }),
+        })
         const data = await res.json()
-        const quotes = data?.finance?.result?.[0]?.quotes ?? []
-        const exact = quotes.find((q: { symbol: string }) => q.symbol === symbol)
-        const match = exact ?? quotes[0]
-        if (match?.longname || match?.shortname) {
-          setForm(f => ({ ...f, name: match.longname || match.shortname }))
-          setLookupStatus('found')
+        const textBlock = [...(data.content ?? [])].reverse().find(
+          (b: { type: string }) => b.type === 'text'
+        )
+        if (textBlock?.text) {
+          const clean = textBlock.text.replace(/```json|```/g, '').trim()
+          // Extract JSON from the text (in case there's surrounding prose)
+          const jsonMatch = clean.match(/\{[\s\S]*\}/)
+          if (jsonMatch) {
+            const parsed = JSON.parse(jsonMatch[0])
+            if (parsed.name) {
+              setForm(f => ({
+                ...f,
+                name: parsed.name,
+                exchange: f.exchange || parsed.exchange || '',
+                currency: f.currency || parsed.currency || 'USD',
+                is_dividend_payer: parsed.is_dividend_payer ?? f.is_dividend_payer,
+              }))
+              setLookupStatus('found')
+            } else {
+              setLookupStatus('notfound')
+            }
+          } else {
+            setLookupStatus('notfound')
+          }
         } else {
           setLookupStatus('notfound')
         }
@@ -50,9 +78,10 @@ export default function AddPositionModal({
       } finally {
         setLookingUp(false)
       }
-    }, 600)
+    }, 700)
+
     return () => { if (debounceRef.current) clearTimeout(debounceRef.current) }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form.symbol])
 
   const handleSubmit = async () => {
@@ -89,7 +118,7 @@ export default function AddPositionModal({
               style={{ ...inputStyle, paddingRight: 28 }}
               placeholder="e.g. KO"
               value={form.symbol}
-              onChange={e => { set('symbol', e.target.value); setLookupStatus('idle') }}
+              onChange={e => { set('symbol', e.target.value.toUpperCase()); setLookupStatus('idle') }}
             />
             <span style={{ position: 'absolute', right: 9, top: '50%', transform: 'translateY(-50%)', fontSize: 12 }}>
               {lookingUp && <span style={{ color: 'var(--text3)' }}>⟳</span>}
@@ -105,7 +134,10 @@ export default function AddPositionModal({
           </select>
         </Field>
 
-        <Field label={`Company name${lookingUp ? ' — looking up…' : ''}`} span="2">
+        <Field
+          label={lookingUp ? 'Company name — looking up…' : 'Company name'}
+          span="2"
+        >
           <input
             style={{
               ...inputStyle,
