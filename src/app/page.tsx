@@ -7,22 +7,24 @@ import LogDividendModal from '@/components/LogDividendModal'
 import DripCheckModal from '@/components/DripCheckModal'
 import { supabase, Holding, DividendReceived, DividendProjection } from '@/lib/supabase'
 import { toCZK, fmtCZK, fmtDate, DEFAULT_FX, fetchFxRates } from '@/lib/fx'
-import { getPrice } from '@/lib/prices'
+import { useMarketData } from '@/hooks/useMarketData'
 
 const CURRENT_YEAR = new Date().getFullYear()
 
 export default function Dashboard() {
-  const [holdings, setHoldings]     = useState<Holding[]>([])
-  const [received, setReceived]     = useState<DividendReceived[]>([])
+  const [holdings, setHoldings]       = useState<Holding[]>([])
+  const [received, setReceived]       = useState<DividendReceived[]>([])
   const [projections, setProjections] = useState<DividendProjection[]>([])
-  const [fx, setFx]                 = useState(DEFAULT_FX)
-  const [loading, setLoading]       = useState(true)
-  const [fxLoading, setFxLoading]   = useState(false)
-  const [fxTs, setFxTs]             = useState<string | null>(null)
+  const [fx, setFx]                   = useState(DEFAULT_FX)
+  const [loading, setLoading]         = useState(true)
+  const [fxLoading, setFxLoading]     = useState(false)
+  const [fxTs, setFxTs]               = useState<string | null>(null)
 
-  const [showAdd, setShowAdd]       = useState(false)
-  const [showLog, setShowLog]       = useState(false)
-  const [showDrip, setShowDrip]     = useState(false)
+  const [showAdd, setShowAdd]   = useState(false)
+  const [showLog, setShowLog]   = useState(false)
+  const [showDrip, setShowDrip] = useState(false)
+
+  const market = useMarketData()
 
   const load = useCallback(async () => {
     const [h, r, p] = await Promise.all([
@@ -34,9 +36,25 @@ export default function Dashboard() {
     if (r.data) setReceived(r.data)
     if (p.data) setProjections(p.data)
     setLoading(false)
+    return h.data ?? []
   }, [])
 
-  useEffect(() => { load() }, [load])
+  // Initial load then auto-fetch market data
+  useEffect(() => {
+    load().then(h => {
+      if (h.length > 0) {
+        market.refresh(h.map((hh: Holding) => hh.symbol))
+      }
+    })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const refreshAll = async () => {
+    const h = await load()
+    if (h.length > 0) {
+      await market.refresh(h.map((hh: Holding) => hh.symbol))
+    }
+  }
 
   const refreshFx = async () => {
     setFxLoading(true)
@@ -48,7 +66,7 @@ export default function Dashboard() {
 
   // ── Metrics ──────────────────────────────────────────────
   const totalValueCZK = holdings.reduce((sum, h) => {
-    const price = getPrice(h.symbol, h.avg_price)
+    const price = market.getPrice(h.symbol, h.avg_price)
     return sum + toCZK(price * h.shares, h.currency, fx)
   }, 0)
 
@@ -57,19 +75,39 @@ export default function Dashboard() {
 
   const unrealizedPLCZK = totalValueCZK - totalCostCZK
 
-  const ytdReceived = received.filter(d => {
-    const year = new Date(d.payment_date).getFullYear()
-    return year === CURRENT_YEAR
-  })
+  const ytdReceived = received.filter(d =>
+    new Date(d.payment_date).getFullYear() === CURRENT_YEAR
+  )
   const ytdGrossCZK = ytdReceived.reduce((sum, d) => sum + toCZK(d.gross_amount, d.currency, fx), 0)
   const ytdNetCZK   = ytdReceived.reduce((sum, d) => sum + toCZK(d.net_amount,   d.currency, fx), 0)
 
-  const projGrossCZK = projections.reduce((sum, p) => sum + toCZK(p.projected_total ?? 0, p.currency, fx), 0)
+  // Use live annual div * shares for projected income when available, else fall back to DB projections
+  const projGrossCZK = holdings.reduce((sum, h) => {
+    const liveAnnual = market.getAnnualDiv(h.symbol)
+    if (liveAnnual != null) {
+      return sum + toCZK(liveAnnual * h.shares, h.currency, fx)
+    }
+    const proj = projections.find(p => p.symbol === h.symbol)
+    return sum + toCZK(proj?.projected_total ?? 0, proj?.currency ?? h.currency, fx)
+  }, 0)
 
-  const portfolioYield    = totalValueCZK > 0 ? (projGrossCZK / totalValueCZK) * 100 : 0
-  const portfolioYieldCost = totalCostCZK > 0 ? (projGrossCZK / totalCostCZK) * 100 : 0
-
+  const portfolioYield     = totalValueCZK > 0 ? (projGrossCZK / totalValueCZK) * 100 : 0
+  const portfolioYieldCost = totalCostCZK  > 0 ? (projGrossCZK / totalCostCZK)  * 100 : 0
   const divPayers = holdings.filter(h => h.is_dividend_payer).length
+
+  const marketStatusColor = {
+    idle: 'var(--text3)',
+    loading: 'var(--amber)',
+    done: 'var(--green)',
+    error: 'var(--red)',
+  }[market.state]
+
+  const marketStatusText = {
+    idle: '',
+    loading: '⟳ Fetching live prices…',
+    done: `✓ Prices live · ${market.fetchedAt ? new Date(market.fetchedAt).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) : ''}`,
+    error: `⚠ ${market.errorMsg ?? 'Price fetch failed'}`,
+  }[market.state]
 
   if (loading) return (
     <div style={{ display: 'flex' }}>
@@ -91,9 +129,9 @@ export default function Dashboard() {
     <div style={{ display: 'flex' }}>
       <Sidebar />
 
-      {showAdd  && <AddPositionModal onClose={() => setShowAdd(false)} onSaved={load} />}
-      {showLog  && <LogDividendModal onClose={() => setShowLog(false)} onSaved={load} />}
-      {showDrip && <DripCheckModal holdings={holdings} onClose={() => setShowDrip(false)} onSaved={load} />}
+      {showAdd  && <AddPositionModal onClose={() => setShowAdd(false)}  onSaved={refreshAll} />}
+      {showLog  && <LogDividendModal onClose={() => setShowLog(false)}  onSaved={load} />}
+      {showDrip && <DripCheckModal  holdings={holdings} onClose={() => setShowDrip(false)} onSaved={load} />}
 
       <main style={{ marginLeft: 'var(--sidebar-w)', flex: 1, padding: '28px 36px', maxWidth: 1160 }}>
 
@@ -109,22 +147,26 @@ export default function Dashboard() {
             <div style={{ fontSize: 11, color: 'var(--text3)', marginTop: 4, display: 'flex', alignItems: 'center', gap: 10 }}>
               {new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}
               &nbsp;·&nbsp;All values in CZK
-              {fxTs && <span style={{ color: 'var(--green)' }}>· FX updated {fxTs}</span>}
+              {fxTs && <span style={{ color: 'var(--green)' }}>· FX {fxTs}</span>}
+              {marketStatusText && (
+                <span style={{ color: marketStatusColor }}>{marketStatusText}</span>
+              )}
             </div>
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
             <button onClick={refreshFx} disabled={fxLoading} style={btnStyle('secondary')}>
-              {fxLoading ? '⟳ Updating…' : '↻ FX rates'}
+              {fxLoading ? '⟳ FX…' : '↻ FX rates'}
             </button>
-            <button onClick={() => setShowAdd(true)} style={btnStyle('secondary')}>
-              + Add position
+            <button
+              onClick={() => market.refresh(holdings.map(h => h.symbol))}
+              disabled={market.state === 'loading'}
+              style={btnStyle('secondary')}
+            >
+              {market.state === 'loading' ? '⟳ Loading…' : '↻ Refresh prices'}
             </button>
-            <button onClick={() => setShowLog(true)} style={btnStyle('secondary')}>
-              + Log dividend
-            </button>
-            <button onClick={() => setShowDrip(true)} style={btnStyle('primary')}>
-              ⟳ Check dividends
-            </button>
+            <button onClick={() => setShowAdd(true)}  style={btnStyle('secondary')}>+ Add position</button>
+            <button onClick={() => setShowLog(true)}  style={btnStyle('secondary')}>+ Log dividend</button>
+            <button onClick={() => setShowDrip(true)} style={btnStyle('primary')}>⟳ Check dividends</button>
           </div>
         </div>
 
@@ -146,9 +188,9 @@ export default function Dashboard() {
               accent: 'var(--green)',
             },
             {
-              label: `${CURRENT_YEAR + 1} projected gross`,
+              label: 'Est. annual income',
               value: fmtCZK(projGrossCZK),
-              sub: <Badge variant="amber">pre-withholding tax</Badge>,
+              sub: <Badge variant="amber">{market.state === 'done' ? 'live data' : 'projected'}</Badge>,
               accent: 'var(--amber)',
             },
             {
@@ -165,12 +207,8 @@ export default function Dashboard() {
             },
           ].map((m, i) => (
             <div key={i} style={{
-              background: 'var(--bg2)',
-              border: '1px solid var(--border)',
-              borderRadius: 10,
-              padding: '16px 18px',
-              position: 'relative',
-              overflow: 'hidden',
+              background: 'var(--bg2)', border: '1px solid var(--border)',
+              borderRadius: 10, padding: '16px 18px', position: 'relative', overflow: 'hidden',
             }}>
               <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 2, background: m.accent, opacity: 0.8 }} />
               <div style={{ fontSize: 10, letterSpacing: '0.09em', textTransform: 'uppercase', color: 'var(--text3)', marginBottom: 7, fontWeight: 500 }}>
@@ -184,26 +222,23 @@ export default function Dashboard() {
           ))}
         </div>
 
-        {/* Holdings table */}
-        <HoldingsTable holdings={holdings} projections={projections} fx={fx} divPayers={divPayers} />
-
-        {/* Dividend log */}
+        <HoldingsTable holdings={holdings} projections={projections} fx={fx} divPayers={divPayers} market={market} />
         <DividendLog received={received} fx={fx} ytdGrossCZK={ytdGrossCZK} />
-
       </main>
     </div>
   )
 }
 
-// ── Holdings Table ────────────────────────────────────────────────────────────
+// ── Holdings Table ─────────────────────────────────────────────────────────────
 
 function HoldingsTable({
-  holdings, projections, fx, divPayers
+  holdings, projections, fx, divPayers, market,
 }: {
   holdings: Holding[]
   projections: DividendProjection[]
   fx: Record<string, number>
   divPayers: number
+  market: ReturnType<typeof import('@/hooks/useMarketData').useMarketData>
 }) {
   return (
     <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 10, overflow: 'hidden', marginBottom: 14 }}>
@@ -212,13 +247,14 @@ function HoldingsTable({
         <div style={{ display: 'flex', gap: 6 }}>
           <Badge variant="green">{divPayers} dividend payers</Badge>
           <Badge variant="gray">{holdings.length - divPayers} non-div</Badge>
+          {market.state === 'done' && <Badge variant="live">LIVE prices</Badge>}
         </div>
       </div>
       <div style={{ overflowX: 'auto' }}>
         <table style={{ width: '100%', borderCollapse: 'collapse' }}>
           <thead>
             <tr>
-              {['Company', 'Shares', 'Avg price', 'Last price', 'Mkt value (CZK)', 'Unr. P&L (CZK)', 'Div yield', 'Est. annual div (CZK)'].map((h, i) => (
+              {['Company', 'Shares', 'Avg price', 'Last price', 'Chg%', 'Mkt value (CZK)', 'Unr. P&L (CZK)', 'Div yield', 'Annual div (CZK)'].map((h, i) => (
                 <th key={h} style={{
                   fontSize: 9, letterSpacing: '0.09em', textTransform: 'uppercase',
                   color: 'var(--text3)', padding: '8px 14px',
@@ -230,17 +266,24 @@ function HoldingsTable({
           </thead>
           <tbody>
             {holdings.map(h => {
-              const price    = getPrice(h.symbol, h.avg_price)
-              const mktCZK   = toCZK(price * h.shares, h.currency, fx)
-              const costCZK  = toCZK(h.avg_price * h.shares, h.currency, fx)
-              const plCZK    = mktCZK - costCZK
-              const proj     = projections.find(p => p.symbol === h.symbol)
-              const annualCZK = proj ? toCZK(proj.projected_total ?? 0, proj.currency, fx) : null
-              const yieldPct  = proj?.projected_yield ? proj.projected_yield * 100 : null
+              const price      = market.getPrice(h.symbol, h.avg_price)
+              const mktCZK     = toCZK(price * h.shares, h.currency, fx)
+              const costCZK    = toCZK(h.avg_price * h.shares, h.currency, fx)
+              const plCZK      = mktCZK - costCZK
+              const chgPct     = market.quotes[h.symbol]?.changePercent ?? null
+
+              const liveYield  = market.getYield(h.symbol)
+              const proj       = projections.find(p => p.symbol === h.symbol)
+              const projYield  = proj?.projected_yield ?? null
+              const displayY   = liveYield ?? projYield
+
+              const liveAnnual = market.getAnnualDiv(h.symbol)
+              const annualCZK  = liveAnnual != null
+                ? toCZK(liveAnnual * h.shares, h.currency, fx)
+                : proj ? toCZK(proj.projected_total ?? 0, proj.currency, fx) : null
 
               return (
                 <tr key={h.id}
-                  style={{ transition: 'background 0.1s' }}
                   onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg3)')}
                   onMouseLeave={e => (e.currentTarget.style.background = '')}
                 >
@@ -252,21 +295,35 @@ function HoldingsTable({
                     </div>
                   </td>
                   <td style={tdR}>{h.shares.toFixed(4)}</td>
-                  <td style={tdR}>{h.avg_price.toLocaleString()} <span style={{ fontSize: 10, color: 'var(--text3)' }}>{h.currency}</span></td>
-                  <td style={tdR}>{price.toLocaleString()} <span style={{ fontSize: 10, color: 'var(--text3)' }}>{h.currency}</span></td>
+                  <td style={tdR}>
+                    {h.avg_price.toLocaleString()}
+                    <span style={{ fontSize: 10, color: 'var(--text3)', marginLeft: 3 }}>{h.currency}</span>
+                  </td>
+                  <td style={tdR}>
+                    {market.state === 'loading'
+                      ? <span style={{ color: 'var(--text4)' }}>…</span>
+                      : <>{price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}<span style={{ fontSize: 10, color: 'var(--text3)', marginLeft: 3 }}>{h.currency}</span></>
+                    }
+                  </td>
+                  <td style={{ ...tdR, color: chgPct == null ? 'var(--text4)' : chgPct >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                    {chgPct != null ? `${chgPct >= 0 ? '+' : ''}${chgPct.toFixed(2)}%` : '—'}
+                  </td>
                   <td style={{ ...tdR, fontFamily: "'DM Mono', monospace", fontSize: 12 }}>{fmtCZK(mktCZK)}</td>
                   <td style={{ ...tdR, fontFamily: "'DM Mono', monospace", fontSize: 12, color: plCZK >= 0 ? 'var(--green)' : 'var(--red)' }}>
                     {plCZK >= 0 ? '+' : ''}{fmtCZK(plCZK)}
                   </td>
                   <td style={tdR}>
-                    {yieldPct != null ? (
+                    {displayY != null ? (
                       <span style={{
-                        color: yieldPct >= 4 ? 'var(--green)' : yieldPct >= 2 ? 'var(--amber)' : 'var(--text3)',
+                        color: displayY >= 0.04 ? 'var(--green)' : displayY >= 0.02 ? 'var(--amber)' : 'var(--text3)',
                         fontFamily: "'DM Mono', monospace", fontSize: 12,
                       }}>
-                        {yieldPct.toFixed(2)}%
+                        {(displayY * 100).toFixed(2)}%
+                        {liveYield != null && <span style={{ marginLeft: 4 }}><Badge variant="live">LIVE</Badge></span>}
                       </span>
-                    ) : <span style={{ color: 'var(--text4)' }}>—</span>}
+                    ) : (
+                      <span style={{ color: 'var(--text4)' }}>—</span>
+                    )}
                   </td>
                   <td style={{ ...tdR, fontFamily: "'DM Mono', monospace", fontSize: 12, color: annualCZK ? 'var(--green)' : 'var(--text4)' }}>
                     {annualCZK ? `~${fmtCZK(annualCZK)}` : '—'}
@@ -281,11 +338,9 @@ function HoldingsTable({
   )
 }
 
-// ── Dividend Log ──────────────────────────────────────────────────────────────
+// ── Dividend Log ───────────────────────────────────────────────────────────────
 
-function DividendLog({
-  received, fx, ytdGrossCZK
-}: {
+function DividendLog({ received, fx, ytdGrossCZK }: {
   received: DividendReceived[]
   fx: Record<string, number>
   ytdGrossCZK: number
@@ -299,9 +354,7 @@ function DividendLog({
         onClick={() => setExpanded(e => !e)}
         style={{ padding: '12px 18px', borderBottom: expanded ? '1px solid var(--border)' : 'none', display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'var(--bg3)', cursor: 'pointer' }}
       >
-        <span style={{ fontSize: 11, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--text2)', fontWeight: 500 }}>
-          Dividend log
-        </span>
+        <span style={{ fontSize: 11, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--text2)', fontWeight: 500 }}>Dividend log</span>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           <Badge variant="green">YTD: {fmtCZK(ytdGrossCZK, 2)}</Badge>
           <span style={{ color: 'var(--text3)', fontSize: 14 }}>{expanded ? '▴' : '▾'}</span>
@@ -310,9 +363,7 @@ function DividendLog({
       {expanded && (
         <div style={{ padding: '4px 18px' }}>
           {received.length === 0 ? (
-            <div style={{ padding: '18px 0', color: 'var(--text3)', fontSize: 12 }}>
-              No dividends logged yet. Click "+ Log dividend" to add one.
-            </div>
+            <div style={{ padding: '18px 0', color: 'var(--text3)', fontSize: 12 }}>No dividends logged yet.</div>
           ) : recent.map(d => (
             <div key={d.id} style={{
               display: 'flex', alignItems: 'center', gap: 12,
@@ -342,13 +393,11 @@ function DividendLog({
   )
 }
 
-// ── Styles ───────────────────────────────────────────────────────────────────
+// ── Shared styles ──────────────────────────────────────────────────────────────
 
 const tdR: React.CSSProperties = {
-  padding: '9px 14px',
-  borderBottom: '1px solid var(--border)',
-  textAlign: 'right',
-  color: 'var(--text2)',
+  padding: '9px 14px', borderBottom: '1px solid var(--border)',
+  textAlign: 'right', color: 'var(--text2)',
 }
 
 function btnStyle(variant: 'primary' | 'secondary'): React.CSSProperties {
