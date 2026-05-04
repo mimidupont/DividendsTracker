@@ -10,6 +10,7 @@ import DripCheckModal from '@/components/DripCheckModal'
 import { supabase, Holding, DividendProjection } from '@/lib/supabase'
 import { toCZK, fmtCZK, DEFAULT_FX, fetchFxRates } from '@/lib/fx'
 import { useMarketData } from '@/hooks/useMarketData'
+import { computeProjectedTotal } from '@/lib/projections'
 
 const CURRENT_YEAR = new Date().getFullYear()
 
@@ -73,12 +74,16 @@ export default function HoldingsPage() {
   }, 0)
   const totalCostCZK    = holdings.reduce((sum, h) => sum + toCZK(h.avg_price * h.shares, h.currency, fx), 0)
   const unrealizedPLCZK = totalValueCZK - totalCostCZK
-  const projGrossCZK    = holdings.reduce((sum, h) => {
+  const projGrossCZK = holdings.reduce((sum, h) => {
     const liveAnnual = market.getAnnualDiv(h.symbol)
-    if (liveAnnual != null) return sum + toCZK(liveAnnual * h.shares, h.currency, fx)
+    if (liveAnnual != null) {
+      return sum + toCZK(liveAnnual * h.shares, h.currency, fx)
+    }
     const proj = projections.find(p => p.symbol === h.symbol)
-    return sum + toCZK(proj?.projected_total ?? 0, proj?.currency ?? h.currency, fx)
-  }, 0)
+    if (!proj) return sum
+    return sum + toCZK(computeProjectedTotal(proj, holdings), proj.currency, fx)
+}, 0)
+
   const portfolioYield     = totalValueCZK > 0 ? (projGrossCZK / totalValueCZK) * 100 : 0
   const portfolioYieldCost = totalCostCZK  > 0 ? (projGrossCZK / totalCostCZK)  * 100 : 0
   const divPayers          = holdings.filter(h => h.is_dividend_payer).length
@@ -189,9 +194,9 @@ export default function HoldingsPage() {
                   const proj       = projections.find(p => p.symbol === h.symbol)
                   const displayY   = liveYield ?? proj?.projected_yield ?? null
                   const liveAnnual = market.getAnnualDiv(h.symbol)
-                  const annualCZK  = liveAnnual != null
+                  const annualCZK = liveAnnual != null
                     ? toCZK(liveAnnual * h.shares, h.currency, fx)
-                    : proj ? toCZK(proj.projected_total ?? 0, proj.currency, fx) : null
+                    : proj ? toCZK(computeProjectedTotal(proj, holdings), proj.currency, fx) : null
 
                   return (
                     <tr key={h.id}
