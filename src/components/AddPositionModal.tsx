@@ -15,9 +15,9 @@ export default function AddPositionModal({
     symbol: '', name: '', shares: '', avg_price: '',
     currency: 'USD', exchange: '', purchase_date: '', is_dividend_payer: true,
   })
-  const [saving, setSaving] = useState(false)
-  const [error, setError] = useState('')
-  const [lookingUp, setLookingUp] = useState(false)
+  const [saving, setSaving]             = useState(false)
+  const [error, setError]               = useState('')
+  const [lookingUp, setLookingUp]       = useState(false)
   const [lookupStatus, setLookupStatus] = useState<'idle' | 'found' | 'notfound'>('idle')
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -32,44 +32,27 @@ export default function AddPositionModal({
       setLookingUp(true)
       setLookupStatus('idle')
       try {
-        const res = await fetch('https://api.anthropic.com/v1/messages', {
+        // Use our existing /api/market route to look up the symbol
+        const res = await fetch('/api/market', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            model: 'claude-sonnet-4-20250514',
-            max_tokens: 200,
-            tools: [{ type: 'web_search_20250305', name: 'web_search' }],
-            messages: [{
-              role: 'user',
-              content: `What is the full official company name for stock ticker "${symbol}"? Reply with ONLY a JSON object like: {"name":"Coca-Cola Co","exchange":"NYSE","currency":"USD","is_dividend_payer":true}. Use null for unknown fields. No markdown, no explanation.`,
-            }],
-          }),
+          body: JSON.stringify({ symbols: [symbol] }),
         })
+        if (!res.ok) throw new Error('lookup failed')
         const data = await res.json()
-        const textBlock = [...(data.content ?? [])].reverse().find(
-          (b: { type: string }) => b.type === 'text'
-        )
-        if (textBlock?.text) {
-          const clean = textBlock.text.replace(/```json|```/g, '').trim()
-          // Extract JSON from the text (in case there's surrounding prose)
-          const jsonMatch = clean.match(/\{[\s\S]*\}/)
-          if (jsonMatch) {
-            const parsed = JSON.parse(jsonMatch[0])
-            if (parsed.name) {
-              setForm(f => ({
-                ...f,
-                name: parsed.name,
-                exchange: f.exchange || parsed.exchange || '',
-                currency: f.currency || parsed.currency || 'USD',
-                is_dividend_payer: parsed.is_dividend_payer ?? f.is_dividend_payer,
-              }))
-              setLookupStatus('found')
-            } else {
-              setLookupStatus('notfound')
-            }
-          } else {
-            setLookupStatus('notfound')
-          }
+        const q = data?.quotes?.[symbol]
+
+        if (q && q.price > 0) {
+          setForm(f => ({
+            ...f,
+            name: q.longName || f.name,
+            currency: q.currency || f.currency,
+            // avg_price hint: don't overwrite if user already typed something
+            avg_price: f.avg_price || '',
+            // dividend payer: true if Yahoo returns a dividend yield
+            is_dividend_payer: q.dividendYield != null ? q.dividendYield > 0 : f.is_dividend_payer,
+          }))
+          setLookupStatus(q.longName ? 'found' : 'notfound')
         } else {
           setLookupStatus('notfound')
         }
@@ -122,7 +105,7 @@ export default function AddPositionModal({
             />
             <span style={{ position: 'absolute', right: 9, top: '50%', transform: 'translateY(-50%)', fontSize: 12 }}>
               {lookingUp && <span style={{ color: 'var(--text3)' }}>⟳</span>}
-              {!lookingUp && lookupStatus === 'found' && <span style={{ color: 'var(--green)' }}>✓</span>}
+              {!lookingUp && lookupStatus === 'found'    && <span style={{ color: 'var(--green)' }}>✓</span>}
               {!lookingUp && lookupStatus === 'notfound' && <span style={{ color: 'var(--amber)' }}>?</span>}
             </span>
           </div>
@@ -134,10 +117,7 @@ export default function AddPositionModal({
           </select>
         </Field>
 
-        <Field
-          label={lookingUp ? 'Company name — looking up…' : 'Company name'}
-          span="2"
-        >
+        <Field label={lookingUp ? 'Company name — looking up…' : 'Company name'} span="2">
           <input
             style={{
               ...inputStyle,
@@ -179,7 +159,8 @@ export default function AddPositionModal({
 
       {costBasis !== null && !isNaN(costBasis) && (
         <div style={{ marginTop: 14, padding: '10px 14px', background: 'var(--bg3)', borderRadius: 7, fontSize: 11, color: 'var(--text3)' }}>
-          Total cost basis: <span style={{ color: 'var(--text)', fontWeight: 500 }}>
+          Total cost basis:{' '}
+          <span style={{ color: 'var(--text)', fontWeight: 500 }}>
             {costBasis.toLocaleString(undefined, { maximumFractionDigits: 2 })} {form.currency}
           </span>
         </div>

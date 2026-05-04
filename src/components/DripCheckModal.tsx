@@ -2,19 +2,19 @@
 import { useState } from 'react'
 import { supabase, Holding } from '@/lib/supabase'
 import Modal from './Modal'
-import { DEFAULT_FX } from '@/lib/fx'
-import { PRICES } from '@/lib/prices'
+import type { DividendSummary } from '@/app/api/market/dividends/route'
 
 interface DripEvent {
   symbol: string
+  name: string
   exDate: string
   payDate: string
-  amount: number
+  amount: number       // per share
   currency: string
   sharesHeld: number
   grossAmount: number
-  reinvestShares: number
   reinvestPrice: number
+  reinvestShares: number
   alreadyLogged: boolean
 }
 
@@ -27,87 +27,89 @@ export default function DripCheckModal({
   onClose: () => void
   onSaved: () => void
 }) {
-  const [loading, setLoading] = useState(false)
-  const [events, setEvents] = useState<DripEvent[]>([])
-  const [checked, setChecked] = useState(false)
+  const [loading, setLoading]   = useState(false)
+  const [events, setEvents]     = useState<DripEvent[]>([])
+  const [checked, setChecked]   = useState(false)
   const [applying, setApplying] = useState<string | null>(null)
-  const [done, setDone] = useState<string[]>([])
-  const [aiStatus, setAiStatus] = useState('')
+  const [done, setDone]         = useState<string[]>([])
+  const [error, setError]       = useState('')
 
   const divPayers = holdings.filter(h => h.is_dividend_payer)
 
   const checkDividends = async () => {
     setLoading(true)
-    setAiStatus('Asking Claude to search for recent dividend payments…')
-
-    const symbols = divPayers.map(h => h.symbol).join(', ')
-
-    const prompt = `Search for recent confirmed dividend payments (paid in the last 90 days) for these stock tickers: ${symbols}
-
-For each ticker that has had a confirmed dividend payment recently, return a JSON array with objects like:
-{
-  "symbol": "KO",
-  "exDate": "2026-03-13",
-  "payDate": "2026-04-01",
-  "amount": 0.53,
-  "currency": "USD"
-}
-
-Only include dividends that have actually been paid (not just declared). Return ONLY valid JSON array, no markdown, no extra text. If none found, return [].`
+    setError('')
 
     try {
-      const res = await fetch('https://api.anthropic.com/v1/messages', {
+      // Fetch dividend summaries from Yahoo Finance
+      const res = await fetch('/api/market/dividends', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 1000,
-          tools: [{ type: 'web_search_20250305', name: 'web_search' }],
-          messages: [{ role: 'user', content: prompt }],
-        }),
+        body: JSON.stringify({ symbols: divPayers.map(h => h.symbol) }),
       })
-      const data = await res.json()
-      const textBlock = [...data.content].reverse().find((b: { type: string }) => b.type === 'text')
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err?.error ?? `HTTP ${res.status}`)
+      }
 
-      if (!textBlock?.text) throw new Error('No response')
+      const data = await res.json() as { summaries: Record<string, DividendSummary> }
 
-      const clean = textBlock.text.replace(/```json|```/g, '').trim()
-      const parsed = JSON.parse(clean) as Array<{
-        symbol: string; exDate: string; payDate: string; amount: number; currency: string
-      }>
-
-      // Check which are already logged in our DB
+      // Check which payments are already logged in DB
       const { data: existing } = await supabase
         .from('dividends_received')
         .select('symbol, payment_date')
+      const alreadyLogged = new Set((existing ?? []).map(d => `${d.symbol}::${d.payment_date}`))
 
-      const alreadyLogged = new Set(
-        (existing ?? []).map(d => `${d.symbol}::${d.payment_date}`)
-      )
+      const today   = new Date()
+      const ago90   = new Date(today.getTime() - 90 * 24 * 60 * 60 * 1000)
 
-      // Build DRIP events
-      const dripEvents: DripEvent[] = parsed.map(d => {
-        const holding = divPayers.find(h => h.symbol === d.symbol)
-        if (!holding) return null
-        const sharesHeld = holding.shares
-        const grossAmount = sharesHeld * d.amount
-        const price = PRICES[d.symbol] ?? holding.avg_price
-        const reinvestShares = grossAmount / price
-        return {
-          ...d,
-          sharesHeld,
+      const dripEvents: DripEvent[] = []
+
+      for (const h of divPayers) {
+        const s: DividendSummary = data.summaries[h.symbol]
+        if (!s || s.error) continue
+
+        // lastDividendValue = most recent actual per-share payment
+        const amount = s.lastDividendValue
+        const lastDivTs = s.lastDividendDate
+        if (!amount || !lastDivTs) continue
+
+        const payDate = new Date(lastDivTs * 1000)
+        if (payDate < ago90) continue  // too old
+
+        // Estimate ex-date as ~3 weeks before pay date
+        const exDate = new Date(payDate.getTime() - 21 * 24 * 60 * 60 * 1000)
+
+        const payDateStr = payDate.toISOString().slice(0, 10)
+        const exDateStr  = exDate.toISOString().slice(0, 10)
+
+        const grossAmount = h.shares * amount
+        const reinvestPrice = h.avg_price  // fallback; ideally current price
+
+        dripEvents.push({
+          symbol: h.symbol,
+          name: h.name,
+          exDate: exDateStr,
+          payDate: payDateStr,
+          amount,
+          currency: h.currency,
+          sharesHeld: h.shares,
           grossAmount,
-          reinvestShares,
-          reinvestPrice: price,
-          alreadyLogged: alreadyLogged.has(`${d.symbol}::${d.payDate}`),
-        } as DripEvent
-      }).filter(Boolean) as DripEvent[]
+          reinvestPrice,
+          reinvestShares: grossAmount / reinvestPrice,
+          alreadyLogged: alreadyLogged.has(`${h.symbol}::${payDateStr}`),
+        })
+      }
+
+      // Sort: unlogged first, then by payDate desc
+      dripEvents.sort((a, b) => {
+        if (a.alreadyLogged !== b.alreadyLogged) return a.alreadyLogged ? 1 : -1
+        return b.payDate.localeCompare(a.payDate)
+      })
 
       setEvents(dripEvents)
-      setAiStatus('')
     } catch (e) {
-      setAiStatus('Could not fetch dividend data. Please try again.')
-      console.error(e)
+      setError(`Could not fetch dividend data: ${e instanceof Error ? e.message : String(e)}`)
     } finally {
       setLoading(false)
       setChecked(true)
@@ -120,7 +122,6 @@ Only include dividends that have actually been paid (not just declared). Return 
     const wht = ev.grossAmount * 0.15
     const net = ev.grossAmount - wht
 
-    // 1. Log dividend received
     await supabase.from('dividends_received').insert([{
       symbol: ev.symbol,
       payment_date: ev.payDate,
@@ -130,20 +131,18 @@ Only include dividends that have actually been paid (not just declared). Return 
       gross_amount: ev.grossAmount,
       withholding_tax: wht,
       currency: ev.currency,
-      drip_shares_added: ev.reinvestShares,
+      drip_shares_added: net / ev.reinvestPrice,
       drip_price: ev.reinvestPrice,
-      notes: `DRIP: reinvested ${ev.reinvestShares.toFixed(4)} shares @ ${ev.reinvestPrice}`,
+      notes: `DRIP: reinvested ${(net / ev.reinvestPrice).toFixed(4)} shares @ ${ev.reinvestPrice}`,
     }])
 
-    // 2. Update holding — add reinvested shares (weighted avg)
-    const totalOldCost = holding.shares * holding.avg_price
-    const newSharesFromDrip = net / ev.reinvestPrice // use net for reinvestment
-    const totalNewShares = holding.shares + newSharesFromDrip
-    const newAvgPrice = (totalOldCost + net) / totalNewShares
+    const newShares  = net / ev.reinvestPrice
+    const totalShares = holding.shares + newShares
+    const newAvg     = (holding.shares * holding.avg_price + net) / totalShares
 
     await supabase.from('holdings').update({
-      shares: totalNewShares,
-      avg_price: newAvgPrice,
+      shares: totalShares,
+      avg_price: newAvg,
       updated_at: new Date().toISOString(),
     }).eq('id', holding.id)
 
@@ -156,17 +155,22 @@ Only include dividends that have actually been paid (not just declared). Return 
   const whtRate = 0.15
 
   return (
-    <Modal title="Check dividends" subtitle="Confirm payments and auto-reinvest (DRIP)" onClose={onClose} width={560}>
+    <Modal title="Check dividends" subtitle="Recent payments · auto-reinvest (DRIP)" onClose={onClose} width={560}>
       {!checked ? (
         <div style={{ textAlign: 'center', padding: '20px 0' }}>
           <div style={{ fontSize: 13, color: 'var(--text2)', marginBottom: 8 }}>
-            Will search for confirmed dividend payments for <strong>{divPayers.length} dividend-paying holdings</strong> in the last 90 days.
+            Checks Yahoo Finance for recent dividend payments across your{' '}
+            <strong>{divPayers.length} dividend-paying holdings</strong>.
           </div>
           <div style={{ fontSize: 11, color: 'var(--text3)', marginBottom: 20 }}>
-            Uses Claude + web search to check Yahoo Finance and other sources.
+            Looks back 90 days for confirmed payments not yet logged.
           </div>
-          {aiStatus && (
-            <div style={{ fontSize: 12, color: 'var(--amber)', marginBottom: 16 }}>{aiStatus}</div>
+          {error && (
+            <div style={{ fontSize: 12, color: 'var(--red)', marginBottom: 16,
+              background: 'var(--red-bg)', border: '1px solid var(--red-bd)',
+              borderRadius: 6, padding: '8px 12px' }}>
+              {error}
+            </div>
           )}
           <button
             onClick={checkDividends}
@@ -179,51 +183,52 @@ Only include dividends that have actually been paid (not just declared). Return 
               opacity: loading ? 0.7 : 1,
             }}
           >
-            {loading ? '⟳ Searching…' : '⟳ Check now'}
+            {loading ? '⟳ Checking…' : '⟳ Check now'}
           </button>
         </div>
       ) : (
         <div>
-          {aiStatus && (
-            <div style={{ color: 'var(--red)', fontSize: 12, marginBottom: 12 }}>{aiStatus}</div>
+          {error && (
+            <div style={{ color: 'var(--red)', fontSize: 12, marginBottom: 12,
+              background: 'var(--red-bg)', border: '1px solid var(--red-bd)',
+              borderRadius: 6, padding: '8px 12px' }}>
+              {error}
+            </div>
           )}
 
-          {events.length === 0 && (
+          {events.length === 0 && !error && (
             <div style={{ padding: '20px 0', textAlign: 'center', color: 'var(--text3)', fontSize: 12 }}>
-              No recent confirmed dividends found for your holdings.
+              No recent confirmed dividends found in the last 90 days.
             </div>
           )}
 
           {pendingEvents.length > 0 && (
             <div style={{ marginBottom: 16 }}>
               <div style={{ fontSize: 11, color: 'var(--green)', fontWeight: 500, marginBottom: 10 }}>
-                {pendingEvents.length} dividend payment{pendingEvents.length > 1 ? 's' : ''} ready to apply
+                {pendingEvents.length} payment{pendingEvents.length > 1 ? 's' : ''} ready to log
               </div>
               {pendingEvents.map(ev => (
                 <div key={ev.symbol} style={{
-                  border: '1px solid var(--green-bd)',
-                  borderRadius: 8,
-                  padding: '12px 14px',
-                  marginBottom: 10,
-                  background: 'var(--green-bg)',
+                  border: '1px solid var(--green-bd)', borderRadius: 8,
+                  padding: '12px 14px', marginBottom: 10, background: 'var(--green-bg)',
                 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
                     <div>
                       <span style={{ fontWeight: 600, fontSize: 14 }}>{ev.symbol}</span>
                       <span style={{ fontSize: 11, color: 'var(--text3)', marginLeft: 8 }}>
-                        paid {ev.payDate} · ex {ev.exDate}
+                        paid {ev.payDate} · ex ~{ev.exDate}
                       </span>
                     </div>
                     <span style={{ fontWeight: 500, color: 'var(--green)' }}>
-                      {ev.amount} {ev.currency}/share
+                      {ev.amount.toFixed(4)} {ev.currency}/share
                     </span>
                   </div>
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, fontSize: 11, color: 'var(--text2)', marginBottom: 10 }}>
                     <div>Shares held: <strong>{ev.sharesHeld.toFixed(4)}</strong></div>
                     <div>Gross: <strong>{ev.grossAmount.toFixed(2)} {ev.currency}</strong></div>
                     <div>WHT (~{(whtRate * 100).toFixed(0)}%): <strong>−{(ev.grossAmount * whtRate).toFixed(2)}</strong></div>
-                    <div>Net for reinvest: <strong>{(ev.grossAmount * (1 - whtRate)).toFixed(2)}</strong></div>
-                    <div>Reinvest @ {ev.reinvestPrice} {ev.currency}</div>
+                    <div>Net: <strong>{(ev.grossAmount * (1 - whtRate)).toFixed(2)}</strong></div>
+                    <div>Reinvest @ {ev.reinvestPrice.toFixed(2)} {ev.currency}</div>
                     <div style={{ color: 'var(--green)', fontWeight: 600 }}>
                       +{((ev.grossAmount * (1 - whtRate)) / ev.reinvestPrice).toFixed(4)} new shares
                     </div>
@@ -248,12 +253,11 @@ Only include dividends that have actually been paid (not just declared). Return 
 
           {events.filter(e => e.alreadyLogged || done.includes(e.symbol)).map(ev => (
             <div key={ev.symbol} style={{
-              border: '1px solid var(--border)',
-              borderRadius: 8, padding: '10px 14px', marginBottom: 8,
+              border: '1px solid var(--border)', borderRadius: 8, padding: '10px 14px', marginBottom: 8,
               display: 'flex', justifyContent: 'space-between', alignItems: 'center',
               fontSize: 12, color: 'var(--text3)',
             }}>
-              <span>{ev.symbol} · {ev.payDate}</span>
+              <span>{ev.symbol} · {ev.payDate} · {ev.amount.toFixed(4)} {ev.currency}/share</span>
               <span style={{ color: 'var(--green)' }}>
                 {done.includes(ev.symbol) ? '✓ Applied' : '✓ Already logged'}
               </span>
@@ -262,25 +266,18 @@ Only include dividends that have actually been paid (not just declared). Return 
 
           <div style={{ marginTop: 16, display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
             <button
-              onClick={() => { setChecked(false); setEvents([]); setDone([]) }}
+              onClick={() => { setChecked(false); setEvents([]); setDone([]); setError('') }}
               style={{
                 padding: '7px 14px', borderRadius: 6,
                 border: '1px solid var(--border2)', background: 'var(--bg)',
                 color: 'var(--text2)', fontSize: 12, cursor: 'pointer',
               }}
-            >
-              Check again
-            </button>
-            <button
-              onClick={onClose}
-              style={{
-                padding: '7px 14px', borderRadius: 6,
-                border: '1px solid var(--green-bd)', background: 'var(--green-bg)',
-                color: 'var(--green)', fontSize: 12, cursor: 'pointer',
-              }}
-            >
-              Done
-            </button>
+            >Check again</button>
+            <button onClick={onClose} style={{
+              padding: '7px 14px', borderRadius: 6,
+              border: '1px solid var(--green-bd)', background: 'var(--green-bg)',
+              color: 'var(--green)', fontSize: 12, cursor: 'pointer',
+            }}>Done</button>
           </div>
         </div>
       )}
