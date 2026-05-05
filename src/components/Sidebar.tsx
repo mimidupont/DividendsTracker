@@ -4,17 +4,23 @@ import { usePathname } from 'next/navigation'
 
 const nav = [
   { section: 'Overview', items: [
-    { href: '/',           label: 'Dashboard',       icon: '◈' },
-    { href: '/holdings',   label: 'Holdings',        icon: '◻' },
+    { href: '/',             label: 'Dashboard',       icon: '◈' },
+    { href: '/holdings',     label: 'Holdings',        icon: '◻' },
   ]},
   { section: 'Income', items: [
-    { href: '/received',   label: 'Received',        icon: '↓' },
-    { href: '/projected',  label: 'Projected',       icon: '→' },
-    { href: '/calendar',   label: 'Ex-div calendar', icon: '▦' },
+    { href: '/received',     label: 'Received',        icon: '↓' },
+    { href: '/projected',    label: 'Projected',       icon: '→' },
+    { href: '/calendar',     label: 'Ex-div calendar', icon: '▦' },
   ]},
   { section: 'Analysis', items: [
-    { href: '/currency',   label: 'Currency mix',    icon: '◎' },
-    { href: '/tax',        label: 'Tax summary',     icon: '◷' },
+    { href: '/performance',  label: 'Performance',     icon: '◉' },
+    { href: '/allocation',   label: 'Allocation',      icon: '◎' },
+    { href: '/currency',     label: 'Currency mix',    icon: '◑' },
+    { href: '/fees',         label: 'Fee scanner',     icon: '◷' },
+    { href: '/tax',          label: 'Tax summary',     icon: '⊞' },
+  ]},
+  { section: 'Planning', items: [
+    { href: '/simulation',   label: 'Wealth sim.',     icon: '∿' },
   ]},
 ]
 
