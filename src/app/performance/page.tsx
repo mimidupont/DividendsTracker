@@ -98,7 +98,7 @@ export default function PerformancePage() {
 
   // P&L bar chart data (top/bottom 10 by absolute P&L)
   const plChartData = [...rows]
-    .sort((a, b) => Math.abs(b.plCZK) - Math.abs(a.plCZK))
+    .sort((a, b) => b.plCZK - a.plCZK)
     .slice(0, 12)
     .map(r => ({ symbol: r.h.symbol, pl: Math.round(r.plCZK), pct: parseFloat(r.plPct.toFixed(1)) }))
 
