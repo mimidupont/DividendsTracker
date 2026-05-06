@@ -1,20 +1,33 @@
 import { NextRequest, NextResponse } from 'next/server'
 
-export interface MarketQuote {
+// Re-export types from parent route
+export interface DividendSummary {
   symbol: string
-  price: number | null
-  changePercent: number | null
-  dividendYield: number | null
-  forwardAnnualDividendRate: number | null
+  exDividendDate: number | null    // unix timestamp
+  dividendRate: number | null      // forward annual rate
   trailingAnnualDividendRate: number | null
+  lastDividendValue: number | null // most recent payment amount
+  lastDividendDate: number | null  // unix timestamp of last payment
+  payoutFrequency: number | null   // estimated payments per year
   currency: string
-  longName: string | null
+  error?: string
 }
 
-export interface MarketDataResponse {
-  quotes: Record<string, MarketQuote>
+export interface DividendSummaryResponse {
+  summaries: Record<string, DividendSummary>
   fetchedAt: string
 }
+
+// Map internal portfolio symbols → Yahoo Finance tickers
+const YAHOO_SYMBOL_MAP: Record<string, string> = {
+  SPY5:  'SPY5.L',
+  SPYW:  'SPYW.DE',
+  CSG1:  'CSG1.AS',
+  ERBAG: 'ERBAG.PR',
+  MONET: 'MONET.PR',
+}
+
+const toYahoo = (symbol: string) => YAHOO_SYMBOL_MAP[symbol] ?? symbol
 
 const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
@@ -43,47 +56,71 @@ async function getSession(): Promise<{ crumb: string; cookie: string } | null> {
   }
 }
 
-async function fetchQuote(
+async function fetchQuoteSummary(
   symbol: string,
   crumb: string,
   cookie: string
-): Promise<MarketQuote> {
-  const empty: MarketQuote = {
-    symbol, price: null, changePercent: null, dividendYield: null,
-    forwardAnnualDividendRate: null, trailingAnnualDividendRate: null,
-    currency: 'USD', longName: null,
+): Promise<DividendSummary> {
+  const empty: DividendSummary = {
+    symbol, exDividendDate: null, dividendRate: null,
+    trailingAnnualDividendRate: null, lastDividendValue: null,
+    lastDividendDate: null, payoutFrequency: null, currency: 'USD',
   }
 
   try {
+    const yahooSymbol = toYahoo(symbol)
     const url =
-      `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(symbol)}` +
-      `?modules=price,summaryDetail,defaultKeyStatistics&crumb=${encodeURIComponent(crumb)}`
+      `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(yahooSymbol)}` +
+      `?modules=summaryDetail,calendarEvents,defaultKeyStatistics&crumb=${encodeURIComponent(crumb)}`
 
     const res = await fetch(url, {
       headers: { 'User-Agent': UA, Accept: 'application/json', Cookie: cookie },
       next: { revalidate: 0 },
     })
-    if (!res.ok) return empty
+    if (!res.ok) return { ...empty, error: `HTTP ${res.status}` }
 
     const data = await res.json()
     const result = data?.quoteSummary?.result?.[0]
-    if (!result) return empty
+    if (!result) return { ...empty, error: 'No data' }
 
-    const p  = result.price ?? {}
-    const sd = result.summaryDetail ?? {}
+    const sd  = result.summaryDetail ?? {}
+    const cal = result.calendarEvents ?? {}
+    const ks  = result.defaultKeyStatistics ?? {}
+
+    // exDividendDate: prefer calendarEvents (upcoming) over summaryDetail (may be past)
+    const exDate =
+      cal.exDividendDate?.raw ??
+      sd.exDividendDate?.raw ??
+      null
+
+    // Per-payment amount: lastDividendValue from keyStatistics is the most recent actual payment
+    const lastDiv = ks.lastDividendValue?.raw ?? null
+    const lastDivDate = ks.lastDividendDate?.raw ?? null
+
+    // Estimate payout frequency from trailing rate / last payment
+    let freq: number | null = null
+    const annualRate: number | null = sd.trailingAnnualDividendRate?.raw ?? null
+    if (annualRate && lastDiv && lastDiv > 0) {
+      const ratio = annualRate / lastDiv
+      // Round to nearest standard frequency: 1, 2, 4, 12
+      if      (ratio < 1.5)  freq = 1
+      else if (ratio < 3)    freq = 2
+      else if (ratio < 8)    freq = 4
+      else                   freq = 12
+    }
 
     return {
-      symbol,
-      price: p.regularMarketPrice?.raw ?? null,
-      changePercent: p.regularMarketChangePercent?.raw ?? null,
-      dividendYield: sd.dividendYield?.raw ?? null,
-      forwardAnnualDividendRate: sd.dividendRate?.raw ?? null,
-      trailingAnnualDividendRate: sd.trailingAnnualDividendRate?.raw ?? null,
-      currency: p.currency ?? sd.currency ?? 'USD',
-      longName: p.longName ?? p.shortName ?? null,
+      symbol, // always return the original portfolio symbol, not the Yahoo one
+      exDividendDate: exDate,
+      dividendRate: sd.dividendRate?.raw ?? null,
+      trailingAnnualDividendRate: annualRate,
+      lastDividendValue: lastDiv,
+      lastDividendDate: lastDivDate,
+      payoutFrequency: freq,
+      currency: sd.currency ?? 'USD',
     }
-  } catch {
-    return empty
+  } catch (e) {
+    return { ...empty, error: String(e) }
   }
 }
 
@@ -99,23 +136,24 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Could not establish Yahoo Finance session' }, { status: 502 })
     }
 
-    const quotes: Record<string, MarketQuote> = {}
+    const summaries: Record<string, DividendSummary> = {}
 
+    // Fetch concurrently but cap at 8 at a time to avoid rate limiting
     const CONCURRENCY = 8
     for (let i = 0; i < symbols.length; i += CONCURRENCY) {
       const batch = symbols.slice(i, i + CONCURRENCY)
       const results = await Promise.all(
-        batch.map(sym => fetchQuote(sym, session.crumb, session.cookie))
+        batch.map(sym => fetchQuoteSummary(sym, session.crumb, session.cookie))
       )
-      for (const r of results) quotes[r.symbol] = r
+      for (const r of results) summaries[r.symbol] = r
     }
 
     return NextResponse.json({
-      quotes,
+      summaries,
       fetchedAt: new Date().toISOString(),
-    } satisfies MarketDataResponse)
+    } satisfies DividendSummaryResponse)
   } catch (err) {
-    console.error('[market]', err)
+    console.error('[market/dividends]', err)
     return NextResponse.json({ error: String(err) }, { status: 500 })
   }
 }

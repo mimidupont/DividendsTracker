@@ -18,6 +18,17 @@ export interface DividendSummaryResponse {
   fetchedAt: string
 }
 
+// Map internal portfolio symbols → Yahoo Finance tickers
+const YAHOO_SYMBOL_MAP: Record<string, string> = {
+  SPY5:  'SPY5.L',
+  SPYW:  'SPYW.DE',
+  CSG1:  'CSG1.AS',
+  ERBAG: 'ERBAG.PR',
+  MONET: 'MONET.PR',
+}
+
+const toYahoo = (symbol: string) => YAHOO_SYMBOL_MAP[symbol] ?? symbol
+
 const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 
@@ -57,8 +68,9 @@ async function fetchQuoteSummary(
   }
 
   try {
+    const yahooSymbol = toYahoo(symbol)
     const url =
-      `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(symbol)}` +
+      `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(yahooSymbol)}` +
       `?modules=summaryDetail,calendarEvents,defaultKeyStatistics&crumb=${encodeURIComponent(crumb)}`
 
     const res = await fetch(url, {
@@ -98,7 +110,7 @@ async function fetchQuoteSummary(
     }
 
     return {
-      symbol,
+      symbol, // always return the original portfolio symbol, not the Yahoo one
       exDividendDate: exDate,
       dividendRate: sd.dividendRate?.raw ?? null,
       trailingAnnualDividendRate: annualRate,
