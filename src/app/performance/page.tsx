@@ -2,135 +2,132 @@
 import { useEffect, useState, useCallback } from 'react'
 import Sidebar from '@/components/Sidebar'
 import Badge from '@/components/Badge'
-import { supabase, Holding, DividendProjection } from '@/lib/supabase'
-import { toCZK, fmtCZK, DEFAULT_FX } from '@/lib/fx'
-import { computeProjectedTotal } from '@/lib/projections'
+import { supabase, Holding, DividendReceived } from '@/lib/supabase'
+import { toCZK, fmtCZK, DEFAULT_FX, fetchFxRates } from '@/lib/fx'
+import { useMarketData } from '@/hooks/useMarketData'
 import {
-  AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer, ReferenceLine,
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
+  ResponsiveContainer, Cell, ReferenceLine,
 } from 'recharts'
 
 const CURRENT_YEAR = new Date().getFullYear()
 
-interface SimYear {
-  year: number
-  portfolioValue: number
-  dividendIncome: number
-  cumulativeDividends: number
-  fireNumber: number
-}
+export default function PerformancePage() {
+  const [holdings, setHoldings]   = useState<Holding[]>([])
+  const [received, setReceived]   = useState<DividendReceived[]>([])
+  const [fx, setFx]               = useState(DEFAULT_FX)
+  const [loading, setLoading]     = useState(true)
+  const [fxLoading, setFxLoading] = useState(false)
+  const [fxTs, setFxTs]           = useState<string | null>(null)
+  const [sortBy, setSortBy]       = useState<'pl' | 'pct' | 'value'>('pl')
 
-function simulate(
-  initialValueCZK: number,
-  annualDivCZK: number,
-  params: {
-    annualContribution: number
-    portfolioGrowthRate: number
-    dividendGrowthRate: number
-    withdrawalRate: number
-    years: number
-    reinvestDividends: boolean
-  }
-): SimYear[] {
-  const rows: SimYear[] = []
-  let value = initialValueCZK
-  let annualDiv = annualDivCZK
-  let cumulativeDivs = 0
+  const market = useMarketData()
 
-  for (let i = 0; i <= params.years; i++) {
-    const year = CURRENT_YEAR + i
-    const fireNumber = annualDiv > 0 ? (annualDiv / params.withdrawalRate) : value
-
-    rows.push({
-      year,
-      portfolioValue: Math.round(value),
-      dividendIncome: Math.round(annualDiv),
-      cumulativeDividends: Math.round(cumulativeDivs),
-      fireNumber: Math.round(fireNumber),
-    })
-
-    // Next year
-    cumulativeDivs += annualDiv
-    if (params.reinvestDividends) {
-      value = (value + params.annualContribution + annualDiv) * (1 + params.portfolioGrowthRate)
-    } else {
-      value = (value + params.annualContribution) * (1 + params.portfolioGrowthRate)
-    }
-    annualDiv = annualDiv * (1 + params.dividendGrowthRate)
-  }
-
-  return rows
-}
-
-const fmtK = (n: number) => {
-  if (n >= 1_000_000) return `Kč ${(n / 1_000_000).toFixed(1)}M`
-  if (n >= 1_000) return `Kč ${(n / 1_000).toFixed(0)}K`
-  return fmtCZK(n)
-}
-
-export default function SimulationPage() {
-  const [holdings, setHoldings]     = useState<Holding[]>([])
-  const [projections, setProjections] = useState<DividendProjection[]>([])
-  const [loading, setLoading]       = useState(true)
-  const fx = DEFAULT_FX
-
-  // Sim params
-  const [years, setYears]                 = useState(30)
-  const [contribution, setContribution]   = useState(50000)  // CZK/year
-  const [growthRate, setGrowthRate]       = useState(7)       // %
-  const [divGrowth, setDivGrowth]         = useState(5)       // %
-  const [withdrawalRate, setWithdrawal]   = useState(4)       // %
-  const [reinvest, setReinvest]           = useState(true)
-
-  useEffect(() => {
-    Promise.all([
-      supabase.from('holdings').select('*'),
-      supabase.from('dividend_projections').select('*').eq('year', CURRENT_YEAR + 1),
-    ]).then(([h, p]) => {
-      if (h.data) setHoldings(h.data)
-      if (p.data) setProjections(p.data)
-      setLoading(false)
-    })
+  const load = useCallback(async () => {
+    const [h, r] = await Promise.all([
+      supabase.from('holdings').select('*').order('symbol'),
+      supabase.from('dividends_received').select('*').order('payment_date', { ascending: false }),
+    ])
+    if (h.data) setHoldings(h.data)
+    if (r.data) setReceived(r.data)
+    setLoading(false)
+    return h.data ?? []
   }, [])
 
-  const initialValueCZK = holdings.reduce((s, h) =>
-    s + toCZK(h.avg_price * h.shares, h.currency, fx), 0)
+  useEffect(() => {
+    load().then(h => {
+      if (h.length > 0) market.refresh(h.map((hh: Holding) => hh.symbol))
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
-  const annualDivCZK = holdings.reduce((s, h) => {
-    const proj = projections.find(p => p.symbol === h.symbol)
-    if (!proj) return s
-    return s + toCZK(computeProjectedTotal(proj, holdings), proj.currency, fx)
-  }, 0)
+  const refreshFx = async () => {
+    setFxLoading(true)
+    const rates = await fetchFxRates()
+    setFx(rates)
+    setFxTs(new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }))
+    setFxLoading(false)
+  }
 
-  const data = loading ? [] : simulate(initialValueCZK, annualDivCZK, {
-    annualContribution: contribution,
-    portfolioGrowthRate: growthRate / 100,
-    dividendGrowthRate: divGrowth / 100,
-    withdrawalRate: withdrawalRate / 100,
-    years,
-    reinvestDividends: reinvest,
+  // ── Metrics ───────────────────────────────────────────────────────────────
+  const rows = holdings.map(h => {
+    const price    = market.getPrice(h.symbol, h.avg_price)
+    const mktCZK   = toCZK(price * h.shares, h.currency, fx)
+    const costCZK  = toCZK(h.avg_price * h.shares, h.currency, fx)
+    const plCZK    = mktCZK - costCZK
+    const plPct    = costCZK > 0 ? (plCZK / costCZK) * 100 : 0
+    const chgPct   = market.quotes[h.symbol]?.changePercent ?? null
+    const divIncome = received
+      .filter(d => d.symbol === h.symbol)
+      .reduce((s, d) => s + toCZK(d.gross_amount, d.currency, fx), 0)
+    const totalReturn = plCZK + divIncome
+    const totalReturnPct = costCZK > 0 ? (totalReturn / costCZK) * 100 : 0
+    return { h, price, mktCZK, costCZK, plCZK, plPct, chgPct, divIncome, totalReturn, totalReturnPct }
   })
 
-  const fireYear = data.find(d => d.dividendIncome >= d.fireNumber * withdrawalRate / 100 ||
-    d.portfolioValue * (withdrawalRate / 100) >= annualDivCZK * 12)
-  const final = data[data.length - 1]
+  const sorted = [...rows].sort((a, b) => {
+    if (sortBy === 'pl')    return b.plCZK - a.plCZK
+    if (sortBy === 'pct')   return b.plPct - a.plPct
+    return b.mktCZK - a.mktCZK
+  })
+
+  const totalValueCZK   = rows.reduce((s, r) => s + r.mktCZK, 0)
+  const totalCostCZK    = rows.reduce((s, r) => s + r.costCZK, 0)
+  const totalPLCZK      = totalValueCZK - totalCostCZK
+  const totalPLPct      = totalCostCZK > 0 ? (totalPLCZK / totalCostCZK) * 100 : 0
+  const totalDivCZK     = received.reduce((s, d) => s + toCZK(d.gross_amount, d.currency, fx), 0)
+  const totalReturnCZK  = totalPLCZK + totalDivCZK
+  const totalReturnPct  = totalCostCZK > 0 ? (totalReturnCZK / totalCostCZK) * 100 : 0
+
+  const winners = rows.filter(r => r.plCZK > 0).length
+  const losers  = rows.filter(r => r.plCZK < 0).length
+
+  // Monthly dividend income chart data
+  const monthlyData: Record<string, number> = {}
+  received.forEach(d => {
+    const key = d.payment_date.slice(0, 7)
+    monthlyData[key] = (monthlyData[key] ?? 0) + toCZK(d.gross_amount, d.currency, fx)
+  })
+  const monthlyChart = Object.entries(monthlyData)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .slice(-12)
+    .map(([month, amount]) => ({
+      month: new Date(month + '-01').toLocaleDateString('en-GB', { month: 'short', year: '2-digit' }),
+      amount: Math.round(amount),
+    }))
+
+  // P&L bar chart data (top/bottom 10 by absolute P&L)
+  const plChartData = [...rows]
+    .sort((a, b) => Math.abs(b.plCZK) - Math.abs(a.plCZK))
+    .slice(0, 12)
+    .map(r => ({ symbol: r.h.symbol, pl: Math.round(r.plCZK), pct: parseFloat(r.plPct.toFixed(1)) }))
 
   const CustomTooltip = ({ active, payload, label }: any) => {
     if (!active || !payload?.length) return null
     return (
-      <div style={{
-        background: 'var(--bg2)', border: '1px solid var(--border2)',
-        borderRadius: 8, padding: '12px 16px', fontSize: 11,
-      }}>
-        <div style={{ fontWeight: 600, marginBottom: 6, color: 'var(--text)' }}>{label}</div>
+      <div style={{ background: 'var(--bg2)', border: '1px solid var(--border2)', borderRadius: 8, padding: '10px 14px', fontSize: 11 }}>
+        <div style={{ fontWeight: 600, marginBottom: 4 }}>{label}</div>
         {payload.map((p: any) => (
-          <div key={p.name} style={{ color: p.color, marginBottom: 3 }}>
-            {p.name}: {fmtK(p.value)}
+          <div key={p.name} style={{ color: p.value >= 0 ? 'var(--green)' : 'var(--red)' }}>
+            {p.name === 'pl' ? fmtCZK(p.value) : `${p.value > 0 ? '+' : ''}${p.value}%`}
           </div>
         ))}
       </div>
     )
   }
+
+  const DivTooltip = ({ active, payload, label }: any) => {
+    if (!active || !payload?.length) return null
+    return (
+      <div style={{ background: 'var(--bg2)', border: '1px solid var(--border2)', borderRadius: 8, padding: '10px 14px', fontSize: 11 }}>
+        <div style={{ fontWeight: 600, marginBottom: 4 }}>{label}</div>
+        <div style={{ color: 'var(--green)' }}>{fmtCZK(payload[0].value, 0)}</div>
+      </div>
+    )
+  }
+
+  const marketStatusColor = { idle: 'var(--text3)', loading: 'var(--amber)', done: 'var(--green)', error: 'var(--red)' }[market.state]
+  const marketStatusText  = { idle: '', loading: '⟳ Fetching…', done: `✓ Live · ${market.fetchedAt ? new Date(market.fetchedAt).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) : ''}`, error: `⚠ ${market.errorMsg ?? 'Failed'}` }[market.state]
 
   if (loading) return (
     <div style={{ display: 'flex' }}>
@@ -142,149 +139,116 @@ export default function SimulationPage() {
   return (
     <div style={{ display: 'flex' }}>
       <Sidebar />
-      <main style={{ marginLeft: 'var(--sidebar-w)', flex: 1, padding: '28px 36px', maxWidth: 1100 }}>
+      <main style={{ marginLeft: 'var(--sidebar-w)', flex: 1, padding: '28px 36px', maxWidth: 1200 }}>
 
-        <div style={{ marginBottom: 24 }}>
-          <h1 style={{ fontFamily: "'Instrument Serif', serif", fontSize: 26, fontWeight: 400, letterSpacing: -0.5 }}>
-            Wealth simulation
-          </h1>
-          <div style={{ fontSize: 11, color: 'var(--text3)', marginTop: 3 }}>
-            Project your portfolio and dividend income over time · FIRE planning
+        {/* Header */}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 26 }}>
+          <div>
+            <h1 style={{ fontFamily: "'Instrument Serif', serif", fontSize: 26, fontWeight: 400, letterSpacing: -0.5 }}>Performance</h1>
+            <div style={{ fontSize: 11, color: 'var(--text3)', marginTop: 4, display: 'flex', gap: 10 }}>
+              {holdings.length} positions · All values in CZK
+              {fxTs && <span style={{ color: 'var(--green)' }}>· FX {fxTs}</span>}
+              {marketStatusText && <span style={{ color: marketStatusColor }}>{marketStatusText}</span>}
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button onClick={refreshFx} disabled={fxLoading} style={btnStyle('secondary')}>
+              {fxLoading ? '⟳ FX…' : '↻ FX rates'}
+            </button>
+            <button onClick={() => market.refresh(holdings.map(h => h.symbol))} disabled={market.state === 'loading'} style={btnStyle('secondary')}>
+              {market.state === 'loading' ? '⟳ Loading…' : '↻ Refresh prices'}
+            </button>
           </div>
         </div>
 
         {/* Summary cards */}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 24 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12, marginBottom: 20 }}>
           {[
-            { label: 'Current value', value: fmtK(initialValueCZK), accent: 'var(--blue)', note: 'cost basis' },
-            { label: `In ${years} years`, value: fmtK(final?.portfolioValue ?? 0), accent: 'var(--green)', note: 'est. portfolio value' },
-            { label: `Annual dividends in ${years}y`, value: fmtK(final?.dividendIncome ?? 0), accent: 'var(--amber)', note: 'est. annual income' },
-            { label: 'FIRE number (4% rule)', value: fmtK((annualDivCZK * 12) / (withdrawalRate / 100)), accent: 'var(--red)', note: `at ${withdrawalRate}% withdrawal` },
+            { label: 'Unrealized P&L', value: (totalPLCZK >= 0 ? '+' : '') + fmtCZK(totalPLCZK), accent: totalPLCZK >= 0 ? 'var(--green)' : 'var(--red)', color: totalPLCZK >= 0 ? 'var(--green)' : 'var(--red)', note: `${totalPLPct >= 0 ? '+' : ''}${totalPLPct.toFixed(2)}% on cost` },
+            { label: 'Dividend income', value: fmtCZK(totalDivCZK, 0), accent: 'var(--amber)', color: 'var(--text)', note: `${received.length} payments logged` },
+            { label: 'Total return', value: (totalReturnCZK >= 0 ? '+' : '') + fmtCZK(totalReturnCZK), accent: totalReturnCZK >= 0 ? 'var(--green)' : 'var(--red)', color: totalReturnCZK >= 0 ? 'var(--green)' : 'var(--red)', note: `${totalReturnPct >= 0 ? '+' : ''}${totalReturnPct.toFixed(2)}% incl. dividends` },
+            { label: 'Winners / Losers', value: `${winners} / ${losers}`, accent: 'var(--blue)', color: 'var(--text)', note: `${rows.filter(r => r.plCZK === 0).length} flat` },
+            { label: 'Portfolio value', value: fmtCZK(totalValueCZK), accent: 'var(--blue)', color: 'var(--text)', note: `Cost: ${fmtCZK(totalCostCZK)}` },
           ].map((m, i) => (
             <div key={i} style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 10, padding: '14px 18px', position: 'relative', overflow: 'hidden' }}>
-              <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 2, background: m.accent }} />
+              <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 2, background: m.accent, opacity: 0.8 }} />
               <div style={{ fontSize: 10, letterSpacing: '0.09em', textTransform: 'uppercase', color: 'var(--text3)', marginBottom: 6, fontWeight: 500 }}>{m.label}</div>
-              <div style={{ fontFamily: "'Instrument Serif', serif", fontSize: 20, fontWeight: 400, marginBottom: 3 }}>{m.value}</div>
+              <div style={{ fontFamily: "'Instrument Serif', serif", fontSize: 20, fontWeight: 400, marginBottom: 4, color: m.color }}>{m.value}</div>
               <div style={{ fontSize: 10, color: 'var(--text3)' }}>{m.note}</div>
             </div>
           ))}
         </div>
 
-        <div style={{ display: 'grid', gridTemplateColumns: '280px 1fr', gap: 18 }}>
+        {/* Charts row */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 14 }}>
 
-          {/* Controls */}
-          <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 10, padding: '18px 20px' }}>
-            <div style={{ fontSize: 11, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--text2)', fontWeight: 500, marginBottom: 18 }}>Assumptions</div>
-
-            {[
-              { label: 'Time horizon', value: years, setter: setYears, min: 5, max: 50, step: 1, unit: 'years' },
-              { label: 'Annual contribution', value: contribution, setter: setContribution, min: 0, max: 500000, step: 5000, unit: 'CZK' },
-              { label: 'Portfolio growth rate', value: growthRate, setter: setGrowthRate, min: 0, max: 20, step: 0.5, unit: '%' },
-              { label: 'Dividend growth rate', value: divGrowth, setter: setDivGrowth, min: 0, max: 15, step: 0.5, unit: '%' },
-              { label: 'Withdrawal rate', value: withdrawalRate, setter: setWithdrawal, min: 1, max: 8, step: 0.5, unit: '%' },
-            ].map(s => (
-              <div key={s.label} style={{ marginBottom: 16 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
-                  <span style={{ fontSize: 11, color: 'var(--text3)' }}>{s.label}</span>
-                  <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--text)', fontFamily: "'DM Mono', monospace" }}>
-                    {s.unit === 'CZK' ? fmtCZK(s.value) : `${s.value}${s.unit}`}
-                  </span>
-                </div>
-                <input
-                  type="range"
-                  min={s.min} max={s.max} step={s.step}
-                  value={s.value}
-                  onChange={e => s.setter(parseFloat(e.target.value))}
-                  style={{ width: '100%', accentColor: 'var(--green)' }}
-                />
-              </div>
-            ))}
-
-            <div style={{ marginTop: 8, paddingTop: 14, borderTop: '1px solid var(--border)' }}>
-              <label style={{ display: 'flex', alignItems: 'center', gap: 9, cursor: 'pointer' }}>
-                <input
-                  type="checkbox"
-                  checked={reinvest}
-                  onChange={e => setReinvest(e.target.checked)}
-                  style={{ width: 14, height: 14, accentColor: 'var(--green)' }}
-                />
-                <span style={{ fontSize: 12, color: 'var(--text2)' }}>Reinvest dividends (DRIP)</span>
-              </label>
+          {/* P&L by position bar chart */}
+          <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 10, padding: '16px 20px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+              <span style={{ fontSize: 11, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--text2)', fontWeight: 500 }}>Unrealized P&L by position</span>
+              <Badge variant="gray">top 12 by |P&L|</Badge>
             </div>
-
-            {/* FIRE insight */}
-            <div style={{ marginTop: 16, padding: '12px 14px', background: 'var(--green-bg)', border: '1px solid var(--green-bd)', borderRadius: 8 }}>
-              <div style={{ fontSize: 10, color: 'var(--green)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 4 }}>
-                FIRE target
-              </div>
-              <div style={{ fontSize: 12, color: 'var(--text2)', lineHeight: 1.6 }}>
-                At <strong>{withdrawalRate}% withdrawal</strong>, you need{' '}
-                <strong style={{ color: 'var(--green)' }}>
-                  {fmtK(annualDivCZK * 25)}
-                </strong>{' '}
-                to replace your current dividend income.
-              </div>
-            </div>
+            <ResponsiveContainer width="100%" height={200}>
+              <BarChart data={plChartData} margin={{ top: 0, right: 4, left: 0, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+                <XAxis dataKey="symbol" tick={{ fontSize: 9, fill: 'var(--text3)' }} />
+                <YAxis tickFormatter={n => fmtCZK(n)} tick={{ fontSize: 9, fill: 'var(--text3)' }} width={72} />
+                <Tooltip content={<CustomTooltip />} />
+                <ReferenceLine y={0} stroke="var(--border2)" />
+                <Bar dataKey="pl" name="pl" radius={[3, 3, 0, 0]}>
+                  {plChartData.map((entry, i) => (
+                    <Cell key={i} fill={entry.pl >= 0 ? 'var(--green-mid)' : 'var(--red)'} opacity={0.85} />
+                  ))}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
           </div>
 
-          {/* Chart */}
-          <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 10, padding: '18px 20px' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-              <span style={{ fontSize: 11, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--text2)', fontWeight: 500 }}>
-                Portfolio projection
-              </span>
-              <div style={{ display: 'flex', gap: 8 }}>
-                <Badge variant="green">Portfolio value</Badge>
-                <Badge variant="amber">Dividend income</Badge>
-              </div>
+          {/* Monthly dividend income chart */}
+          <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 10, padding: '16px 20px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+              <span style={{ fontSize: 11, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--text2)', fontWeight: 500 }}>Monthly dividend income</span>
+              <Badge variant="amber">last 12 months</Badge>
             </div>
-            <ResponsiveContainer width="100%" height={340}>
-              <AreaChart data={data} margin={{ top: 4, right: 4, left: 0, bottom: 0 }}>
-                <defs>
-                  <linearGradient id="colorValue" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#4a9448" stopOpacity={0.15} />
-                    <stop offset="95%" stopColor="#4a9448" stopOpacity={0} />
-                  </linearGradient>
-                  <linearGradient id="colorDiv" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#7a5810" stopOpacity={0.15} />
-                    <stop offset="95%" stopColor="#7a5810" stopOpacity={0} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-                <XAxis dataKey="year" tick={{ fontSize: 10, fill: 'var(--text3)' }} />
-                <YAxis tickFormatter={fmtK} tick={{ fontSize: 9, fill: 'var(--text3)' }} width={70} />
-                <Tooltip content={<CustomTooltip />} />
-                <Area
-                  type="monotone"
-                  dataKey="portfolioValue"
-                  name="Portfolio value"
-                  stroke="#4a9448"
-                  strokeWidth={2}
-                  fill="url(#colorValue)"
-                />
-                <Area
-                  type="monotone"
-                  dataKey="dividendIncome"
-                  name="Dividend income"
-                  stroke="#7a5810"
-                  strokeWidth={2}
-                  fill="url(#colorDiv)"
-                />
-              </AreaChart>
-            </ResponsiveContainer>
+            {monthlyChart.length === 0 ? (
+              <div style={{ height: 200, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text3)', fontSize: 12 }}>No dividend data yet</div>
+            ) : (
+              <ResponsiveContainer width="100%" height={200}>
+                <BarChart data={monthlyChart} margin={{ top: 0, right: 4, left: 0, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+                  <XAxis dataKey="month" tick={{ fontSize: 9, fill: 'var(--text3)' }} />
+                  <YAxis tickFormatter={n => fmtCZK(n)} tick={{ fontSize: 9, fill: 'var(--text3)' }} width={72} />
+                  <Tooltip content={<DivTooltip />} />
+                  <Bar dataKey="amount" name="Gross dividends" fill="var(--amber)" opacity={0.8} radius={[3, 3, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            )}
           </div>
         </div>
 
-        {/* Milestones table */}
-        <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 10, overflow: 'hidden', marginTop: 18 }}>
-          <div style={{ padding: '12px 18px', borderBottom: '1px solid var(--border)', background: 'var(--bg3)' }}>
-            <span style={{ fontSize: 11, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--text2)', fontWeight: 500 }}>Year-by-year milestones</span>
+        {/* Position-level P&L table */}
+        <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 10, overflow: 'hidden' }}>
+          <div style={{ padding: '12px 18px', borderBottom: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'var(--bg3)' }}>
+            <span style={{ fontSize: 11, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--text2)', fontWeight: 500 }}>Position performance</span>
+            <div style={{ display: 'flex', gap: 6 }}>
+              {(['pl', 'pct', 'value'] as const).map(s => (
+                <button key={s} onClick={() => setSortBy(s)} style={{
+                  padding: '3px 10px', borderRadius: 4, fontSize: 10, cursor: 'pointer',
+                  background: sortBy === s ? 'var(--green-bg)' : 'var(--bg2)',
+                  border: `1px solid ${sortBy === s ? 'var(--green-bd)' : 'var(--border2)'}`,
+                  color: sortBy === s ? 'var(--green)' : 'var(--text3)',
+                }}>
+                  {s === 'pl' ? 'P&L (CZK)' : s === 'pct' ? 'P&L (%)' : 'Value'}
+                </button>
+              ))}
+              {market.state === 'done' && <Badge variant="live">LIVE</Badge>}
+            </div>
           </div>
           <div style={{ overflowX: 'auto' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
               <thead>
                 <tr>
-                  {['Year', 'Portfolio value', 'Annual dividends', 'Cumulative dividends', 'Growth vs today'].map((h, i) => (
+                  {['Company', 'Shares', 'Avg cost', 'Last price', 'Mkt value (CZK)', 'Unrealized P&L', 'P&L %', 'Div received', 'Total return'].map((h, i) => (
                     <th key={h} style={{
                       fontSize: 9, letterSpacing: '0.09em', textTransform: 'uppercase',
                       color: 'var(--text3)', padding: '8px 14px',
@@ -295,38 +259,62 @@ export default function SimulationPage() {
                 </tr>
               </thead>
               <tbody>
-                {data.filter((_, i) => i % 5 === 0 || i === data.length - 1).map(row => {
-                  const growth = initialValueCZK > 0 ? ((row.portfolioValue - initialValueCZK) / initialValueCZK) * 100 : 0
-                  return (
-                    <tr key={row.year}
-                      onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg3)')}
-                      onMouseLeave={e => (e.currentTarget.style.background = '')}
-                    >
-                      <td style={{ padding: '9px 14px', borderBottom: '1px solid var(--border)', fontWeight: 500 }}>
-                        {row.year}
-                        {row.year === CURRENT_YEAR && <Badge variant="blue" style={{ marginLeft: 8 }}>today</Badge>}
-                      </td>
-                      <td style={{ padding: '9px 14px', borderBottom: '1px solid var(--border)', textAlign: 'right', fontFamily: "'DM Mono', monospace", fontSize: 12 }}>
-                        {fmtK(row.portfolioValue)}
-                      </td>
-                      <td style={{ padding: '9px 14px', borderBottom: '1px solid var(--border)', textAlign: 'right', color: 'var(--amber)', fontFamily: "'DM Mono', monospace", fontSize: 12 }}>
-                        {fmtK(row.dividendIncome)}
-                      </td>
-                      <td style={{ padding: '9px 14px', borderBottom: '1px solid var(--border)', textAlign: 'right', color: 'var(--text3)', fontFamily: "'DM Mono', monospace", fontSize: 12 }}>
-                        {fmtK(row.cumulativeDividends)}
-                      </td>
-                      <td style={{ padding: '9px 14px', borderBottom: '1px solid var(--border)', textAlign: 'right', color: growth >= 0 ? 'var(--green)' : 'var(--red)', fontFamily: "'DM Mono', monospace", fontSize: 12 }}>
-                        {growth >= 0 ? '+' : ''}{growth.toFixed(0)}%
-                      </td>
-                    </tr>
-                  )
-                })}
+                {sorted.map(({ h, price, mktCZK, costCZK, plCZK, plPct, chgPct, divIncome, totalReturn, totalReturnPct }) => (
+                  <tr key={h.id}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg3)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = '')}
+                  >
+                    <td style={{ padding: '9px 14px', borderBottom: '1px solid var(--border)' }}>
+                      <div style={{ fontWeight: 500 }}>{h.name}</div>
+                      <div style={{ fontSize: 10, color: 'var(--text3)' }}>{h.symbol} · {h.currency}</div>
+                    </td>
+                    <td style={tdR}>{h.shares.toFixed(4)}</td>
+                    <td style={tdR}>
+                      {h.avg_price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      <span style={{ fontSize: 10, color: 'var(--text3)', marginLeft: 3 }}>{h.currency}</span>
+                    </td>
+                    <td style={tdR}>
+                      {market.state === 'loading'
+                        ? <span style={{ color: 'var(--text4)' }}>…</span>
+                        : <>{price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}<span style={{ fontSize: 10, color: 'var(--text3)', marginLeft: 3 }}>{h.currency}</span></>
+                      }
+                    </td>
+                    <td style={{ ...tdR, fontFamily: "'DM Mono', monospace", fontSize: 12 }}>{fmtCZK(mktCZK)}</td>
+                    <td style={{ ...tdR, fontFamily: "'DM Mono', monospace", fontSize: 12, color: plCZK >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                      {plCZK >= 0 ? '+' : ''}{fmtCZK(plCZK)}
+                    </td>
+                    <td style={{ ...tdR, fontFamily: "'DM Mono', monospace", fontSize: 12, color: plPct >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                      {plPct >= 0 ? '+' : ''}{plPct.toFixed(2)}%
+                    </td>
+                    <td style={{ ...tdR, fontFamily: "'DM Mono', monospace", fontSize: 12, color: divIncome > 0 ? 'var(--amber)' : 'var(--text4)' }}>
+                      {divIncome > 0 ? fmtCZK(divIncome) : '—'}
+                    </td>
+                    <td style={{ ...tdR, fontFamily: "'DM Mono', monospace", fontSize: 12, color: totalReturn >= 0 ? 'var(--green)' : 'var(--red)', fontWeight: 500 }}>
+                      {totalReturn >= 0 ? '+' : ''}{fmtCZK(totalReturn)}
+                      <div style={{ fontSize: 10, color: totalReturnPct >= 0 ? 'var(--green)' : 'var(--red)', opacity: 0.7 }}>
+                        {totalReturnPct >= 0 ? '+' : ''}{totalReturnPct.toFixed(1)}%
+                      </div>
+                    </td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>
         </div>
-
       </main>
     </div>
   )
+}
+
+const tdR: React.CSSProperties = {
+  padding: '9px 14px', borderBottom: '1px solid var(--border)',
+  textAlign: 'right', color: 'var(--text2)', fontSize: 12,
+}
+
+function btnStyle(variant: 'primary' | 'secondary'): React.CSSProperties {
+  return {
+    padding: '7px 15px', borderRadius: 6, cursor: 'pointer',
+    background: 'var(--bg2)', border: '1px solid var(--border2)',
+    color: 'var(--text2)', fontFamily: "'Geist', sans-serif", fontSize: 12,
+  }
 }
