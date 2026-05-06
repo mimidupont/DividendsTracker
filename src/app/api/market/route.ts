@@ -55,8 +55,8 @@ async function fetchQuote(
   symbol: string,
   crumb: string,
   cookie: string
-): Promise<MarketQuote & { symbol: string }> {
-  const empty: MarketQuote & { symbol: string } = {
+): Promise<{ symbol: string } & MarketQuote> {
+  const empty = {
     symbol,
     price: 0,
     changePercent: null,
@@ -68,29 +68,36 @@ async function fetchQuote(
 
   try {
     const yahooSymbol = toYahoo(symbol)
+    const url =
+      `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(yahooSymbol)}` +
+      `?modules=price,summaryDetail,defaultKeyStatistics&crumb=${encodeURIComponent(crumb)}`
 
-    // Fetch price from v8 quote endpoint
-    const quoteUrl = `https://query2.finance.yahoo.com/v8/finance/quote?symbols=${encodeURIComponent(yahooSymbol)}&crumb=${encodeURIComponent(crumb)}`
-    const quoteRes = await fetch(quoteUrl, {
+    const res = await fetch(url, {
       headers: { 'User-Agent': UA, Accept: 'application/json', Cookie: cookie },
       next: { revalidate: 0 },
     })
+    if (!res.ok) return empty
 
-    if (!quoteRes.ok) return empty
+    const data = await res.json()
+    const result = data?.quoteSummary?.result?.[0]
+    if (!result) return empty
 
-    const quoteData = await quoteRes.json()
-    const q = quoteData?.quoteResponse?.result?.[0]
-    if (!q) return empty
+    const price  = result.price ?? {}
+    const sd     = result.summaryDetail ?? {}
+    const ks     = result.defaultKeyStatistics ?? {}
+
+    const regularPrice: number = price.regularMarketPrice?.raw ?? 0
+    if (!regularPrice) return empty
 
     return {
       symbol,
-      price: q.regularMarketPrice ?? 0,
-      changePercent: q.regularMarketChangePercent ?? null,
-      dividendYield: q.trailingAnnualDividendYield ?? q.dividendYield ?? null,
-      forwardAnnualDividendRate: q.forwardAnnualDividendRate ?? null,
-      trailingAnnualDividendRate: q.trailingAnnualDividendRate ?? null,
-      currency: q.currency ?? 'USD',
-      longName: q.longName ?? q.shortName ?? undefined,
+      price: regularPrice,
+      changePercent: price.regularMarketChangePercent?.raw ?? null,
+      dividendYield: sd.trailingAnnualDividendYield?.raw ?? price.dividendYield?.raw ?? null,
+      forwardAnnualDividendRate: sd.dividendRate?.raw ?? null,
+      trailingAnnualDividendRate: sd.trailingAnnualDividendRate?.raw ?? null,
+      currency: price.currency ?? sd.currency ?? 'USD',
+      longName: price.longName ?? price.shortName ?? undefined,
     }
   } catch {
     return empty
@@ -104,17 +111,19 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'symbols array required' }, { status: 400 })
     }
 
+    const quotes: Record<string, MarketQuote> = {}
+
     const session = await getSession()
     if (!session) {
-      // Return empty quotes rather than failing hard — UI will fall back to avg_price
-      const quotes: Record<string, MarketQuote> = {}
+      // Session failed — return price:0 for all, UI falls back to avg_price via getPrice()
       for (const sym of symbols) {
-        quotes[sym] = { price: 0, changePercent: null, dividendYield: null, forwardAnnualDividendRate: null, trailingAnnualDividendRate: null, currency: 'USD' }
+        quotes[sym] = {
+          price: 0, changePercent: null, dividendYield: null,
+          forwardAnnualDividendRate: null, trailingAnnualDividendRate: null, currency: 'USD',
+        }
       }
       return NextResponse.json({ quotes, fetchedAt: new Date().toISOString() } satisfies MarketDataResponse)
     }
-
-    const quotes: Record<string, MarketQuote> = {}
 
     const CONCURRENCY = 8
     for (let i = 0; i < symbols.length; i += CONCURRENCY) {
