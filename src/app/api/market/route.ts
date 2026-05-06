@@ -13,6 +13,21 @@ export interface DividendSummary {
   error?: string
 }
 
+export interface MarketQuote {
+  price: number
+  changePercent: number | null
+  dividendYield: number | null
+  forwardAnnualDividendRate: number | null
+  trailingAnnualDividendRate: number | null
+  currency: string
+  longName?: string
+}
+
+export interface MarketDataResponse {
+  quotes: Record<string, MarketQuote>
+  fetchedAt: string
+}
+
 export interface DividendSummaryResponse {
   summaries: Record<string, DividendSummary>
   fetchedAt: string
