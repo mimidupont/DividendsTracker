@@ -1,5 +1,5 @@
 'use client'
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import { DEFAULT_FX, fetchFxRates } from '@/lib/fx'
 
 export function useFx() {
@@ -14,6 +14,9 @@ export function useFx() {
     setFxTs(new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }))
     setFxLoading(false)
   }, [])
+
+  // Auto-fetch live rates on mount — no more stale defaults
+  useEffect(() => { refresh() }, [refresh])
 
   return { fx, fxLoading, fxTs, refresh }
 }
