@@ -3,7 +3,6 @@ import { useState, useCallback, useRef } from 'react'
 import type { MarketQuote, MarketDataResponse } from '@/app/api/market/route'
 
 export type { MarketQuote }
-
 export type MarketState = 'idle' | 'loading' | 'done' | 'error'
 
 export interface UseMarketData {
@@ -29,19 +28,16 @@ export function useMarketData(): UseMarketData {
     loadingRef.current = true
     setState('loading')
     setErrorMsg(null)
-
     try {
       const res = await fetch('/api/market', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ symbols }),
       })
-
       if (!res.ok) {
         const err = await res.json().catch(() => ({}))
         throw new Error(err?.error ?? `HTTP ${res.status}`)
       }
-
       const data: MarketDataResponse = await res.json()
       setQuotes(data.quotes)
       setFetchedAt(data.fetchedAt)
@@ -55,23 +51,15 @@ export function useMarketData(): UseMarketData {
   }, [])
 
   const getPrice = useCallback(
-    (symbol: string, fallback: number) => {
-      const q = quotes[symbol]
-      if (!q || !q.price) return fallback
-      return q.price
-    },
+    (symbol: string, fallback: number) => quotes[symbol]?.price || fallback,
     [quotes]
   )
-
   const getYield = useCallback(
-    (symbol: string): number | null => {
-      return quotes[symbol]?.dividendYield ?? null
-    },
+    (symbol: string) => quotes[symbol]?.dividendYield ?? null,
     [quotes]
   )
-
   const getAnnualDiv = useCallback(
-    (symbol: string): number | null => {
+    (symbol: string) => {
       const q = quotes[symbol]
       return q?.forwardAnnualDividendRate ?? q?.trailingAnnualDividendRate ?? null
     },

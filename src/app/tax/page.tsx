@@ -3,9 +3,9 @@ import { useEffect, useState } from 'react'
 import Sidebar from '@/components/Sidebar'
 import Badge from '@/components/Badge'
 import { supabase, DividendReceived } from '@/lib/supabase'
-import { toCZK, fmtCZK, fmtDate, DEFAULT_FX } from '@/lib/fx'
+import { toCZK, fmtCZK, fmtDate } from '@/lib/fx'
+import { useFx } from '@/hooks/useFx'
 
-// Czech WHT treaty rates by country of stock exchange/company
 const WHT_RATES: Record<string, { rate: number; country: string }> = {
   USD: { rate: 0.15, country: 'United States' },
   EUR: { rate: 0.15, country: 'EU (varies)' },
@@ -13,10 +13,15 @@ const WHT_RATES: Record<string, { rate: number; country: string }> = {
   GBP: { rate: 0.00, country: 'United Kingdom' },
 }
 
+const tdR: React.CSSProperties = {
+  padding: '8px 14px', borderBottom: '1px solid var(--border)',
+  textAlign: 'right', color: 'var(--text2)', fontSize: 12,
+}
+
 export default function TaxPage() {
   const [dividends, setDividends] = useState<DividendReceived[]>([])
-  const [year, setYear] = useState(new Date().getFullYear())
-  const fx = DEFAULT_FX
+  const [year, setYear]           = useState(new Date().getFullYear())
+  const { fx } = useFx()
 
   useEffect(() => {
     supabase.from('dividends_received').select('*').order('payment_date', { ascending: false })
@@ -26,54 +31,40 @@ export default function TaxPage() {
   const years = Array.from(new Set(dividends.map(d => new Date(d.payment_date).getFullYear()))).sort((a, b) => b - a)
   const filtered = dividends.filter(d => new Date(d.payment_date).getFullYear() === year)
 
-  // Group by currency
   const byCcy: Record<string, DividendReceived[]> = {}
-  filtered.forEach(d => {
+  for (const d of filtered) {
     if (!byCcy[d.currency]) byCcy[d.currency] = []
     byCcy[d.currency].push(d)
-  })
+  }
 
-  const totalGrossCZK = filtered.reduce((s, d) => s + toCZK(d.gross_amount, d.currency, fx), 0)
+  const totalGrossCZK = filtered.reduce((s, d) => s + toCZK(d.gross_amount,    d.currency, fx), 0)
   const totalWHTCZK   = filtered.reduce((s, d) => s + toCZK(d.withholding_tax, d.currency, fx), 0)
   const totalNetCZK   = totalGrossCZK - totalWHTCZK
-
-  // Czech tax: 15% on gross, minus WHT already paid (can credit up to Czech rate)
-  const czechTaxDue = Math.max(0, totalGrossCZK * 0.15 - totalWHTCZK)
+  const czechTaxDue   = Math.max(0, totalGrossCZK * 0.15 - totalWHTCZK)
 
   return (
     <div style={{ display: 'flex' }}>
       <Sidebar />
       <main style={{ marginLeft: 'var(--sidebar-w)', flex: 1, padding: '28px 36px', maxWidth: 960 }}>
-
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 22 }}>
           <div>
-            <h1 style={{ fontFamily: "'Instrument Serif', serif", fontSize: 26, fontWeight: 400, letterSpacing: -0.5 }}>
-              Tax summary
-            </h1>
-            <div style={{ fontSize: 11, color: 'var(--text3)', marginTop: 3 }}>
-              For Czech daňové přiznání (tax return) · Dividend income
-            </div>
+            <h1 style={{ fontFamily: "'Instrument Serif', serif", fontSize: 26, fontWeight: 400, letterSpacing: -0.5 }}>Tax summary</h1>
+            <div style={{ fontSize: 11, color: 'var(--text3)', marginTop: 3 }}>For Czech daňové přiznání · Dividend income</div>
           </div>
           <div style={{ display: 'flex', gap: 6 }}>
             {years.map(y => (
-              <button key={y} onClick={() => setYear(y)} style={{
-                padding: '5px 14px', borderRadius: 6, fontSize: 12, cursor: 'pointer',
-                background: year === y ? 'var(--green-bg)' : 'var(--bg2)',
-                border: `1px solid ${year === y ? 'var(--green-bd)' : 'var(--border2)'}`,
-                color: year === y ? 'var(--green)' : 'var(--text2)',
-              }}>
+              <button key={y} onClick={() => setYear(y)} style={{ padding: '5px 14px', borderRadius: 6, fontSize: 12, cursor: 'pointer', background: year === y ? 'var(--green-bg)' : 'var(--bg2)', border: `1px solid ${year === y ? 'var(--green-bd)' : 'var(--border2)'}`, color: year === y ? 'var(--green)' : 'var(--text2)' }}>
                 {y}
               </button>
             ))}
           </div>
         </div>
 
-        {/* Summary cards */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 20 }}>
           {[
-            { label: 'Gross dividends', value: fmtCZK(totalGrossCZK, 2), accent: 'var(--green)', note: 'Report on § 8 income' },
-            { label: 'WHT paid abroad', value: `−${fmtCZK(totalWHTCZK, 2)}`, accent: 'var(--amber)', note: 'Creditable against Czech tax' },
-            { label: 'Net received', value: fmtCZK(totalNetCZK, 2), accent: 'var(--blue)', note: 'After withholding tax' },
+            { label: 'Gross dividends',  value: fmtCZK(totalGrossCZK, 2), accent: 'var(--green)', note: 'Report on § 8 income' },
+            { label: 'WHT paid abroad',  value: `−${fmtCZK(totalWHTCZK, 2)}`, accent: 'var(--amber)', note: 'Creditable against Czech tax' },
+            { label: 'Net received',     value: fmtCZK(totalNetCZK, 2), accent: 'var(--blue)', note: 'After withholding tax' },
             { label: 'Est. Czech tax due', value: fmtCZK(czechTaxDue, 2), accent: czechTaxDue > 0 ? 'var(--red)' : 'var(--green)', note: '15% gross minus WHT credit' },
           ].map((m, i) => (
             <div key={i} style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 10, padding: '14px 18px', position: 'relative', overflow: 'hidden' }}>
@@ -85,21 +76,14 @@ export default function TaxPage() {
           ))}
         </div>
 
-        {/* Notice */}
-        <div style={{
-          background: 'var(--blue-bg)', border: '1px solid var(--blue-bd)', borderRadius: 8,
-          padding: '10px 14px', marginBottom: 18, fontSize: 12, color: 'var(--blue)',
-        }}>
-          ⓘ <strong>Czech tax note:</strong> Foreign dividends are taxed at 15% (§ 8 ZDP). WHT paid abroad is creditable up to the Czech rate.
-          Always verify with a tax advisor — this is an estimate only.
+        <div style={{ background: 'var(--blue-bg)', border: '1px solid var(--blue-bd)', borderRadius: 8, padding: '10px 14px', marginBottom: 18, fontSize: 12, color: 'var(--blue)' }}>
+          ⓘ <strong>Czech tax note:</strong> Foreign dividends are taxed at 15% (§ 8 ZDP). WHT paid abroad is creditable up to the Czech rate. Always verify with a tax advisor — this is an estimate only.
         </div>
 
-        {/* By currency breakdown */}
         {Object.entries(byCcy).map(([ccy, items]) => {
           const grossCZK = items.reduce((s, d) => s + toCZK(d.gross_amount, d.currency, fx), 0)
           const whtCZK   = items.reduce((s, d) => s + toCZK(d.withholding_tax, d.currency, fx), 0)
           const info = WHT_RATES[ccy]
-
           return (
             <div key={ccy} style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 10, overflow: 'hidden', marginBottom: 14 }}>
               <div style={{ padding: '11px 18px', borderBottom: '1px solid var(--border)', background: 'var(--bg3)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -116,35 +100,19 @@ export default function TaxPage() {
                 <thead>
                   <tr>
                     {['Symbol', 'Payment date', 'Gross', 'WHT', 'Net (CZK)', 'Notes'].map((h, i) => (
-                      <th key={h} style={{
-                        fontSize: 9, letterSpacing: '0.09em', textTransform: 'uppercase',
-                        color: 'var(--text3)', padding: '7px 14px',
-                        textAlign: i === 0 ? 'left' : i === 5 ? 'left' : 'right',
-                        borderBottom: '1px solid var(--border)', fontWeight: 400,
-                      }}>{h}</th>
+                      <th key={h} style={{ fontSize: 9, letterSpacing: '0.09em', textTransform: 'uppercase', color: 'var(--text3)', padding: '7px 14px', textAlign: i === 0 ? 'left' : i === 5 ? 'left' : 'right', borderBottom: '1px solid var(--border)', fontWeight: 400 }}>{h}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
                   {items.map(d => (
-                    <tr key={d.id}
-                      onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg3)')}
-                      onMouseLeave={e => (e.currentTarget.style.background = '')}
-                    >
+                    <tr key={d.id} onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg3)')} onMouseLeave={e => (e.currentTarget.style.background = '')}>
                       <td style={{ padding: '8px 14px', borderBottom: '1px solid var(--border)', fontWeight: 500 }}>{d.symbol}</td>
-                      <td style={{ padding: '8px 14px', borderBottom: '1px solid var(--border)', textAlign: 'right', color: 'var(--text2)', fontSize: 12 }}>{fmtDate(d.payment_date)}</td>
-                      <td style={{ padding: '8px 14px', borderBottom: '1px solid var(--border)', textAlign: 'right', color: 'var(--green)', fontFamily: "'DM Mono', monospace", fontSize: 12 }}>
-                        {d.gross_amount.toFixed(2)} {d.currency}
-                      </td>
-                      <td style={{ padding: '8px 14px', borderBottom: '1px solid var(--border)', textAlign: 'right', color: 'var(--red)', fontFamily: "'DM Mono', monospace", fontSize: 12 }}>
-                        −{d.withholding_tax.toFixed(2)} {d.currency}
-                      </td>
-                      <td style={{ padding: '8px 14px', borderBottom: '1px solid var(--border)', textAlign: 'right', fontFamily: "'DM Mono', monospace", fontSize: 12 }}>
-                        {fmtCZK(toCZK(d.net_amount, d.currency, fx), 2)}
-                      </td>
-                      <td style={{ padding: '8px 14px', borderBottom: '1px solid var(--border)', color: 'var(--text3)', fontSize: 11 }}>
-                        {d.notes ?? '—'}
-                      </td>
+                      <td style={{ ...tdR, textAlign: 'right' }}>{fmtDate(d.payment_date)}</td>
+                      <td style={{ ...tdR, color: 'var(--green)', fontFamily: "'DM Mono', monospace" }}>{d.gross_amount.toFixed(2)} {d.currency}</td>
+                      <td style={{ ...tdR, color: 'var(--red)', fontFamily: "'DM Mono', monospace" }}>−{d.withholding_tax.toFixed(2)} {d.currency}</td>
+                      <td style={{ ...tdR, fontFamily: "'DM Mono', monospace" }}>{fmtCZK(toCZK(d.net_amount, d.currency, fx), 2)}</td>
+                      <td style={{ padding: '8px 14px', borderBottom: '1px solid var(--border)', color: 'var(--text3)', fontSize: 11 }}>{d.notes ?? '—'}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -154,11 +122,10 @@ export default function TaxPage() {
         })}
 
         {filtered.length === 0 && (
-          <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 10, padding: '40px', textAlign: 'center', color: 'var(--text3)' }}>
+          <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 10, padding: 40, textAlign: 'center', color: 'var(--text3)' }}>
             No dividend income recorded for {year}.
           </div>
         )}
-
       </main>
     </div>
   )
