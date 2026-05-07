@@ -1,7 +1,7 @@
-export const DEFAULT_FX: Record<string, number> = { USD: 23.50, EUR: 25.60, CZK: 1, GBP: 29.80 }
+export const DEFAULT_FX: Record<string, number> = { USD: 20.65, EUR: 23.40, CZK: 1, GBP: 27.50 }
 
 export const toCZK = (amount: number, ccy: string, fx = DEFAULT_FX) =>
-  amount * (fx[ccy] ?? fx['USD'] ?? 23.50)
+  amount * (fx[ccy] ?? fx['USD'] ?? 20.65)
 
 export const fmtCZK = (n: number, decimals = 0) =>
   `Kč\u202f${n.toLocaleString('cs-CZ', {
@@ -20,15 +20,15 @@ export const fmtDateShort = (d: string) =>
 
 export async function fetchFxRates(): Promise<Record<string, number>> {
   try {
-    const res = await fetch('https://api.frankfurter.app/latest?from=CZK&to=USD,EUR,GBP')
-    if (!res.ok) throw new Error('FX fetch failed')
+    // Call our own API route — avoids any browser CORS issues with Frankfurter
+    const res = await fetch('/api/fx')
+    if (!res.ok) throw new Error(`/api/fx responded ${res.status}`)
     const data = await res.json()
-    const rates: Record<string, number> = { CZK: 1 }
-    for (const [ccy, rate] of Object.entries(data.rates as Record<string, number>)) {
-      rates[ccy] = 1 / rate
-    }
-    return rates
-  } catch {
+    if (data.error) throw new Error(data.error)
+    console.log('[fx] live rates fetched:', data.rates)
+    return data.rates as Record<string, number>
+  } catch (err) {
+    console.error('[fx] fetch failed, using defaults:', err)
     return DEFAULT_FX
   }
 }
