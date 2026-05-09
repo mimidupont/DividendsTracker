@@ -19,12 +19,23 @@ const ACCOUNT_TYPE_COLORS: Record<string, string> = {
   fixed_deposit: 'var(--amber)',
 }
 
+const emptyForm = {
+  name: '',
+  institution: '',
+  account_type: 'savings',
+  balance: '',
+  currency: 'CZK',
+  interest_rate: '',
+  notes: '',
+}
+
 export default function CashPage() {
   const [accounts, setAccounts] = useState<BankAccount[]>([])
   const [interest, setInterest] = useState<BankInterestReceived[]>([])
   const [loading, setLoading] = useState(true)
   const [showAdd, setShowAdd] = useState(false)
-  const [form, setForm] = useState({ name: '', institution: '', account_type: 'savings', balance: '', currency: 'CZK', interest_rate: '', notes: '' })
+  const [editId, setEditId] = useState<string | null>(null)
+  const [form, setForm] = useState(emptyForm)
   const [saving, setSaving] = useState(false)
   const { fx, fxLoading, fxTs, refresh: refreshFx } = useFx()
 
@@ -44,10 +55,26 @@ export default function CashPage() {
   const annualInterestCZK = accounts.reduce((s, a) => s + toCZK(a.balance * a.interest_rate, a.currency, fx), 0)
   const avgRate = accounts.length > 0 ? accounts.reduce((s, a) => s + a.interest_rate, 0) / accounts.length : 0
 
+  const resetForm = () => { setForm(emptyForm); setEditId(null) }
+
+  const startEdit = (a: BankAccount) => {
+    setForm({
+      name: a.name,
+      institution: a.institution,
+      account_type: a.account_type,
+      balance: String(a.balance),
+      currency: a.currency,
+      interest_rate: String((a.interest_rate * 100).toFixed(2)),
+      notes: a.notes ?? '',
+    })
+    setEditId(a.id)
+    setShowAdd(true)
+  }
+
   const saveAccount = async () => {
     if (!form.name || !form.institution || !form.balance) return
     setSaving(true)
-    await supabase.from('bank_accounts').insert([{
+    const payload = {
       name: form.name,
       institution: form.institution,
       account_type: form.account_type,
@@ -55,10 +82,16 @@ export default function CashPage() {
       currency: form.currency,
       interest_rate: parseFloat(form.interest_rate) / 100 || 0,
       notes: form.notes || null,
-    }])
+      updated_at: new Date().toISOString(),
+    }
+    if (editId) {
+      await supabase.from('bank_accounts').update(payload).eq('id', editId)
+    } else {
+      await supabase.from('bank_accounts').insert([payload])
+    }
     setSaving(false)
     setShowAdd(false)
-    setForm({ name: '', institution: '', account_type: 'savings', balance: '', currency: 'CZK', interest_rate: '', notes: '' })
+    resetForm()
     load()
   }
 
@@ -81,7 +114,7 @@ export default function CashPage() {
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
             <button onClick={refreshFx} disabled={fxLoading} style={btnSecondary}>{fxLoading ? '⟳' : '↻'} FX {fxTs && <span style={{ color: 'var(--green)', marginLeft: 4 }}>{fxTs}</span>}</button>
-            <button onClick={() => setShowAdd(true)} style={btnPrimary('var(--blue)', 'var(--blue-bd)', 'var(--blue-bg)')}>+ Add account</button>
+            <button onClick={() => { resetForm(); setShowAdd(true) }} style={btnPrimary('var(--blue)', 'var(--blue-bd)', 'var(--blue-bg)')}>+ Add account</button>
           </div>
         </div>
 
@@ -144,12 +177,21 @@ export default function CashPage() {
                         {a.currency}
                       </span>
                     </td>
-                    <td style={{ padding: '9px 14px', borderBottom: '1px solid var(--border)' }}>
-                      <button onClick={async () => {
-                        if (!confirm(`Delete "${a.name}"?`)) return
-                        await supabase.from('bank_accounts').update({ is_active: false }).eq('id', a.id)
-                        load()
-                      }} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text4)', fontSize: 12 }}>✕</button>
+                    <td style={{ padding: '9px 14px', borderBottom: '1px solid var(--border)', whiteSpace: 'nowrap' }}>
+                      <button
+                        title="Edit account"
+                        onClick={() => startEdit(a)}
+                        style={actionBtn}
+                      >✎</button>
+                      <button
+                        title="Delete account"
+                        onClick={async () => {
+                          if (!confirm(`Delete "${a.name}"?`)) return
+                          await supabase.from('bank_accounts').update({ is_active: false }).eq('id', a.id)
+                          load()
+                        }}
+                        style={{ ...actionBtn, marginLeft: 4, color: 'var(--red)' }}
+                      >✕</button>
                     </td>
                   </tr>
                 )
@@ -167,10 +209,12 @@ export default function CashPage() {
           </table>
         </div>
 
-        {/* Add account form */}
+        {/* Add / Edit form */}
         {showAdd && (
           <div style={{ background: 'var(--bg2)', border: '1px solid var(--blue-bd)', borderRadius: 12, padding: '24px 28px', marginBottom: 16 }}>
-            <div style={{ fontFamily: "'Syne', sans-serif", fontSize: 16, fontWeight: 600, marginBottom: 18 }}>Add bank account</div>
+            <div style={{ fontFamily: "'Syne', sans-serif", fontSize: 16, fontWeight: 600, marginBottom: 18 }}>
+              {editId ? 'Edit account' : 'Add bank account'}
+            </div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
               {[
                 { label: 'Account name', key: 'name', placeholder: 'e.g. Spořicí účet' },
@@ -204,11 +248,15 @@ export default function CashPage() {
                 <div style={inputLabel}>Interest rate (%)</div>
                 <input style={inputStyle} type="number" step="0.1" placeholder="4.5" value={form.interest_rate} onChange={e => setForm(p => ({ ...p, interest_rate: e.target.value }))} />
               </div>
+              <div style={{ gridColumn: '1/-1' }}>
+                <div style={inputLabel}>Notes (optional)</div>
+                <input style={inputStyle} placeholder="e.g. Fixed until Dec 2025" value={form.notes} onChange={e => setForm(p => ({ ...p, notes: e.target.value }))} />
+              </div>
             </div>
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 18 }}>
-              <button onClick={() => setShowAdd(false)} style={btnSecondary}>Cancel</button>
+              <button onClick={() => { setShowAdd(false); resetForm() }} style={btnSecondary}>Cancel</button>
               <button onClick={saveAccount} disabled={saving} style={btnPrimary('var(--blue)', 'var(--blue-bd)', 'var(--blue-bg)')}>
-                {saving ? 'Saving…' : 'Add account'}
+                {saving ? 'Saving…' : editId ? 'Save changes' : 'Add account'}
               </button>
             </div>
           </div>
@@ -270,6 +318,11 @@ const th: React.CSSProperties = {
 const tdL: React.CSSProperties = { padding: '9px 14px', borderBottom: '1px solid var(--border)' }
 const tdR: React.CSSProperties = { padding: '9px 14px', borderBottom: '1px solid var(--border)', textAlign: 'right', color: 'var(--text2)', fontSize: 12 }
 const trStyle: React.CSSProperties = { transition: 'background 0.1s' }
+const actionBtn: React.CSSProperties = {
+  background: 'none', border: '1px solid var(--border2)', borderRadius: 4, cursor: 'pointer',
+  color: 'var(--text3)', fontSize: 12, width: 24, height: 24,
+  display: 'inline-flex', alignItems: 'center', justifyContent: 'center', padding: 0,
+}
 const btnSecondary: React.CSSProperties = {
   padding: '7px 14px', borderRadius: 6, cursor: 'pointer',
   background: 'var(--bg3)', border: '1px solid var(--border2)',
