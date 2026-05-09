@@ -59,3 +59,66 @@ export interface DividendProjection {
   notes: string | null
   updated_at: string
 }
+
+export interface BankAccount {
+  id: string
+  name: string
+  institution: string
+  account_type: 'savings' | 'checking' | 'money_market' | 'fixed_deposit'
+  balance: number
+  currency: string
+  interest_rate: number
+  interest_type: string
+  maturity_date: string | null
+  notes: string | null
+  is_active: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface BankInterestReceived {
+  id: string
+  account_id: string
+  payment_date: string
+  gross_amount: number
+  tax_withheld: number
+  net_amount: number
+  currency: string
+  notes: string | null
+  created_at: string
+}
+
+export interface CryptoHolding {
+  id: string
+  coin_id: string
+  symbol: string
+  name: string
+  amount: number
+  avg_cost_usd: number
+  wallet_label: string | null
+  purchase_date: string | null
+  staking_apy: number
+  notes: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface RealEstate {
+  id: string
+  name: string
+  property_type: 'residential' | 'commercial' | 'land' | 'reit'
+  address: string | null
+  purchase_price: number
+  current_value: number
+  currency: string
+  purchase_date: string | null
+  monthly_rent: number
+  mortgage_balance: number
+  mortgage_rate: number
+  monthly_mortgage: number
+  ownership_pct: number
+  notes: string | null
+  is_primary_residence: boolean
+  created_at: string
+  updated_at: string
+}

@@ -4,35 +4,40 @@ import { usePathname } from 'next/navigation'
 
 const nav = [
   { section: 'Overview', items: [
-    { href: '/',             label: 'Dashboard',       icon: '◈' },
-    { href: '/holdings',     label: 'Holdings',        icon: '◻' },
+    { href: '/',              label: 'Net worth',     icon: '◈', color: 'var(--text2)' },
+    { href: '/performance',  label: 'Performance',   icon: '◉', color: 'var(--text2)' },
+    { href: '/allocation',   label: 'Allocation',    icon: '◎', color: 'var(--text2)' },
   ]},
-  { section: 'Income', items: [
-    { href: '/received',     label: 'Received',        icon: '↓' },
-    { href: '/projected',    label: 'Projected',       icon: '→' },
-    { href: '/calendar',     label: 'Ex-div calendar', icon: '▦' },
+  { section: 'Stocks & ETFs', accent: 'var(--green)', items: [
+    { href: '/holdings',     label: 'Holdings',      icon: '◻', color: 'var(--green)' },
+    { href: '/dividends',    label: 'Dividends',     icon: '↓', color: 'var(--green)' },
+    { href: '/projected',    label: 'Projected',     icon: '→', color: 'var(--green)' },
+    { href: '/calendar',     label: 'Ex-div cal.',   icon: '▦', color: 'var(--green)' },
   ]},
-  { section: 'Analysis', items: [
-    { href: '/performance',  label: 'Performance',     icon: '◉' },
-    { href: '/allocation',   label: 'Allocation',      icon: '◎' },
-    { href: '/currency',     label: 'Currency mix',    icon: '◑' },
-    { href: '/fees',         label: 'Fee scanner',     icon: '◷' },
-    { href: '/tax',          label: 'Tax summary',     icon: '⊞' },
+  { section: 'Cash & Savings', accent: 'var(--blue)', items: [
+    { href: '/cash',         label: 'Bank accounts', icon: '⊟', color: 'var(--blue)'  },
+  ]},
+  { section: 'Crypto', accent: 'var(--purple)', items: [
+    { href: '/crypto',       label: 'Holdings',      icon: '⬡', color: 'var(--purple)' },
+  ]},
+  { section: 'Real Estate', accent: 'var(--teal)', items: [
+    { href: '/realestate',   label: 'Properties',    icon: '⊞', color: 'var(--teal)'  },
   ]},
   { section: 'Planning', items: [
-    { href: '/simulation',   label: 'Wealth sim.',     icon: '∿' },
+    { href: '/tax',          label: 'Tax summary',   icon: '⊕', color: 'var(--text2)' },
+    { href: '/simulation',   label: 'Wealth sim.',   icon: '∿', color: 'var(--text2)' },
   ]},
 ]
 
 export default function Sidebar() {
   const path = usePathname()
+
   return (
     <aside style={{
       width: 'var(--sidebar-w)',
       flexShrink: 0,
       background: 'var(--bg2)',
       borderRight: '1px solid var(--border)',
-      padding: '24px 0',
       display: 'flex',
       flexDirection: 'column',
       position: 'fixed',
@@ -40,34 +45,35 @@ export default function Sidebar() {
       zIndex: 10,
     }}>
       {/* Logo */}
-      <div style={{ padding: '0 20px 20px', borderBottom: '1px solid var(--border)', marginBottom: 12 }}>
+      <div style={{ padding: '22px 20px 18px', borderBottom: '1px solid var(--border)' }}>
         <div style={{
-          fontFamily: "'Instrument Serif', serif",
-          fontSize: 22,
-          fontWeight: 400,
-          color: 'var(--green)',
-          letterSpacing: -0.3,
-          fontStyle: 'italic',
+          fontFamily: "'Syne', sans-serif",
+          fontSize: 20,
+          fontWeight: 700,
+          letterSpacing: '-0.02em',
+          background: 'linear-gradient(135deg, var(--text) 0%, var(--text2) 100%)',
+          WebkitBackgroundClip: 'text',
+          WebkitTextFillColor: 'transparent',
         }}>
-          Divvy
+          DIVVY
         </div>
-        <div style={{ fontSize: 10, color: 'var(--text3)', letterSpacing: '0.1em', textTransform: 'uppercase', marginTop: 1 }}>
-          Portfolio tracker
+        <div style={{ fontSize: 10, color: 'var(--text4)', letterSpacing: '0.12em', textTransform: 'uppercase', marginTop: 2 }}>
+          Wealth tracker
         </div>
       </div>
 
       {/* Nav */}
-      <nav style={{ flex: 1, padding: '0 10px', overflowY: 'auto' }}>
+      <nav style={{ flex: 1, padding: '8px 10px', overflowY: 'auto' }}>
         {nav.map(group => (
-          <div key={group.section}>
+          <div key={group.section} style={{ marginBottom: 4 }}>
             <div style={{
               fontSize: 9,
-              letterSpacing: '0.12em',
+              letterSpacing: '0.14em',
               textTransform: 'uppercase',
-              color: 'var(--text4)',
-              padding: '12px 10px 4px',
-              fontFamily: "'Geist', sans-serif",
-              fontWeight: 500,
+              color: group.accent ?? 'var(--text4)',
+              padding: '10px 10px 4px',
+              fontWeight: 600,
+              opacity: group.accent ? 0.9 : 1,
             }}>
               {group.section}
             </div>
@@ -77,19 +83,22 @@ export default function Sidebar() {
                 <Link key={item.href} href={item.href} style={{
                   display: 'flex',
                   alignItems: 'center',
-                  gap: 9,
-                  padding: '7px 10px',
+                  gap: 8,
+                  padding: '6px 10px',
                   borderRadius: 6,
                   textDecoration: 'none',
                   fontSize: 12,
-                  fontFamily: "'Geist', sans-serif",
-                  background: active ? 'var(--green-bg)' : 'transparent',
-                  color: active ? 'var(--green)' : 'var(--text2)',
-                  border: active ? '1px solid var(--green-bd)' : '1px solid transparent',
+                  fontFamily: "'Inter', sans-serif",
+                  background: active ? 'var(--bg4)' : 'transparent',
+                  color: active ? item.color : 'var(--text3)',
+                  border: active ? '1px solid var(--border2)' : '1px solid transparent',
                   marginBottom: 1,
-                  transition: 'all 0.12s',
+                  transition: 'all 0.1s',
                 }}>
-                  <span style={{ width: 14, textAlign: 'center', fontSize: 11 }}>{item.icon}</span>
+                  <span style={{
+                    width: 16, textAlign: 'center', fontSize: 10,
+                    color: active ? item.color : 'var(--text4)',
+                  }}>{item.icon}</span>
                   {item.label}
                 </Link>
               )
@@ -99,18 +108,19 @@ export default function Sidebar() {
       </nav>
 
       {/* User footer */}
-      <div style={{ padding: '14px 20px', borderTop: '1px solid var(--border)' }}>
+      <div style={{ padding: '12px 16px', borderTop: '1px solid var(--border)' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <div style={{
-            width: 28, height: 28, borderRadius: '50%',
-            background: 'var(--green-bg)',
-            border: '1px solid var(--green-bd)',
+            width: 30, height: 30, borderRadius: '50%',
+            background: 'linear-gradient(135deg, var(--green-bg), var(--blue-bg))',
+            border: '1px solid var(--border2)',
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             fontSize: 9, color: 'var(--green)', fontWeight: 600,
+            fontFamily: "'Syne', sans-serif",
           }}>ED</div>
           <div>
-            <div style={{ fontSize: 11, color: 'var(--text)' }}>Eliot Deschamps</div>
-            <div style={{ fontSize: 10, color: 'var(--text3)' }}>IBKR · CZK base</div>
+            <div style={{ fontSize: 11, color: 'var(--text)', fontWeight: 500 }}>Eliot Deschamps</div>
+            <div style={{ fontSize: 10, color: 'var(--text4)' }}>IBKR · CZK base</div>
           </div>
         </div>
       </div>

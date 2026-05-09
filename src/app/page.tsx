@@ -1,17 +1,12 @@
 'use client'
 import { useEffect, useState, useCallback } from 'react'
 import Sidebar from '@/components/Sidebar'
-import Badge from '@/components/Badge'
-import AddPositionModal from '@/components/AddPositionModal'
-import LogDividendModal from '@/components/LogDividendModal'
-import DripCheckModal from '@/components/DripCheckModal'
-import MarketStatus from '@/components/MarketStatus'
-import { supabase, Holding, DividendReceived, DividendProjection } from '@/lib/supabase'
-import { toCZK, fmtCZK, fmtDate } from '@/lib/fx'
+import { supabase, Holding, BankAccount, CryptoHolding, RealEstate, DividendProjection, DividendReceived } from '@/lib/supabase'
+import { toCZK, fmtCZK } from '@/lib/fx'
 import { useFx } from '@/hooks/useFx'
 import { useMarketData } from '@/hooks/useMarketData'
+import { useCryptoPrices } from '@/hooks/useCryptoPrices'
 import { computeProjectedTotal } from '@/lib/projections'
-import { tdR, btnStyle } from '@/lib/ui'
 
 const CURRENT_YEAR = new Date().getFullYear()
 
@@ -20,68 +15,119 @@ function greeting() {
   return h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening'
 }
 
+interface AssetBlock {
+  label: string
+  value: number
+  color: string
+  href: string
+}
+
 export default function Dashboard() {
   const [holdings, setHoldings]       = useState<Holding[]>([])
-  const [received, setReceived]       = useState<DividendReceived[]>([])
+  const [bankAccounts, setBankAccounts] = useState<BankAccount[]>([])
+  const [crypto, setCrypto]           = useState<CryptoHolding[]>([])
+  const [realEstate, setRealEstate]   = useState<RealEstate[]>([])
   const [projections, setProjections] = useState<DividendProjection[]>([])
+  const [received, setReceived]       = useState<DividendReceived[]>([])
   const [loading, setLoading]         = useState(true)
-  const [showAdd, setShowAdd]         = useState(false)
-  const [showLog, setShowLog]         = useState(false)
-  const [showDrip, setShowDrip]       = useState(false)
 
   const { fx, fxLoading, fxTs, refresh: refreshFx } = useFx()
   const market = useMarketData()
+  const cryptoPrices = useCryptoPrices()
 
   const load = useCallback(async () => {
-    const [h, r, p] = await Promise.all([
+    const [h, b, c, r, p, div] = await Promise.all([
       supabase.from('holdings').select('*').order('symbol'),
+      supabase.from('bank_accounts').select('*').eq('is_active', true).order('balance', { ascending: false }),
+      supabase.from('crypto_holdings').select('*').order('avg_cost_usd', { ascending: false }),
+      supabase.from('real_estate').select('*').order('current_value', { ascending: false }),
+      supabase.from('dividend_projections').select('*').eq('year', CURRENT_YEAR + 1),
       supabase.from('dividends_received').select('*').order('payment_date', { ascending: false }),
-      supabase.from('dividend_projections').select('*').eq('year', CURRENT_YEAR + 1).order('projected_total', { ascending: false }),
     ])
     if (h.data) setHoldings(h.data)
-    if (r.data) setReceived(r.data)
+    if (b.data) setBankAccounts(b.data)
+    if (c.data) setCrypto(c.data)
+    if (r.data) setRealEstate(r.data)
     if (p.data) setProjections(p.data)
+    if (div.data) setReceived(div.data)
     setLoading(false)
-    return h.data ?? []
+    return { holdings: h.data ?? [], crypto: c.data ?? [] }
   }, [])
 
   useEffect(() => {
-    load().then(h => { if (h.length > 0) market.refresh(h.map((hh: Holding) => hh.symbol)) })
+    load().then(({ holdings: h, crypto: c }) => {
+      if (h.length > 0) market.refresh(h.map(hh => hh.symbol))
+      if (c.length > 0) cryptoPrices.refresh(c.map(cc => cc.coin_id))
+    })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const refreshAll = async () => {
-    const h = await load()
-    if (h.length > 0) await market.refresh(h.map((hh: Holding) => hh.symbol))
-  }
+  // ── Stock values ─────────────────────────────────────────
+  const stockValueCZK = holdings.reduce((s, h) =>
+    s + toCZK(market.getPrice(h.symbol, h.avg_price) * h.shares, h.currency, fx), 0)
+  const stockCostCZK = holdings.reduce((s, h) =>
+    s + toCZK(h.avg_price * h.shares, h.currency, fx), 0)
 
-  const totalValueCZK = holdings.reduce((sum, h) =>
-    sum + toCZK(market.getPrice(h.symbol, h.avg_price) * h.shares, h.currency, fx), 0)
-  const totalCostCZK = holdings.reduce((sum, h) =>
-    sum + toCZK(h.avg_price * h.shares, h.currency, fx), 0)
-  const unrealizedPLCZK = totalValueCZK - totalCostCZK
+  // ── Cash values ──────────────────────────────────────────
+  const cashValueCZK = bankAccounts.reduce((s, a) =>
+    s + toCZK(a.balance, a.currency, fx), 0)
 
-  const ytdReceived = received.filter(d => new Date(d.payment_date).getFullYear() === CURRENT_YEAR)
-  const ytdGrossCZK = ytdReceived.reduce((sum, d) => sum + toCZK(d.gross_amount, d.currency, fx), 0)
-  const ytdNetCZK   = ytdReceived.reduce((sum, d) => sum + toCZK(d.net_amount,   d.currency, fx), 0)
-
-  const projGrossCZK = holdings.reduce((sum, h) => {
-    const liveAnnual = market.getAnnualDiv(h.symbol)
-    if (liveAnnual != null) return sum + toCZK(liveAnnual * h.shares, h.currency, fx)
-    const proj = projections.find(p => p.symbol === h.symbol)
-    if (!proj) return sum
-    return sum + toCZK(computeProjectedTotal(proj, holdings), proj.currency, fx)
+  // ── Crypto values ────────────────────────────────────────
+  const cryptoValueCZK = crypto.reduce((s, c) => {
+    const priceUSD = cryptoPrices.getPrice(c.coin_id, c.avg_cost_usd)
+    return s + toCZK(priceUSD * c.amount, 'USD', fx)
   }, 0)
 
-  const portfolioYield     = totalValueCZK > 0 ? (projGrossCZK / totalValueCZK) * 100 : 0
-  const portfolioYieldCost = totalCostCZK  > 0 ? (projGrossCZK / totalCostCZK)  * 100 : 0
-  const divPayers = holdings.filter(h => h.is_dividend_payer).length
+  // ── Real estate (net equity) ─────────────────────────────
+  const realEstateGrossCZK = realEstate.reduce((s, p) =>
+    s + toCZK(p.current_value * (p.ownership_pct / 100), p.currency, fx), 0)
+  const mortgageCZK = realEstate.reduce((s, p) =>
+    s + toCZK(p.mortgage_balance, p.currency, fx), 0)
+  const realEstateEquityCZK = realEstateGrossCZK - mortgageCZK
+
+  // ── Total net worth ──────────────────────────────────────
+  const totalNetWorth = stockValueCZK + cashValueCZK + cryptoValueCZK + realEstateEquityCZK
+  const totalInvested = stockCostCZK + cashValueCZK + crypto.reduce((s, c) =>
+    s + toCZK(c.avg_cost_usd * c.amount, 'USD', fx), 0) + realEstate.reduce((s, p) =>
+    s + toCZK(p.purchase_price * (p.ownership_pct / 100), p.currency, fx), 0)
+  const totalGainCZK = totalNetWorth - totalInvested
+
+  // ── Annual income ────────────────────────────────────────
+  const divIncomeCZK = holdings.reduce((s, h) => {
+    const liveAnnual = market.getAnnualDiv(h.symbol)
+    if (liveAnnual != null) return s + toCZK(liveAnnual * h.shares, h.currency, fx)
+    const proj = projections.find(p => p.symbol === h.symbol)
+    if (!proj) return s
+    return s + toCZK(computeProjectedTotal(proj, holdings), proj.currency, fx)
+  }, 0)
+  const interestIncomeCZK = bankAccounts.reduce((s, a) =>
+    s + toCZK(a.balance * a.interest_rate, a.currency, fx), 0)
+  const rentalIncomeCZK = realEstate.reduce((s, p) =>
+    s + toCZK(p.monthly_rent * 12 * (p.ownership_pct / 100), p.currency, fx), 0)
+  const stakingIncomeCZK = crypto.reduce((s, c) => {
+    const priceUSD = cryptoPrices.getPrice(c.coin_id, c.avg_cost_usd)
+    return s + toCZK(priceUSD * c.amount * c.staking_apy, 'USD', fx)
+  }, 0)
+  const totalAnnualIncome = divIncomeCZK + interestIncomeCZK + rentalIncomeCZK + stakingIncomeCZK
+
+  // ── Asset blocks ─────────────────────────────────────────
+  const assetBlocks: AssetBlock[] = [
+    { label: 'Stocks & ETFs', value: stockValueCZK,        color: 'var(--green)',  href: '/holdings' },
+    { label: 'Cash & Savings', value: cashValueCZK,         color: 'var(--blue)',   href: '/cash' },
+    { label: 'Crypto',         value: cryptoValueCZK,       color: 'var(--purple)', href: '/crypto' },
+    { label: 'Real Estate',    value: realEstateEquityCZK,  color: 'var(--teal)',   href: '/realestate' },
+  ]
+
+  // YTD dividends
+  const ytdDivCZK = received
+    .filter(d => new Date(d.payment_date).getFullYear() === CURRENT_YEAR)
+    .reduce((s, d) => s + toCZK(d.gross_amount, d.currency, fx), 0)
 
   if (loading) return (
     <div style={{ display: 'flex' }}>
       <Sidebar />
-      <main style={{ marginLeft: 'var(--sidebar-w)', flex: 1, padding: '40px', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text3)' }}>
-        Loading portfolio…
+      <main style={{ marginLeft: 'var(--sidebar-w)', flex: 1, padding: 40, color: 'var(--text3)' }}>
+        Loading wealth data…
       </main>
     </div>
   )
@@ -89,184 +135,206 @@ export default function Dashboard() {
   return (
     <div style={{ display: 'flex' }}>
       <Sidebar />
-      {showAdd  && <AddPositionModal onClose={() => setShowAdd(false)}  onSaved={refreshAll} />}
-      {showLog  && <LogDividendModal onClose={() => setShowLog(false)}  onSaved={load} />}
-      {showDrip && <DripCheckModal   holdings={holdings} onClose={() => setShowDrip(false)} onSaved={load} />}
+      <main style={{ marginLeft: 'var(--sidebar-w)', flex: 1, padding: '32px 40px', maxWidth: 1200 }}>
 
-      <main style={{ marginLeft: 'var(--sidebar-w)', flex: 1, padding: '28px 36px', maxWidth: 1160 }}>
         {/* Header */}
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 26 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 32 }}>
           <div>
-            <h1 style={{ fontFamily: "'Instrument Serif', serif", fontSize: 27, fontWeight: 400, letterSpacing: -0.5, lineHeight: 1.1 }}>
-              {greeting()}, <em style={{ color: 'var(--green)', fontStyle: 'italic' }}>Eliot</em>
-            </h1>
-            <div style={{ fontSize: 11, color: 'var(--text3)', marginTop: 4, display: 'flex', alignItems: 'center', gap: 10 }}>
+            <div style={{ fontSize: 11, color: 'var(--text4)', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 6 }}>
               {new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}
-              &nbsp;·&nbsp;All values in CZK
-              {fxTs && <span style={{ color: 'var(--green)' }}>· FX {fxTs}</span>}
-              <MarketStatus state={market.state} fetchedAt={market.fetchedAt} errorMsg={market.errorMsg} />
             </div>
+            <h1 style={{ fontFamily: "'Syne', sans-serif", fontSize: 28, fontWeight: 700, letterSpacing: '-0.02em', lineHeight: 1.1 }}>
+              {greeting()}, <span style={{ color: 'var(--green)' }}>Eliot</span>
+            </h1>
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
-            <button onClick={refreshFx} disabled={fxLoading} style={btnStyle('secondary')}>{fxLoading ? '⟳ FX…' : '↻ FX rates'}</button>
-            <button onClick={() => market.refresh(holdings.map(h => h.symbol))} disabled={market.state === 'loading'} style={btnStyle('secondary')}>
-              {market.state === 'loading' ? '⟳ Loading…' : '↻ Refresh prices'}
+            <button onClick={refreshFx} disabled={fxLoading} style={btnSecondary}>
+              {fxLoading ? '⟳' : '↻'} FX rates
+              {fxTs && <span style={{ color: 'var(--green)', marginLeft: 6 }}>{fxTs}</span>}
             </button>
-            <button onClick={() => setShowAdd(true)} style={btnStyle('secondary')}>+ Add position</button>
-            <button onClick={() => setShowLog(true)} style={btnStyle('secondary')}>+ Log dividend</button>
-            <button onClick={() => setShowDrip(true)} style={btnStyle('primary')}>⟳ Check dividends</button>
+            <button onClick={() => market.refresh(holdings.map(h => h.symbol))} disabled={market.state === 'loading'} style={btnSecondary}>
+              {market.state === 'loading' ? '⟳ Fetching…' : '↻ Prices'}
+            </button>
           </div>
         </div>
 
-        {/* Metric cards */}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12, marginBottom: 12 }}>
-          {[
-            { label: 'Portfolio value',    value: fmtCZK(totalValueCZK),          sub: <Badge variant={unrealizedPLCZK >= 0 ? 'green' : 'red'}>{unrealizedPLCZK >= 0 ? '+' : ''}{fmtCZK(unrealizedPLCZK)} P&L</Badge>, accent: 'var(--green)' },
-            { label: 'YTD dividends',      value: fmtCZK(ytdGrossCZK, 2),         sub: <Badge variant="green">{fmtCZK(ytdNetCZK, 2)} net</Badge>, accent: 'var(--green)' },
-            { label: 'Est. annual income', value: fmtCZK(projGrossCZK),           sub: <Badge variant="amber">{market.state === 'done' ? 'live data' : 'projected'}</Badge>, accent: 'var(--amber)' },
-            { label: 'Portfolio yield',    value: `${portfolioYield.toFixed(2)}%`, sub: <Badge variant="blue">on market value</Badge>, accent: 'var(--blue)' },
-            { label: 'Yield on cost',      value: `${portfolioYieldCost.toFixed(2)}%`, sub: <Badge variant="blue">on cost basis</Badge>, accent: 'var(--blue)' },
-          ].map((m, i) => (
-            <div key={i} style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 10, padding: '16px 18px', position: 'relative', overflow: 'hidden' }}>
-              <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 2, background: m.accent, opacity: 0.8 }} />
-              <div style={{ fontSize: 10, letterSpacing: '0.09em', textTransform: 'uppercase', color: 'var(--text3)', marginBottom: 7, fontWeight: 500 }}>{m.label}</div>
-              <div style={{ fontFamily: "'Instrument Serif', serif", fontSize: 22, fontWeight: 400, lineHeight: 1, marginBottom: 7 }}>{m.value}</div>
-              {m.sub}
+        {/* Net Worth Hero */}
+        <div style={{
+          background: 'var(--bg2)',
+          border: '1px solid var(--border)',
+          borderRadius: 16,
+          padding: '32px 36px',
+          marginBottom: 20,
+          position: 'relative',
+          overflow: 'hidden',
+        }}>
+          {/* subtle accent line */}
+          <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 1, background: 'linear-gradient(90deg, var(--green) 0%, var(--blue) 40%, var(--purple) 70%, var(--teal) 100%)', opacity: 0.6 }} />
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 40 }}>
+            {/* Left: Net Worth */}
+            <div>
+              <div style={{ fontSize: 10, letterSpacing: '0.12em', textTransform: 'uppercase', color: 'var(--text3)', marginBottom: 8, fontWeight: 500 }}>
+                Total Net Worth
+              </div>
+              <div style={{ fontFamily: "'Syne', sans-serif", fontSize: 42, fontWeight: 700, letterSpacing: '-0.03em', lineHeight: 1 }}>
+                {fmtCZK(totalNetWorth)}
+              </div>
+              <div style={{ marginTop: 10, display: 'flex', gap: 16 }}>
+                <div style={{ fontSize: 11, color: totalGainCZK >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                  {totalGainCZK >= 0 ? '▲' : '▼'} {totalGainCZK >= 0 ? '+' : ''}{fmtCZK(totalGainCZK)} total gain
+                </div>
+                <div style={{ fontSize: 11, color: 'var(--text4)' }}>
+                  {totalInvested > 0 ? `${((totalGainCZK / totalInvested) * 100).toFixed(1)}% on invested` : ''}
+                </div>
+              </div>
             </div>
-          ))}
+
+            {/* Right: Annual Income */}
+            <div>
+              <div style={{ fontSize: 10, letterSpacing: '0.12em', textTransform: 'uppercase', color: 'var(--text3)', marginBottom: 8, fontWeight: 500 }}>
+                Est. Annual Income
+              </div>
+              <div style={{ fontFamily: "'Syne', sans-serif", fontSize: 42, fontWeight: 700, letterSpacing: '-0.03em', lineHeight: 1, color: 'var(--amber)' }}>
+                {fmtCZK(totalAnnualIncome)}
+              </div>
+              <div style={{ marginTop: 10, display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+                <span style={{ fontSize: 11, color: 'var(--green)' }}>Dividends {fmtCZK(divIncomeCZK)}</span>
+                <span style={{ fontSize: 11, color: 'var(--blue)' }}>Interest {fmtCZK(interestIncomeCZK)}</span>
+                {rentalIncomeCZK > 0 && <span style={{ fontSize: 11, color: 'var(--teal)' }}>Rent {fmtCZK(rentalIncomeCZK)}</span>}
+                {stakingIncomeCZK > 0 && <span style={{ fontSize: 11, color: 'var(--purple)' }}>Staking {fmtCZK(stakingIncomeCZK)}</span>}
+              </div>
+            </div>
+          </div>
+
+          {/* Asset allocation bar */}
+          <div style={{ marginTop: 28 }}>
+            <div style={{ display: 'flex', gap: 2, height: 6, borderRadius: 4, overflow: 'hidden' }}>
+              {assetBlocks.filter(a => a.value > 0).map(a => (
+                <div key={a.label} style={{
+                  flex: a.value,
+                  background: a.color,
+                  opacity: 0.8,
+                  transition: 'flex 0.6s ease',
+                }} />
+              ))}
+            </div>
+            <div style={{ display: 'flex', gap: 20, marginTop: 10 }}>
+              {assetBlocks.filter(a => a.value > 0).map(a => (
+                <div key={a.label} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <div style={{ width: 6, height: 6, borderRadius: 2, background: a.color }} />
+                  <span style={{ fontSize: 10, color: 'var(--text3)' }}>{a.label}</span>
+                  <span style={{ fontSize: 10, color: 'var(--text4)', fontFamily: "'DM Mono', monospace" }}>
+                    {totalNetWorth > 0 ? ((a.value / totalNetWorth) * 100).toFixed(0) : 0}%
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
         </div>
 
-        <HoldingsTable holdings={holdings} projections={projections} fx={fx} divPayers={divPayers} market={market} />
-        <DividendLog received={received} fx={fx} ytdGrossCZK={ytdGrossCZK} />
+        {/* Asset class cards */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 14, marginBottom: 20 }}>
+          {assetBlocks.map((a, i) => {
+            const pct = totalNetWorth > 0 ? (a.value / totalNetWorth) * 100 : 0
+            const gains = i === 0 ? stockValueCZK - stockCostCZK : null
+            return (
+              <a key={a.label} href={a.href} style={{ textDecoration: 'none' }}>
+                <div style={{
+                  background: 'var(--bg2)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 12,
+                  padding: '18px 20px',
+                  cursor: 'pointer',
+                  transition: 'border-color 0.15s',
+                  position: 'relative',
+                  overflow: 'hidden',
+                }}>
+                  <div style={{ position: 'absolute', bottom: 0, left: 0, height: 3, width: `${pct}%`, background: a.color, opacity: 0.7, borderRadius: '0 2px 0 0', transition: 'width 0.6s ease' }} />
+                  <div style={{ fontSize: 9, letterSpacing: '0.12em', textTransform: 'uppercase', color: a.color, marginBottom: 10, fontWeight: 600, opacity: 0.9 }}>
+                    {a.label}
+                  </div>
+                  <div style={{ fontFamily: "'Syne', sans-serif", fontSize: 20, fontWeight: 700, letterSpacing: '-0.02em', color: 'var(--text)', marginBottom: 4 }}>
+                    {fmtCZK(a.value)}
+                  </div>
+                  <div style={{ fontSize: 10, color: 'var(--text4)' }}>
+                    {pct.toFixed(1)}% of portfolio
+                    {gains !== null && gains !== 0 && (
+                      <span style={{ marginLeft: 8, color: gains >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                        {gains >= 0 ? '+' : ''}{fmtCZK(gains)} P&L
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </a>
+            )
+          })}
+        </div>
+
+        {/* Bottom row: Income breakdown + Recent activity */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
+
+          {/* Income breakdown */}
+          <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 12, padding: '20px 22px' }}>
+            <div style={{ fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--text3)', fontWeight: 600, marginBottom: 16 }}>
+              Income streams
+            </div>
+            {[
+              { label: 'Stock dividends', value: divIncomeCZK,       sub: `YTD received: ${fmtCZK(ytdDivCZK)}`, color: 'var(--green)',  pct: totalAnnualIncome > 0 ? divIncomeCZK / totalAnnualIncome : 0 },
+              { label: 'Bank interest',   value: interestIncomeCZK,  sub: `${bankAccounts.length} accounts`,      color: 'var(--blue)',   pct: totalAnnualIncome > 0 ? interestIncomeCZK / totalAnnualIncome : 0 },
+              { label: 'Rental income',   value: rentalIncomeCZK,    sub: `${realEstate.filter(p => p.monthly_rent > 0).length} properties`, color: 'var(--teal)', pct: totalAnnualIncome > 0 ? rentalIncomeCZK / totalAnnualIncome : 0 },
+              { label: 'Crypto staking',  value: stakingIncomeCZK,   sub: `${crypto.filter(c => c.staking_apy > 0).length} assets`,    color: 'var(--purple)', pct: totalAnnualIncome > 0 ? stakingIncomeCZK / totalAnnualIncome : 0 },
+            ].map(s => (
+              <div key={s.label} style={{ marginBottom: 14 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                  <div>
+                    <span style={{ fontSize: 12, color: 'var(--text)' }}>{s.label}</span>
+                    <span style={{ fontSize: 10, color: 'var(--text4)', marginLeft: 8 }}>{s.sub}</span>
+                  </div>
+                  <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: s.value > 0 ? s.color : 'var(--text4)' }}>
+                    {s.value > 0 ? fmtCZK(s.value) : '—'}
+                  </span>
+                </div>
+                <div style={{ height: 3, background: 'var(--bg4)', borderRadius: 2, overflow: 'hidden' }}>
+                  <div style={{ height: '100%', width: `${s.pct * 100}%`, background: s.color, borderRadius: 2, opacity: 0.7, transition: 'width 0.5s ease' }} />
+                </div>
+              </div>
+            ))}
+            <div style={{ marginTop: 8, paddingTop: 12, borderTop: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between' }}>
+              <span style={{ fontSize: 11, color: 'var(--text3)' }}>Total annual</span>
+              <span style={{ fontFamily: "'Syne', sans-serif", fontSize: 16, fontWeight: 700, color: 'var(--amber)' }}>{fmtCZK(totalAnnualIncome)}</span>
+            </div>
+          </div>
+
+          {/* Quick stats */}
+          <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 12, padding: '20px 22px' }}>
+            <div style={{ fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--text3)', fontWeight: 600, marginBottom: 16 }}>
+              Portfolio snapshot
+            </div>
+            {[
+              { label: 'Yield on net worth',    value: totalNetWorth > 0 ? `${((totalAnnualIncome / totalNetWorth) * 100).toFixed(2)}%` : '—', accent: 'var(--amber)' },
+              { label: 'Monthly passive income', value: fmtCZK(totalAnnualIncome / 12, 0), accent: 'var(--amber)' },
+              { label: 'Stock P&L',              value: `${stockCostCZK > 0 ? ((stockValueCZK - stockCostCZK) / stockCostCZK * 100).toFixed(1) : 0}%`, accent: (stockValueCZK - stockCostCZK) >= 0 ? 'var(--green)' : 'var(--red)' },
+              { label: 'Real estate equity',    value: `${realEstateGrossCZK > 0 ? ((realEstateEquityCZK / realEstateGrossCZK) * 100).toFixed(0) : 0}% LTV remaining`, accent: 'var(--teal)' },
+              { label: 'Holdings',              value: `${holdings.length} stocks · ${bankAccounts.length} accounts · ${crypto.length} coins · ${realEstate.length} properties`, accent: 'var(--text3)' },
+              { label: 'FIRE number (4%)',       value: fmtCZK(totalAnnualIncome * 25), accent: 'var(--green)' },
+            ].map((s, i) => (
+              <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0', borderBottom: '1px solid var(--border)' }}>
+                <span style={{ fontSize: 11, color: 'var(--text3)' }}>{s.label}</span>
+                <span style={{ fontSize: 12, fontFamily: "'DM Mono', monospace", color: s.accent }}>{s.value}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
       </main>
     </div>
   )
 }
 
-function HoldingsTable({ holdings, projections, fx, divPayers, market }: {
-  holdings: Holding[]
-  projections: DividendProjection[]
-  fx: Record<string, number>
-  divPayers: number
-  market: ReturnType<typeof useMarketData>
-}) {
-  return (
-    <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 10, overflow: 'hidden', marginBottom: 14 }}>
-      <div style={{ padding: '12px 18px', borderBottom: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'var(--bg3)' }}>
-        <span style={{ fontSize: 11, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--text2)', fontWeight: 500 }}>Holdings</span>
-        <div style={{ display: 'flex', gap: 6 }}>
-          <Badge variant="green">{divPayers} dividend payers</Badge>
-          <Badge variant="gray">{holdings.length - divPayers} non-div</Badge>
-          {market.state === 'done' && <Badge variant="live">LIVE prices</Badge>}
-        </div>
-      </div>
-      <div style={{ overflowX: 'auto' }}>
-        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-          <thead>
-            <tr>
-              {['Company', 'Shares', 'Avg price', 'Last price', 'Chg%', 'Mkt value (CZK)', 'Unr. P&L (CZK)', 'Div yield', 'Annual div (CZK)'].map((h, i) => (
-                <th key={h} style={{ fontSize: 9, letterSpacing: '0.09em', textTransform: 'uppercase', color: 'var(--text3)', padding: '8px 14px', textAlign: i === 0 ? 'left' : 'right', borderBottom: '1px solid var(--border)', fontWeight: 400 }}>{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {holdings.map(h => {
-              const price     = market.getPrice(h.symbol, h.avg_price)
-              const mktCZK    = toCZK(price * h.shares, h.currency, fx)
-              const plCZK     = mktCZK - toCZK(h.avg_price * h.shares, h.currency, fx)
-              const chgPct    = market.quotes[h.symbol]?.changePercent ?? null
-              const liveYield = market.getYield(h.symbol)
-              const proj      = projections.find(p => p.symbol === h.symbol)
-              const displayY  = liveYield ?? proj?.projected_yield ?? null
-              const liveAnnual = market.getAnnualDiv(h.symbol)
-              const annualCZK = liveAnnual != null
-                ? toCZK(liveAnnual * h.shares, h.currency, fx)
-                : proj ? toCZK(computeProjectedTotal(proj, holdings), proj.currency, fx) : null
-
-              return (
-                <tr key={h.id} onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg3)')} onMouseLeave={e => (e.currentTarget.style.background = '')}>
-                  <td style={{ padding: '9px 14px', borderBottom: '1px solid var(--border)' }}>
-                    <div style={{ fontWeight: 500 }}>{h.name}</div>
-                    <div style={{ fontSize: 10, color: 'var(--text3)' }}>
-                      {h.symbol} · {h.exchange ?? '—'} · {h.currency}
-                      {h.is_dividend_payer && <span style={{ marginLeft: 6, color: 'var(--green)' }}>●</span>}
-                    </div>
-                  </td>
-                  <td style={tdR}>{h.shares.toFixed(4)}</td>
-                  <td style={tdR}>{h.avg_price.toLocaleString()} <span style={{ fontSize: 10, color: 'var(--text3)' }}>{h.currency}</span></td>
-                  <td style={tdR}>
-                    {market.state === 'loading' ? <span style={{ color: 'var(--text4)' }}>…</span>
-                      : <>{price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} <span style={{ fontSize: 10, color: 'var(--text3)' }}>{h.currency}</span></>}
-                  </td>
-                  <td style={{ ...tdR, color: chgPct == null ? 'var(--text4)' : chgPct >= 0 ? 'var(--green)' : 'var(--red)' }}>
-                    {chgPct != null ? `${chgPct >= 0 ? '+' : ''}${chgPct.toFixed(2)}%` : '—'}
-                  </td>
-                  <td style={{ ...tdR, fontFamily: "'DM Mono', monospace" }}>{fmtCZK(mktCZK)}</td>
-                  <td style={{ ...tdR, fontFamily: "'DM Mono', monospace", color: plCZK >= 0 ? 'var(--green)' : 'var(--red)' }}>
-                    {plCZK >= 0 ? '+' : ''}{fmtCZK(plCZK)}
-                  </td>
-                  <td style={tdR}>
-                    {displayY != null ? (
-                      <span style={{ color: displayY >= 0.04 ? 'var(--green)' : displayY >= 0.02 ? 'var(--amber)' : 'var(--text3)', fontFamily: "'DM Mono', monospace", fontSize: 12 }}>
-                        {(displayY * 100).toFixed(2)}%
-                        {liveYield != null && <span style={{ marginLeft: 4 }}><Badge variant="live">LIVE</Badge></span>}
-                      </span>
-                    ) : <span style={{ color: 'var(--text4)' }}>—</span>}
-                  </td>
-                  <td style={{ ...tdR, fontFamily: "'DM Mono', monospace", color: annualCZK ? 'var(--green)' : 'var(--text4)' }}>
-                    {annualCZK ? `~${fmtCZK(annualCZK)}` : '—'}
-                  </td>
-                </tr>
-              )
-            })}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  )
-}
-
-function DividendLog({ received, fx, ytdGrossCZK }: {
-  received: DividendReceived[]
-  fx: Record<string, number>
-  ytdGrossCZK: number
-}) {
-  const [expanded, setExpanded] = useState(true)
-
-  return (
-    <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 10, overflow: 'hidden' }}>
-      <div onClick={() => setExpanded(e => !e)} style={{ padding: '12px 18px', borderBottom: expanded ? '1px solid var(--border)' : 'none', display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'var(--bg3)', cursor: 'pointer' }}>
-        <span style={{ fontSize: 11, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--text2)', fontWeight: 500 }}>Dividend log</span>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          <Badge variant="green">YTD: {fmtCZK(ytdGrossCZK, 2)}</Badge>
-          <span style={{ color: 'var(--text3)', fontSize: 14 }}>{expanded ? '▴' : '▾'}</span>
-        </div>
-      </div>
-      {expanded && (
-        <div style={{ padding: '4px 18px' }}>
-          {received.length === 0
-            ? <div style={{ padding: '18px 0', color: 'var(--text3)', fontSize: 12 }}>No dividends logged yet.</div>
-            : received.slice(0, 10).map(d => (
-              <div key={d.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 0', borderBottom: '1px solid var(--border)' }}>
-                <div style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--green)', flexShrink: 0 }} />
-                <div style={{ fontWeight: 500, minWidth: 44 }}>{d.symbol}</div>
-                <div style={{ color: 'var(--text3)', fontSize: 11, flex: 1 }}>
-                  {fmtDate(d.payment_date)} · {d.amount_per_share} {d.currency}/share × {d.shares_held} shares
-                  {d.drip_shares_added ? <span style={{ color: 'var(--green)' }}> · DRIP +{d.drip_shares_added.toFixed(4)} shares</span> : null}
-                  {d.notes && !d.drip_shares_added && <span> · {d.notes}</span>}
-                </div>
-                <div style={{ textAlign: 'right' }}>
-                  <div style={{ color: 'var(--green)', fontFamily: "'DM Mono', monospace", fontSize: 12 }}>+{fmtCZK(toCZK(d.gross_amount, d.currency, fx), 2)}</div>
-                  <div style={{ fontSize: 10, color: 'var(--text3)' }}>
-                    WHT −{fmtCZK(toCZK(d.withholding_tax, d.currency, fx), 2)}
-                    <span style={{ marginLeft: 6, opacity: 0.6 }}>({d.gross_amount.toFixed(2)} {d.currency})</span>
-                  </div>
-                </div>
-              </div>
-            ))
-          }
-        </div>
-      )}
-    </div>
-  )
+const btnSecondary: React.CSSProperties = {
+  padding: '7px 14px', borderRadius: 6, cursor: 'pointer',
+  background: 'var(--bg3)', border: '1px solid var(--border2)',
+  color: 'var(--text2)', fontFamily: "'Inter', sans-serif", fontSize: 12,
+  display: 'flex', alignItems: 'center', gap: 4,
 }

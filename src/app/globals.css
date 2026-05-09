@@ -1,40 +1,71 @@
-@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=DM+Mono:wght@300;400;500&family=Geist:wght@300;400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700&family=DM+Mono:wght@300;400;500&family=Inter:wght@300;400;500&display=swap');
 
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 :root {
-  --bg:        #f5f4f0;
-  --bg2:       #ffffff;
-  --bg3:       #edecea;
-  --bg4:       #e5e3df;
-  --border:    rgba(0,0,0,0.07);
-  --border2:   rgba(0,0,0,0.12);
-  --border3:   rgba(0,0,0,0.18);
-  --text:      #18191a;
-  --text2:     #444749;
-  --text3:     #888c8e;
-  --text4:     #b0b4b6;
+  /* Backgrounds */
+  --bg:        #0f0f11;
+  --bg2:       #161618;
+  --bg3:       #1c1c1f;
+  --bg4:       #242428;
+  --bg5:       #2c2c31;
 
-  --green:     #2a6429;
-  --green-bg:  #e8f2e7;
-  --green-bd:  #afd0ad;
-  --green-mid: #4a9448;
+  /* Borders */
+  --border:    rgba(255,255,255,0.06);
+  --border2:   rgba(255,255,255,0.10);
+  --border3:   rgba(255,255,255,0.16);
 
-  --amber:     #7a5810;
-  --amber-bg:  #fdf4dc;
-  --amber-bd:  #e8cc7a;
+  /* Text */
+  --text:      #f0efe8;
+  --text2:     #a8a6a0;
+  --text3:     #68666e;
+  --text4:     #46444a;
 
-  --red:       #8a2b22;
-  --red-bg:    #fcecea;
-  --red-bd:    #e8b0a8;
+  /* Green (stocks / gains) */
+  --green:     #4ade80;
+  --green-dim: #22c55e;
+  --green-bg:  rgba(74,222,128,0.08);
+  --green-bd:  rgba(74,222,128,0.20);
 
-  --blue:      #1a4878;
-  --blue-bg:   #e8f0fa;
-  --blue-bd:   #a8c2e8;
+  /* Amber (dividends / warnings) */
+  --amber:     #fbbf24;
+  --amber-dim: #f59e0b;
+  --amber-bg:  rgba(251,191,36,0.08);
+  --amber-bd:  rgba(251,191,36,0.20);
 
-  --sidebar-w: 200px;
+  /* Red (losses) */
+  --red:       #f87171;
+  --red-bg:    rgba(248,113,113,0.08);
+  --red-bd:    rgba(248,113,113,0.20);
+
+  /* Blue (bank / info) */
+  --blue:      #60a5fa;
+  --blue-bg:   rgba(96,165,250,0.08);
+  --blue-bd:   rgba(96,165,250,0.20);
+
+  /* Purple (crypto) */
+  --purple:    #a78bfa;
+  --purple-bg: rgba(167,139,250,0.08);
+  --purple-bd: rgba(167,139,250,0.20);
+
+  /* Teal (real estate) */
+  --teal:      #2dd4bf;
+  --teal-bg:   rgba(45,212,191,0.08);
+  --teal-bd:   rgba(45,212,191,0.20);
+
+  /* Coral (net worth accent) */
+  --coral:     #fb7185;
+
+  /* Sidebar */
+  --sidebar-w: 220px;
+
+  /* Asset class colors */
+  --c-stocks: var(--green);
+  --c-cash:   var(--blue);
+  --c-crypto: var(--purple);
+  --c-realestate: var(--teal);
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -44,31 +75,59 @@ html { font-size: 13px; }
 body {
   background: var(--bg);
   color: var(--text);
-  font-family: 'Geist', system-ui, sans-serif;
+  font-family: 'Inter', system-ui, sans-serif;
   font-size: 13px;
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
 }
 
-.serif { font-family: 'Instrument Serif', Georgia, serif; }
-.mono  { font-family: 'DM Mono', monospace; font-size: 12px; }
+.display { font-family: 'Syne', sans-serif; }
+.mono    { font-family: 'DM Mono', monospace; font-size: 12px; }
 
 /* Scrollbar */
 ::-webkit-scrollbar { width: 3px; height: 3px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
 
-/* Input base */
 input, select, textarea {
-  font-family: 'Geist', sans-serif;
+  font-family: 'Inter', sans-serif;
   font-size: 13px;
   color: var(--text);
 }
 
-/* Focus ring */
 input:focus, select:focus, textarea:focus {
-  outline: 2px solid var(--green-mid);
+  outline: 2px solid var(--green-dim);
   outline-offset: -1px;
 }
 
-button { font-family: 'Geist', sans-serif; }
+button { font-family: 'Inter', sans-serif; }
+
+/* Subtle grid texture on page bg */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(255,255,255,0.015) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,0.015) 1px, transparent 1px);
+  background-size: 32px 32px;
+  pointer-events: none;
+  z-index: 0;
+}
+
+main { position: relative; z-index: 1; }
+
+/* Net worth ring animation */
+@keyframes ring-spin {
+  from { stroke-dashoffset: 0; }
+}
+
+/* Number counter animation */
+@keyframes count-up {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.animate-in {
+  animation: count-up 0.4s ease forwards;
+}

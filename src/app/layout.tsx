@@ -2,8 +2,8 @@ import type { Metadata } from 'next'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: 'Divvy — Dividend Tracker',
-  description: 'Personal dividend portfolio tracker',
+  title: 'Divvy — Wealth Tracker',
+  description: 'Personal wealth & dividend tracker',
 }
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
