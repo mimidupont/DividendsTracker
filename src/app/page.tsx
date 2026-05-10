@@ -312,12 +312,11 @@ export default function Dashboard() {
               Portfolio snapshot
             </div>
             {[
-              { label: 'Yield on net worth',    value: totalNetWorth > 0 ? `${((totalAnnualIncome / totalNetWorth) * 100).toFixed(2)}%` : '—', accent: 'var(--amber)' },
-              { label: 'Monthly passive income', value: fmtCZK(totalAnnualIncome / 12, 0), accent: 'var(--amber)' },
+              { label: 'Yield on net worth',     value: totalNetWorth > 0 ? `${((totalAnnualIncome / totalNetWorth) * 100).toFixed(2)}%` : '—', accent: 'var(--amber)' },
+              { label: 'Monthly passive income', value: fmtCZK(totalAnnualIncome / 12, 0),                                                       accent: 'var(--amber)' },
               { label: 'Stock P&L',              value: `${stockCostCZK > 0 ? ((stockValueCZK - stockCostCZK) / stockCostCZK * 100).toFixed(1) : 0}%`, accent: (stockValueCZK - stockCostCZK) >= 0 ? 'var(--green)' : 'var(--red)' },
-              { label: 'Real estate equity',    value: `${realEstateGrossCZK > 0 ? ((realEstateEquityCZK / realEstateGrossCZK) * 100).toFixed(0) : 0}% LTV remaining`, accent: 'var(--teal)' },
-              { label: 'Holdings',              value: `${holdings.length} stocks · ${bankAccounts.length} accounts · ${crypto.length} coins · ${realEstate.length} properties`, accent: 'var(--text3)' },
-              { label: 'FIRE number (4%)',       value: fmtCZK(totalAnnualIncome * 25), accent: 'var(--green)' },
+              { label: 'Real estate equity',     value: `${realEstateGrossCZK > 0 ? ((realEstateEquityCZK / realEstateGrossCZK) * 100).toFixed(0) : 0}% equity`, accent: 'var(--teal)' },
+              { label: 'Holdings',               value: `${holdings.length} stocks · ${bankAccounts.length} accounts · ${crypto.length} coins · ${realEstate.length} properties`, accent: 'var(--text3)' },
             ].map((s, i) => (
               <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0', borderBottom: '1px solid var(--border)' }}>
                 <span style={{ fontSize: 11, color: 'var(--text3)' }}>{s.label}</span>
