@@ -6,11 +6,22 @@ import { toCZK, fmtCZK } from '@/lib/fx'
 import { useFx } from '@/hooks/useFx'
 import { useCryptoPrices } from '@/hooks/useCryptoPrices'
 
+const emptyForm = {
+  coin_id: '',
+  symbol: '',
+  name: '',
+  amount: '',
+  avg_cost_usd: '',
+  wallet_label: '',
+  staking_apy: '0',
+}
+
 export default function CryptoPage() {
   const [crypto, setCrypto] = useState<CryptoHolding[]>([])
   const [loading, setLoading] = useState(true)
   const [showAdd, setShowAdd] = useState(false)
-  const [form, setForm] = useState({ coin_id: '', symbol: '', name: '', amount: '', avg_cost_usd: '', wallet_label: '', staking_apy: '0' })
+  const [editId, setEditId] = useState<string | null>(null)
+  const [form, setForm] = useState(emptyForm)
   const [saving, setSaving] = useState(false)
   const { fx, fxLoading, fxTs, refresh: refreshFx } = useFx()
   const prices = useCryptoPrices()
@@ -37,10 +48,29 @@ export default function CryptoPage() {
     return s + toCZK(price * c.amount * c.staking_apy, 'USD', fx)
   }, 0)
 
+  const resetForm = () => {
+    setForm(emptyForm)
+    setEditId(null)
+  }
+
+  const startEdit = (c: CryptoHolding) => {
+    setForm({
+      coin_id: c.coin_id,
+      symbol: c.symbol,
+      name: c.name,
+      amount: String(c.amount),
+      avg_cost_usd: String(c.avg_cost_usd),
+      wallet_label: c.wallet_label ?? '',
+      staking_apy: String((c.staking_apy * 100).toFixed(2)),
+    })
+    setEditId(c.id)
+    setShowAdd(true)
+  }
+
   const saveCrypto = async () => {
     if (!form.coin_id || !form.amount || !form.avg_cost_usd) return
     setSaving(true)
-    await supabase.from('crypto_holdings').insert([{
+    const payload = {
       coin_id: form.coin_id.toLowerCase(),
       symbol: form.symbol.toUpperCase(),
       name: form.name,
@@ -48,10 +78,18 @@ export default function CryptoPage() {
       avg_cost_usd: parseFloat(form.avg_cost_usd),
       wallet_label: form.wallet_label || null,
       staking_apy: parseFloat(form.staking_apy) / 100 || 0,
-    }])
+      updated_at: new Date().toISOString(),
+    }
+
+    if (editId) {
+      await supabase.from('crypto_holdings').update(payload).eq('id', editId)
+    } else {
+      await supabase.from('crypto_holdings').insert([payload])
+    }
+
     setSaving(false)
     setShowAdd(false)
-    setForm({ coin_id: '', symbol: '', name: '', amount: '', avg_cost_usd: '', wallet_label: '', staking_apy: '0' })
+    resetForm()
     load()
   }
 
@@ -78,7 +116,12 @@ export default function CryptoPage() {
               {prices.state === 'loading' ? '⟳ Fetching…' : '↻ Prices'}
               {prices.state === 'done' && <span style={{ color: 'var(--purple)', marginLeft: 6 }}>✓</span>}
             </button>
-            <button onClick={() => setShowAdd(true)} style={btnPrimary('var(--purple)', 'var(--purple-bd)', 'var(--purple-bg)')}>+ Add holding</button>
+            <button
+              onClick={() => { resetForm(); setShowAdd(true) }}
+              style={btnPrimary('var(--purple)', 'var(--purple-bd)', 'var(--purple-bg)')}
+            >
+              + Add holding
+            </button>
           </div>
         </div>
 
@@ -151,12 +194,22 @@ export default function CryptoPage() {
                         </span>
                       ) : '—'}
                     </td>
-                    <td style={{ padding: '9px 14px', borderBottom: '1px solid var(--border)' }}>
-                      <button onClick={async () => {
-                        if (!confirm(`Delete ${c.name}?`)) return
-                        await supabase.from('crypto_holdings').delete().eq('id', c.id)
-                        load()
-                      }} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text4)', fontSize: 12 }}>✕</button>
+                    <td style={{ padding: '9px 14px', borderBottom: '1px solid var(--border)', whiteSpace: 'nowrap' }}>
+                      {/* Edit button — was missing */}
+                      <button
+                        title="Edit holding"
+                        onClick={() => startEdit(c)}
+                        style={actionBtn}
+                      >✎</button>
+                      <button
+                        title="Delete holding"
+                        onClick={async () => {
+                          if (!confirm(`Delete ${c.name}?`)) return
+                          await supabase.from('crypto_holdings').delete().eq('id', c.id)
+                          load()
+                        }}
+                        style={{ ...actionBtn, marginLeft: 4, color: 'var(--red)' }}
+                      >✕</button>
                     </td>
                   </tr>
                 )
@@ -165,32 +218,58 @@ export default function CryptoPage() {
           </table>
         </div>
 
-        {/* Add form */}
+        {/* Add / Edit form */}
         {showAdd && (
-          <div style={{ background: 'var(--bg2)', border: '1px solid var(--purple-bd)', borderRadius: 12, padding: '24px 28px' }}>
-            <div style={{ fontFamily: "'Syne', sans-serif", fontSize: 16, fontWeight: 600, marginBottom: 18 }}>Add crypto holding</div>
+          <div style={{ background: 'var(--bg2)', border: `1px solid var(--purple-bd)`, borderRadius: 12, padding: '24px 28px' }}>
+            <div style={{ fontFamily: "'Syne', sans-serif", fontSize: 16, fontWeight: 600, marginBottom: 18 }}>
+              {editId ? 'Edit holding' : 'Add crypto holding'}
+            </div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
+              {/* CoinGecko ID — read-only when editing to avoid breaking price lookups */}
+              <div style={{ gridColumn: '1/-1' }}>
+                <div style={inputLabel}>
+                  CoinGecko ID
+                  {editId && <span style={{ color: 'var(--text4)', marginLeft: 6, fontWeight: 400, textTransform: 'none', letterSpacing: 0 }}>(locked — delete & re-add to change)</span>}
+                </div>
+                <input
+                  style={{ ...inputStyle, opacity: editId ? 0.5 : 1, cursor: editId ? 'not-allowed' : 'text' }}
+                  placeholder="bitcoin"
+                  value={form.coin_id}
+                  readOnly={!!editId}
+                  onChange={e => !editId && setForm(p => ({ ...p, coin_id: e.target.value }))}
+                />
+                {!editId && <div style={{ fontSize: 10, color: 'var(--text4)', marginTop: 3 }}>From coingecko.com/coins/list</div>}
+              </div>
+
               {[
-                { label: 'CoinGecko ID', key: 'coin_id', placeholder: 'bitcoin', hint: 'From coingecko.com/coins/list' },
                 { label: 'Symbol', key: 'symbol', placeholder: 'BTC' },
                 { label: 'Name', key: 'name', placeholder: 'Bitcoin' },
                 { label: 'Amount held', key: 'amount', placeholder: '0.5', type: 'number' },
                 { label: 'Avg cost (USD)', key: 'avg_cost_usd', placeholder: '45000', type: 'number' },
                 { label: 'Staking APY (%)', key: 'staking_apy', placeholder: '0', type: 'number' },
                 { label: 'Wallet / Exchange', key: 'wallet_label', placeholder: 'Ledger, Binance…' },
-              ].map(f => (
-                <div key={f.key} style={f.key === 'coin_id' ? { gridColumn: '1/-1' } : {}}>
+              ].map((f: any) => (
+                <div key={f.key}>
                   <div style={inputLabel}>{f.label}</div>
-                  <input style={inputStyle} type={(f as any).type ?? 'text'} placeholder={f.placeholder}
-                    value={(form as any)[f.key]} onChange={e => setForm(p => ({ ...p, [f.key]: e.target.value }))} />
-                  {(f as any).hint && <div style={{ fontSize: 10, color: 'var(--text4)', marginTop: 3 }}>{(f as any).hint}</div>}
+                  <input
+                    style={inputStyle}
+                    type={f.type ?? 'text'}
+                    placeholder={f.placeholder}
+                    value={(form as any)[f.key]}
+                    onChange={e => setForm(p => ({ ...p, [f.key]: e.target.value }))}
+                  />
                 </div>
               ))}
             </div>
+
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 18 }}>
-              <button onClick={() => setShowAdd(false)} style={btnSecondary}>Cancel</button>
-              <button onClick={saveCrypto} disabled={saving} style={btnPrimary('var(--purple)', 'var(--purple-bd)', 'var(--purple-bg)')}>
-                {saving ? 'Saving…' : 'Add holding'}
+              <button onClick={() => { setShowAdd(false); resetForm() }} style={btnSecondary}>Cancel</button>
+              <button
+                onClick={saveCrypto}
+                disabled={saving}
+                style={btnPrimary('var(--purple)', 'var(--purple-bd)', 'var(--purple-bg)')}
+              >
+                {saving ? 'Saving…' : editId ? 'Save changes' : 'Add holding'}
               </button>
             </div>
           </div>
@@ -207,6 +286,11 @@ const tableHeaderLabel: React.CSSProperties = { fontSize: 10, letterSpacing: '0.
 const th: React.CSSProperties = { fontSize: 9, letterSpacing: '0.09em', textTransform: 'uppercase', color: 'var(--text4)', padding: '8px 14px', borderBottom: '1px solid var(--border)', fontWeight: 400 }
 const tdL: React.CSSProperties = { padding: '9px 14px', borderBottom: '1px solid var(--border)' }
 const tdR: React.CSSProperties = { padding: '9px 14px', borderBottom: '1px solid var(--border)', textAlign: 'right', color: 'var(--text2)', fontSize: 12 }
+const actionBtn: React.CSSProperties = {
+  background: 'none', border: '1px solid var(--border2)', borderRadius: 4, cursor: 'pointer',
+  color: 'var(--text3)', fontSize: 12, width: 24, height: 24,
+  display: 'inline-flex', alignItems: 'center', justifyContent: 'center', padding: 0,
+}
 const btnSecondary: React.CSSProperties = { padding: '7px 14px', borderRadius: 6, cursor: 'pointer', background: 'var(--bg3)', border: '1px solid var(--border2)', color: 'var(--text2)', fontFamily: "'Inter', sans-serif", fontSize: 12 }
 const btnPrimary = (color: string, bd: string, bg: string): React.CSSProperties => ({ padding: '7px 16px', borderRadius: 6, cursor: 'pointer', background: bg, border: `1px solid ${bd}`, color, fontFamily: "'Inter', sans-serif", fontSize: 12, fontWeight: 500 })
 const inputLabel: React.CSSProperties = { fontSize: 10, color: 'var(--text3)', letterSpacing: '0.08em', textTransform: 'uppercase', display: 'block', marginBottom: 5, fontWeight: 500 }
