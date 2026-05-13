@@ -6,6 +6,7 @@ export const YAHOO_SYMBOL_MAP: Record<string, string> = {
   CSG1:  'CSG1.AS',
   ERBAG: 'ERBAG.PR',
   MONET: 'MONET.PR',
+  BNP: 'BNP.PA',
 }
 
 export const toYahoo = (symbol: string) => YAHOO_SYMBOL_MAP[symbol] ?? symbol
