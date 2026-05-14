@@ -13,6 +13,7 @@ interface ExDivEvent {
   amount: number
   currency: string
   daysUntil: number
+  dataSource?: string
 }
 
 export default function CalendarPage() {
@@ -54,33 +55,46 @@ export default function CalendarPage() {
 
       for (const h of holdings) {
         const s: DividendSummary = data.summaries[h.symbol]
-        if (!s || s.error || !s.exDividendDate) continue
+        if (!s || s.error) continue
 
-        const exDate = new Date(s.exDividendDate * 1000)
+        // Prefer ISO string from SA; fall back to Unix timestamp from Yahoo
+        let exDate: Date | null = null
+        if (s.exDividendDateISO) {
+          exDate = new Date(s.exDividendDateISO + 'T00:00:00Z')
+        } else if (s.exDividendDate) {
+          exDate = new Date(s.exDividendDate * 1000)
+        }
+        if (!exDate) continue
+
         exDate.setHours(0, 0, 0, 0)
         if (exDate < ago30 || exDate > in90) continue
 
         const daysUntil = Math.round((exDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24))
 
-        // Per-payment amount: use lastDividendValue if available,
-        // otherwise divide annual rate by estimated frequency
+        // Amount per payment
         const freq = s.payoutFrequency ?? 4
         const amount =
           s.lastDividendValue ??
           (s.trailingAnnualDividendRate ? s.trailingAnnualDividendRate / freq : null)
         if (!amount) continue
 
-        // Estimate pay date: ~3 weeks after ex-date for US stocks
-        const payDate = new Date(exDate.getTime() + 21 * 24 * 60 * 60 * 1000)
+        // Pay date: prefer SA ISO string, else estimate +21 days
+        let payDate: Date
+        if (s.payDividendDateISO) {
+          payDate = new Date(s.payDividendDateISO + 'T00:00:00Z')
+        } else {
+          payDate = new Date(exDate.getTime() + 21 * 24 * 60 * 60 * 1000)
+        }
 
         results.push({
           symbol: h.symbol,
           name: h.name,
-          exDate: exDate.toISOString().slice(0, 10),
+          exDate:  exDate.toISOString().slice(0, 10),
           payDate: payDate.toISOString().slice(0, 10),
           amount,
           currency: h.currency,
           daysUntil,
+          dataSource: s.dataSource,
         })
       }
 
@@ -114,7 +128,7 @@ export default function CalendarPage() {
   }
 
   const fmtD = (s: string) =>
-    new Date(s).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
+    new Date(s + 'T00:00:00Z').toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
 
   return (
     <div style={{ display: 'flex' }}>
@@ -127,7 +141,7 @@ export default function CalendarPage() {
               Ex-dividend calendar
             </h1>
             <div style={{ fontSize: 11, color: 'var(--text3)', marginTop: 3 }}>
-              Upcoming ex-dates for your {holdings.length} dividend-paying holdings · via Yahoo Finance
+              Upcoming ex-dates for your {holdings.length} dividend-paying holdings · StockAnalysis + Yahoo Finance
               {loading && <span style={{ color: 'var(--amber)', marginLeft: 8 }}>⟳ Fetching…</span>}
             </div>
           </div>
@@ -151,7 +165,7 @@ export default function CalendarPage() {
         {loading && (
           <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 10, padding: '40px', textAlign: 'center', color: 'var(--text3)' }}>
             <div style={{ fontSize: 14, marginBottom: 8 }}>⟳ Fetching ex-dividend dates…</div>
-            <div style={{ fontSize: 12 }}>Checking {holdings.length} tickers via Yahoo Finance</div>
+            <div style={{ fontSize: 12 }}>Checking {holdings.length} tickers via StockAnalysis + Yahoo Finance</div>
           </div>
         )}
 
@@ -184,7 +198,7 @@ export default function CalendarPage() {
               <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                 <thead>
                   <tr style={{ background: 'var(--bg3)' }}>
-                    {['Company', 'Ex-date', 'Est. pay date', 'Div / share', 'CCY', 'Time left'].map((h, i) => (
+                    {['Company', 'Ex-date', 'Est. pay date', 'Div / share', 'CCY', 'Source', 'Time left'].map((h, i) => (
                       <th key={h} style={{
                         fontSize: 9, letterSpacing: '0.09em', textTransform: 'uppercase',
                         color: 'var(--text3)', padding: '9px 14px',
@@ -205,10 +219,21 @@ export default function CalendarPage() {
                         <div style={{ fontSize: 10, color: 'var(--text3)' }}>{e.symbol}</div>
                       </td>
                       <td style={{ ...tdR, color: urgencyColor(e.daysUntil), fontWeight: e.daysUntil <= 7 ? 600 : 400 }}>{fmtD(e.exDate)}</td>
-                      <td style={{ ...tdR, color: 'var(--text3)' }}>{fmtD(e.payDate)} <span style={{ fontSize: 10 }}>~est.</span></td>
+                      <td style={{ ...tdR, color: 'var(--text3)' }}>
+                        {fmtD(e.payDate)}
+                        {!e.dataSource?.includes('stockanalysis') && (
+                          <span style={{ fontSize: 9, marginLeft: 4 }}>~est.</span>
+                        )}
+                      </td>
                       <td style={{ ...tdR, fontFamily: "'DM Mono', monospace", fontSize: 12 }}>{e.amount.toFixed(4)}</td>
                       <td style={tdR}>
                         <Badge variant={e.currency === 'USD' ? 'gray' : e.currency === 'EUR' ? 'blue' : 'amber'}>{e.currency}</Badge>
+                      </td>
+                      <td style={tdR}>
+                        {e.dataSource === 'stockanalysis'
+                          ? <Badge variant="green">SA</Badge>
+                          : <Badge variant="gray">YF</Badge>
+                        }
                       </td>
                       <td style={tdR}>{urgencyBadge(e.daysUntil)}</td>
                     </tr>
