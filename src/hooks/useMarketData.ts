@@ -58,23 +58,18 @@ export function useMarketData(): UseMarketData {
     (symbol: string) => quotes[symbol]?.dividendYield ?? null,
     [quotes]
   )
-const getAnnualDiv = useCallback(
-  (symbol: string) => {
-    const q = quotes[symbol]
-    if (!q) return null
-    console.log(`[annualDiv] ${symbol}`, {
-      forward: q.forwardAnnualDividendRate,
-      trailing: q.trailingAnnualDividendRate,
-      yield: q.dividendYield,
-      price: q.price,
-    })
-    const explicit = q.forwardAnnualDividendRate ?? q.trailingAnnualDividendRate
-    if (explicit != null) return explicit
-    if (q.dividendYield != null && q.price > 0) return q.dividendYield * q.price
-    return null
-  },
-  [quotes]
-)
+  const getAnnualDiv = useCallback(
+    (symbol: string) => {
+      const q = quotes[symbol]
+      if (!q) return null
+      // Prefer yield × price — most reliable across both US and European tickers.
+      // Yahoo's forwardAnnualDividendRate is often wrong for non-US stocks
+      // (e.g. BNP.PA returns 9.95 instead of ~3.35).
+      if (q.dividendYield != null && q.price > 0) return q.dividendYield * q.price
+      return q.forwardAnnualDividendRate ?? q.trailingAnnualDividendRate ?? null
+    },
+    [quotes]
+  )
 
   return { quotes, state, fetchedAt, errorMsg, refresh, getPrice, getYield, getAnnualDiv }
 }
