@@ -72,6 +72,7 @@ const SA_SYMBOL_MAP: Record<string, {
   ERBAG: { slug: 'erbag', type: 'stocks', currency: 'CZK' },
   // MONET = Moneta Money Bank AS (Prague Stock Exchange, CZK)
   MONET: { slug: 'monet', type: 'stocks', currency: 'CZK' },
+  BNP: { slug: 'bnp', type: 'stocks', currency: 'EUR' },
 }
 
 export function isSASupported(symbol: string): boolean {

@@ -58,13 +58,20 @@ export function useMarketData(): UseMarketData {
     (symbol: string) => quotes[symbol]?.dividendYield ?? null,
     [quotes]
   )
-  const getAnnualDiv = useCallback(
-    (symbol: string) => {
-      const q = quotes[symbol]
-      return q?.forwardAnnualDividendRate ?? q?.trailingAnnualDividendRate ?? null
-    },
-    [quotes]
-  )
+const getAnnualDiv = useCallback(
+  (symbol: string) => {
+    const q = quotes[symbol]
+    if (!q) return null
+    const explicit = q.forwardAnnualDividendRate ?? q.trailingAnnualDividendRate
+    if (explicit != null) return explicit
+    // European tickers via Yahoo often have yield but no explicit rate field
+    if (q.dividendYield != null && q.price > 0) {
+      return q.dividendYield * q.price
+    }
+    return null
+  },
+  [quotes]
+)
 
   return { quotes, state, fetchedAt, errorMsg, refresh, getPrice, getYield, getAnnualDiv }
 }
