@@ -62,12 +62,15 @@ const getAnnualDiv = useCallback(
   (symbol: string) => {
     const q = quotes[symbol]
     if (!q) return null
+    console.log(`[annualDiv] ${symbol}`, {
+      forward: q.forwardAnnualDividendRate,
+      trailing: q.trailingAnnualDividendRate,
+      yield: q.dividendYield,
+      price: q.price,
+    })
     const explicit = q.forwardAnnualDividendRate ?? q.trailingAnnualDividendRate
     if (explicit != null) return explicit
-    // European tickers via Yahoo often have yield but no explicit rate field
-    if (q.dividendYield != null && q.price > 0) {
-      return q.dividendYield * q.price
-    }
+    if (q.dividendYield != null && q.price > 0) return q.dividendYield * q.price
     return null
   },
   [quotes]
