@@ -36,6 +36,7 @@ const SA_SYMBOL_MAP: Record<string, {
   slug: string
   type: 'stocks' | 'etf'
   currency: string
+  exchange?: string
 }> = {
   // ── US stocks ──────────────────────────────────────────────────────────────
   JPM:  { slug: 'jpm',  type: 'stocks', currency: 'USD' },
@@ -72,7 +73,7 @@ const SA_SYMBOL_MAP: Record<string, {
   ERBAG: { slug: 'erbag', type: 'stocks', currency: 'CZK' },
   // MONET = Moneta Money Bank AS (Prague Stock Exchange, CZK)
   MONET: { slug: 'monet', type: 'stocks', currency: 'CZK' },
-  BNP: { slug: 'bnp', type: 'stocks', currency: 'EUR' },
+  BNP:   { slug: 'bnp',   type: 'stocks', currency: 'EUR', exchange: 'epa' },
 }
 
 export function isSASupported(symbol: string): boolean {
@@ -119,7 +120,9 @@ export async function fetchSAQuote(symbol: string): Promise<SAQuote | null> {
   const entry = SA_SYMBOL_MAP[symbol.toUpperCase()]
   if (!entry) return null
 
-  const url = `https://stockanalysis.com/${entry.type}/${entry.slug}/`
+    const url = entry.exchange
+      ? `https://stockanalysis.com/${entry.type}/${entry.exchange}/${entry.slug}/`
+      : `https://stockanalysis.com/${entry.type}/${entry.slug}/`
   const empty: SAQuote = {
     symbol, price: null, changePercent: null, dividendYield: null,
     annualDividend: null, exDividendDate: null, payDividendDate: null,
