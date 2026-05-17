@@ -1,6 +1,6 @@
 'use client'
 import { useEffect, useState } from 'react'
-import { supabase, BankInterestReceived } from '@/lib/supabase'
+import { supabase, BankAccount, BankInterestReceived } from '@/lib/supabase'
 import { useAppData } from '@/hooks/useAppData'
 import Sidebar from '@/components/Sidebar'
 import { toCZK, fmtCZK, fmtDate } from '@/lib/fx'
