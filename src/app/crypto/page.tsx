@@ -1,6 +1,6 @@
 'use client'
 import { useState } from 'react'
-import { supabase } from '@/lib/supabase'
+import { supabase, CryptoHolding } from '@/lib/supabase'
 import { useAppData } from '@/hooks/useAppData'
 import Sidebar from '@/components/Sidebar'
 import { toCZK, fmtCZK } from '@/lib/fx'
@@ -19,6 +19,12 @@ const emptyForm = {
 
 export default function CryptoPage() {
   const { cryptoHoldings: crypto, loading, reload } = useAppData()
+  const { fx, fxLoading, fxTs, refresh: refreshFx } = useFx()
+  const prices                          = useCryptoPrices()
+  const [showAdd, setShowAdd]           = useState(false)
+  const [editId, setEditId]             = useState<string | null>(null)
+  const [form, setForm]                 = useState(emptyForm)
+  const [saving, setSaving]             = useState(false)
 
   if (crypto.length > 0 && prices.state === 'idle') {
     prices.refresh(crypto.map(c => c.coin_id))

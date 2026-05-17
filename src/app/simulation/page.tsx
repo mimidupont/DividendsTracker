@@ -1,5 +1,6 @@
 'use client'
 import { useAppData } from '@/hooks/useAppData'
+import { useState } from 'react'
 import Sidebar from '@/components/Sidebar'
 import Badge from '@/components/Badge'
 import { toCZK, fmtCZK } from '@/lib/fx'
@@ -81,6 +82,12 @@ const fmtK = (n: number) => {
 export default function SimulationPage() {
   const { holdings, projections, loading } = useAppData()
   const { fx } = useFx()
+  const [years, setYears]               = useState(20)
+  const [contribution, setContribution] = useState(50000)
+  const [growthRate, setGrowthRate]     = useState(7)
+  const [divGrowth, setDivGrowth]       = useState(4)
+  const [withdrawalRate, setWithdrawal] = useState(4)
+  const [reinvest, setReinvest]         = useState(true)
 
   // Use cost basis as portfolio starting value (market data not loaded on this page)
   const initialValueCZK = holdings.reduce(

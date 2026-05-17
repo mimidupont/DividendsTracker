@@ -7,6 +7,8 @@ import { toCZK, fmtCZK } from '@/lib/fx'
 import { useFx } from '@/hooks/useFx'
 import { useMarketData } from '@/hooks/useMarketData'
 import { computeProjectedTotal } from '@/lib/projections'
+import { useFx } from '@/hooks/useFx'
+import { useMarketData } from '@/hooks/useMarketData'
 
 const CURRENT_YEAR = new Date().getFullYear()
 
@@ -16,6 +18,8 @@ const CCY_COLORS: Record<string, string> = {
 
 export default function CurrencyPage() {
   const { holdings, projections, loading } = useAppData()
+  const { fx, fxTs, fxLoading, refresh: refreshFx } = useFx()
+  const market = useMarketData()
 
   if (holdings.length > 0 && market.state === 'idle') {
     market.refresh(holdings.map(h => h.symbol))

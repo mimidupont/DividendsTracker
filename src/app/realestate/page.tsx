@@ -1,6 +1,7 @@
 'use client'
 import { useState } from 'react'
-import { supabase } from '@/lib/supabase'
+import { supabase, RealEstate } from '@/lib/supabase'
+import { useFx } from '@/hooks/useFx'
 import { useAppData } from '@/hooks/useAppData'
 import Sidebar from '@/components/Sidebar'
 import { toCZK, fmtCZK, fmtDate } from '@/lib/fx'
@@ -12,6 +13,24 @@ const TYPE_COLORS: Record<string, string> = { residential: 'var(--teal)', commer
 export default function RealEstatePage() {
   const { realEstate: properties, loading, reload } = useAppData()
   const [showAdd, setShowAdd] = useState(false)
+  const { fx, fxLoading, fxTs, refresh: refreshFx } = useFx()
+  const [editId, setEditId]   = useState<string | null>(null)
+  const [saving, setSaving]   = useState(false)
+  const [form, setForm]       = useState({
+    name: '',
+    property_type: 'residential',
+    address: '',
+    purchase_price: '',
+    current_value: '',
+    currency: 'CZK',
+    purchase_date: '',
+    monthly_rent: '0',
+    mortgage_balance: '0',
+    mortgage_rate: '0',
+    monthly_mortgage: '0',
+    ownership_pct: '100',
+    notes: '',
+  })
 
   const totalValueCZK = properties.reduce((s, p) => s + toCZK(p.current_value * (p.ownership_pct / 100), p.currency, fx), 0)
   const totalPurchaseCZK = properties.reduce((s, p) => s + toCZK(p.purchase_price * (p.ownership_pct / 100), p.currency, fx), 0)
