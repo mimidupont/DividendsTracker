@@ -1,5 +1,5 @@
 'use client'
-import { useEffect, useState, useCallback } from 'react'
+import { useAppData } from '@/hooks/useAppData'
 import Sidebar from '@/components/Sidebar'
 import Badge from '@/components/Badge'
 import { supabase, Holding, DividendProjection } from '@/lib/supabase'
@@ -15,28 +15,11 @@ const CCY_COLORS: Record<string, string> = {
 }
 
 export default function CurrencyPage() {
-  const [holdings, setHoldings]       = useState<Holding[]>([])
-  const [projections, setProjections] = useState<DividendProjection[]>([])
-  const [loading, setLoading]         = useState(true)
+  const { holdings, projections, loading } = useAppData()
 
-  const { fx, fxLoading, fxTs, refresh: refreshFx } = useFx()
-  const market = useMarketData()
-
-  const load = useCallback(async () => {
-    const [h, p] = await Promise.all([
-      supabase.from('holdings').select('*').order('symbol'),
-      supabase.from('dividend_projections').select('*').eq('year', CURRENT_YEAR + 1),
-    ])
-    if (h.data) setHoldings(h.data)
-    if (p.data) setProjections(p.data)
-    setLoading(false)
-    return h.data ?? []
-  }, [])
-
-  useEffect(() => {
-    load().then(h => { if (h.length > 0) market.refresh(h.map((hh: Holding) => hh.symbol)) })
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  if (holdings.length > 0 && market.state === 'idle') {
+    market.refresh(holdings.map(h => h.symbol))
+  }
 
   // Per-holding metrics
   const enriched = holdings.map(h => {

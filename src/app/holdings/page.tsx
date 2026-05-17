@@ -1,5 +1,5 @@
 'use client'
-import { useEffect, useState, useCallback } from 'react'
+import { useState, useCallback } from 'react'
 import Sidebar from '@/components/Sidebar'
 import Badge from '@/components/Badge'
 import AddPositionModal from '@/components/AddPositionModal'
@@ -8,14 +8,13 @@ import AddLotModal from '@/components/AddLotModal'
 import LogDividendModal from '@/components/LogDividendModal'
 import DripCheckModal from '@/components/DripCheckModal'
 import MarketStatus from '@/components/MarketStatus'
-import { supabase, Holding, DividendProjection } from '@/lib/supabase'
+import { supabase, Holding } from '@/lib/supabase'
 import { toCZK, fmtCZK } from '@/lib/fx'
 import { useFx } from '@/hooks/useFx'
 import { useMarketData } from '@/hooks/useMarketData'
+import { useAppData } from '@/hooks/useAppData'
 import { computeProjectedTotal } from '@/lib/projections'
 import { tdR, btnStyle } from '@/lib/ui'
-
-const CURRENT_YEAR = new Date().getFullYear()
 
 const actionBtn: React.CSSProperties = {
   background: 'none', border: '1px solid var(--border2)', borderRadius: 4, cursor: 'pointer',
@@ -24,43 +23,31 @@ const actionBtn: React.CSSProperties = {
 }
 
 export default function HoldingsPage() {
-  const [holdings, setHoldings]       = useState<Holding[]>([])
-  const [projections, setProjections] = useState<DividendProjection[]>([])
-  const [loading, setLoading]         = useState(true)
-  const [showAdd, setShowAdd]         = useState(false)
-  const [showLog, setShowLog]         = useState(false)
-  const [showDrip, setShowDrip]       = useState(false)
+  const { holdings, projections, loading, reload } = useAppData()
+  const [showAdd, setShowAdd]   = useState(false)
+  const [showLog, setShowLog]   = useState(false)
+  const [showDrip, setShowDrip] = useState(false)
   const [editHolding, setEditHolding] = useState<Holding | null>(null)
   const [lotHolding, setLotHolding]   = useState<Holding | null>(null)
 
   const { fx, fxLoading, fxTs, refresh: refreshFx } = useFx()
   const market = useMarketData()
 
-  const load = useCallback(async () => {
-    const [h, p] = await Promise.all([
-      supabase.from('holdings').select('*').order('symbol'),
-      supabase.from('dividend_projections').select('*').eq('year', CURRENT_YEAR + 1).order('projected_total', { ascending: false }),
-    ])
-    if (h.data) setHoldings(h.data)
-    if (p.data) setProjections(p.data)
-    setLoading(false)
-    return h.data ?? []
-  }, [])
-
-  useEffect(() => {
-    load().then(h => { if (h.length > 0) market.refresh(h.map((hh: Holding) => hh.symbol)) })
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
-  const refreshAll = async () => {
-    const h = await load()
-    if (h.length > 0) await market.refresh(h.map((hh: Holding) => hh.symbol))
+  // Trigger market fetch only when holdings are available and market is idle/stale
+  const symbols = holdings.map(h => h.symbol)
+  if (symbols.length > 0 && market.state === 'idle') {
+    market.refresh(symbols)
   }
+
+  const refreshAll = useCallback(async () => {
+    await reload()
+    if (holdings.length > 0) market.refresh(holdings.map(h => h.symbol), true)
+  }, [reload, holdings, market])
 
   const deleteHolding = async (h: Holding) => {
     if (!confirm(`Delete ${h.symbol} — ${h.name}? This cannot be undone.`)) return
     await supabase.from('holdings').delete().eq('id', h.id)
-    load()
+    reload()
   }
 
   const totalValueCZK = holdings.reduce((sum, h) =>
@@ -92,8 +79,8 @@ export default function HoldingsPage() {
     <div style={{ display: 'flex' }}>
       <Sidebar />
       {showAdd      && <AddPositionModal onClose={() => setShowAdd(false)}      onSaved={refreshAll} />}
-      {showLog      && <LogDividendModal onClose={() => setShowLog(false)}      onSaved={load} />}
-      {showDrip     && <DripCheckModal   holdings={holdings} onClose={() => setShowDrip(false)} onSaved={load} />}
+      {showLog      && <LogDividendModal onClose={() => setShowLog(false)}      onSaved={reload} />}
+      {showDrip     && <DripCheckModal   holdings={holdings} onClose={() => setShowDrip(false)} onSaved={reload} />}
       {editHolding  && <EditPositionModal holding={editHolding}  onClose={() => setEditHolding(null)} onSaved={refreshAll} />}
       {lotHolding   && <AddLotModal       holding={lotHolding}   onClose={() => setLotHolding(null)}  onSaved={refreshAll} />}
 
@@ -109,7 +96,7 @@ export default function HoldingsPage() {
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
             <button onClick={refreshFx} disabled={fxLoading} style={btnStyle('secondary')}>{fxLoading ? '⟳ FX…' : '↻ FX rates'}</button>
-            <button onClick={() => market.refresh(holdings.map(h => h.symbol))} disabled={market.state === 'loading'} style={btnStyle('secondary')}>
+            <button onClick={() => market.refresh(holdings.map(h => h.symbol), true)} disabled={market.state === 'loading'} style={btnStyle('secondary')}>
               {market.state === 'loading' ? '⟳ Loading…' : '↻ Refresh prices'}
             </button>
             <button onClick={() => setShowAdd(true)}  style={btnStyle('secondary')}>+ Add position</button>

@@ -1,14 +1,12 @@
 'use client'
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect } from 'react'
 import Sidebar from '@/components/Sidebar'
-import { supabase, Holding, BankAccount, CryptoHolding, RealEstate, DividendProjection, DividendReceived } from '@/lib/supabase'
 import { toCZK, fmtCZK } from '@/lib/fx'
 import { useFx } from '@/hooks/useFx'
 import { useMarketData } from '@/hooks/useMarketData'
 import { useCryptoPrices } from '@/hooks/useCryptoPrices'
+import { useAppData } from '@/hooks/useAppData'
 import { computeProjectedTotal } from '@/lib/projections'
-
-const CURRENT_YEAR = new Date().getFullYear()
 
 function greeting() {
   const h = new Date().getHours()
@@ -23,44 +21,25 @@ interface AssetBlock {
 }
 
 export default function Dashboard() {
-  const [holdings, setHoldings]       = useState<Holding[]>([])
-  const [bankAccounts, setBankAccounts] = useState<BankAccount[]>([])
-  const [crypto, setCrypto]           = useState<CryptoHolding[]>([])
-  const [realEstate, setRealEstate]   = useState<RealEstate[]>([])
-  const [projections, setProjections] = useState<DividendProjection[]>([])
-  const [received, setReceived]       = useState<DividendReceived[]>([])
-  const [loading, setLoading]         = useState(true)
+  const {
+    holdings, projections, dividendsReceived,
+    bankAccounts, cryptoHoldings, realEstate, loading,
+  } = useAppData()
 
   const { fx, fxLoading, fxTs, refresh: refreshFx } = useFx()
   const market = useMarketData()
   const cryptoPrices = useCryptoPrices()
 
-  const load = useCallback(async () => {
-    const [h, b, c, r, p, div] = await Promise.all([
-      supabase.from('holdings').select('*').order('symbol'),
-      supabase.from('bank_accounts').select('*').eq('is_active', true).order('balance', { ascending: false }),
-      supabase.from('crypto_holdings').select('*').order('avg_cost_usd', { ascending: false }),
-      supabase.from('real_estate').select('*').order('current_value', { ascending: false }),
-      supabase.from('dividend_projections').select('*').eq('year', CURRENT_YEAR + 1),
-      supabase.from('dividends_received').select('*').order('payment_date', { ascending: false }),
-    ])
-    if (h.data) setHoldings(h.data)
-    if (b.data) setBankAccounts(b.data)
-    if (c.data) setCrypto(c.data)
-    if (r.data) setRealEstate(r.data)
-    if (p.data) setProjections(p.data)
-    if (div.data) setReceived(div.data)
-    setLoading(false)
-    return { holdings: h.data ?? [], crypto: c.data ?? [] }
-  }, [])
+  // Kick off market + crypto fetches when data arrives (only if not already cached)
+  useEffect(() => {
+    if (holdings.length > 0) market.refresh(holdings.map(h => h.symbol))
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [holdings.length])
 
   useEffect(() => {
-    load().then(({ holdings: h, crypto: c }) => {
-      if (h.length > 0) market.refresh(h.map(hh => hh.symbol))
-      if (c.length > 0) cryptoPrices.refresh(c.map(cc => cc.coin_id))
-    })
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+    if (cryptoHoldings.length > 0) cryptoPrices.refresh(cryptoHoldings.map(c => c.coin_id))
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cryptoHoldings.length])
 
   // ── Stock values ─────────────────────────────────────────
   const stockValueCZK = holdings.reduce((s, h) =>
@@ -73,7 +52,7 @@ export default function Dashboard() {
     s + toCZK(a.balance, a.currency, fx), 0)
 
   // ── Crypto values ────────────────────────────────────────
-  const cryptoValueCZK = crypto.reduce((s, c) => {
+  const cryptoValueCZK = cryptoHoldings.reduce((s, c) => {
     const priceUSD = cryptoPrices.getPrice(c.coin_id, c.avg_cost_usd)
     return s + toCZK(priceUSD * c.amount, 'USD', fx)
   }, 0)
@@ -87,9 +66,9 @@ export default function Dashboard() {
 
   // ── Total net worth ──────────────────────────────────────
   const totalNetWorth = stockValueCZK + cashValueCZK + cryptoValueCZK + realEstateEquityCZK
-  const totalInvested = stockCostCZK + cashValueCZK + crypto.reduce((s, c) =>
-    s + toCZK(c.avg_cost_usd * c.amount, 'USD', fx), 0) + realEstate.reduce((s, p) =>
-    s + toCZK(p.purchase_price * (p.ownership_pct / 100), p.currency, fx), 0)
+  const totalInvested = stockCostCZK + cashValueCZK +
+    cryptoHoldings.reduce((s, c) => s + toCZK(c.avg_cost_usd * c.amount, 'USD', fx), 0) +
+    realEstate.reduce((s, p) => s + toCZK(p.purchase_price * (p.ownership_pct / 100), p.currency, fx), 0)
   const totalGainCZK = totalNetWorth - totalInvested
 
   // ── Annual income ────────────────────────────────────────
@@ -104,7 +83,7 @@ export default function Dashboard() {
     s + toCZK(a.balance * a.interest_rate, a.currency, fx), 0)
   const rentalIncomeCZK = realEstate.reduce((s, p) =>
     s + toCZK(p.monthly_rent * 12 * (p.ownership_pct / 100), p.currency, fx), 0)
-  const stakingIncomeCZK = crypto.reduce((s, c) => {
+  const stakingIncomeCZK = cryptoHoldings.reduce((s, c) => {
     const priceUSD = cryptoPrices.getPrice(c.coin_id, c.avg_cost_usd)
     return s + toCZK(priceUSD * c.amount * c.staking_apy, 'USD', fx)
   }, 0)
@@ -112,14 +91,14 @@ export default function Dashboard() {
 
   // ── Asset blocks ─────────────────────────────────────────
   const assetBlocks: AssetBlock[] = [
-    { label: 'Stocks & ETFs', value: stockValueCZK,        color: 'var(--green)',  href: '/holdings' },
+    { label: 'Stocks & ETFs',  value: stockValueCZK,       color: 'var(--green)',  href: '/holdings' },
     { label: 'Cash & Savings', value: cashValueCZK,         color: 'var(--blue)',   href: '/cash' },
     { label: 'Crypto',         value: cryptoValueCZK,       color: 'var(--purple)', href: '/crypto' },
     { label: 'Real Estate',    value: realEstateEquityCZK,  color: 'var(--teal)',   href: '/realestate' },
   ]
 
-  // YTD dividends
-  const ytdDivCZK = received
+  const CURRENT_YEAR = new Date().getFullYear()
+  const ytdDivCZK = dividendsReceived
     .filter(d => new Date(d.payment_date).getFullYear() === CURRENT_YEAR)
     .reduce((s, d) => s + toCZK(d.gross_amount, d.currency, fx), 0)
 
@@ -152,7 +131,11 @@ export default function Dashboard() {
               {fxLoading ? '⟳' : '↻'} FX rates
               {fxTs && <span style={{ color: 'var(--green)', marginLeft: 6 }}>{fxTs}</span>}
             </button>
-            <button onClick={() => market.refresh(holdings.map(h => h.symbol))} disabled={market.state === 'loading'} style={btnSecondary}>
+            <button
+              onClick={() => market.refresh(holdings.map(h => h.symbol), true)}
+              disabled={market.state === 'loading'}
+              style={btnSecondary}
+            >
               {market.state === 'loading' ? '⟳ Fetching…' : '↻ Prices'}
             </button>
           </div>
@@ -160,23 +143,15 @@ export default function Dashboard() {
 
         {/* Net Worth Hero */}
         <div style={{
-          background: 'var(--bg2)',
-          border: '1px solid var(--border)',
-          borderRadius: 16,
-          padding: '32px 36px',
-          marginBottom: 20,
-          position: 'relative',
-          overflow: 'hidden',
+          background: 'var(--bg2)', border: '1px solid var(--border)',
+          borderRadius: 16, padding: '32px 36px', marginBottom: 20,
+          position: 'relative', overflow: 'hidden',
         }}>
-          {/* subtle accent line */}
           <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 1, background: 'linear-gradient(90deg, var(--green) 0%, var(--blue) 40%, var(--purple) 70%, var(--teal) 100%)', opacity: 0.6 }} />
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 40 }}>
-            {/* Left: Net Worth */}
             <div>
-              <div style={{ fontSize: 10, letterSpacing: '0.12em', textTransform: 'uppercase', color: 'var(--text3)', marginBottom: 8, fontWeight: 500 }}>
-                Total Net Worth
-              </div>
+              <div style={{ fontSize: 10, letterSpacing: '0.12em', textTransform: 'uppercase', color: 'var(--text3)', marginBottom: 8, fontWeight: 500 }}>Total Net Worth</div>
               <div style={{ fontFamily: "'Syne', sans-serif", fontSize: 42, fontWeight: 700, letterSpacing: '-0.03em', lineHeight: 1 }}>
                 {fmtCZK(totalNetWorth)}
               </div>
@@ -190,11 +165,8 @@ export default function Dashboard() {
               </div>
             </div>
 
-            {/* Right: Annual Income */}
             <div>
-              <div style={{ fontSize: 10, letterSpacing: '0.12em', textTransform: 'uppercase', color: 'var(--text3)', marginBottom: 8, fontWeight: 500 }}>
-                Est. Annual Income
-              </div>
+              <div style={{ fontSize: 10, letterSpacing: '0.12em', textTransform: 'uppercase', color: 'var(--text3)', marginBottom: 8, fontWeight: 500 }}>Est. Annual Income</div>
               <div style={{ fontFamily: "'Syne', sans-serif", fontSize: 42, fontWeight: 700, letterSpacing: '-0.03em', lineHeight: 1, color: 'var(--amber)' }}>
                 {fmtCZK(totalAnnualIncome)}
               </div>
@@ -211,12 +183,7 @@ export default function Dashboard() {
           <div style={{ marginTop: 28 }}>
             <div style={{ display: 'flex', gap: 2, height: 6, borderRadius: 4, overflow: 'hidden' }}>
               {assetBlocks.filter(a => a.value > 0).map(a => (
-                <div key={a.label} style={{
-                  flex: a.value,
-                  background: a.color,
-                  opacity: 0.8,
-                  transition: 'flex 0.6s ease',
-                }} />
+                <div key={a.label} style={{ flex: a.value, background: a.color, opacity: 0.8, transition: 'flex 0.6s ease' }} />
               ))}
             </div>
             <div style={{ display: 'flex', gap: 20, marginTop: 10 }}>
@@ -241,22 +208,12 @@ export default function Dashboard() {
             return (
               <a key={a.label} href={a.href} style={{ textDecoration: 'none' }}>
                 <div style={{
-                  background: 'var(--bg2)',
-                  border: '1px solid var(--border)',
-                  borderRadius: 12,
-                  padding: '18px 20px',
-                  cursor: 'pointer',
-                  transition: 'border-color 0.15s',
-                  position: 'relative',
-                  overflow: 'hidden',
+                  background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 12,
+                  padding: '18px 20px', cursor: 'pointer', position: 'relative', overflow: 'hidden',
                 }}>
                   <div style={{ position: 'absolute', bottom: 0, left: 0, height: 3, width: `${pct}%`, background: a.color, opacity: 0.7, borderRadius: '0 2px 0 0', transition: 'width 0.6s ease' }} />
-                  <div style={{ fontSize: 9, letterSpacing: '0.12em', textTransform: 'uppercase', color: a.color, marginBottom: 10, fontWeight: 600, opacity: 0.9 }}>
-                    {a.label}
-                  </div>
-                  <div style={{ fontFamily: "'Syne', sans-serif", fontSize: 20, fontWeight: 700, letterSpacing: '-0.02em', color: 'var(--text)', marginBottom: 4 }}>
-                    {fmtCZK(a.value)}
-                  </div>
+                  <div style={{ fontSize: 9, letterSpacing: '0.12em', textTransform: 'uppercase', color: a.color, marginBottom: 10, fontWeight: 600, opacity: 0.9 }}>{a.label}</div>
+                  <div style={{ fontFamily: "'Syne', sans-serif", fontSize: 20, fontWeight: 700, letterSpacing: '-0.02em', color: 'var(--text)', marginBottom: 4 }}>{fmtCZK(a.value)}</div>
                   <div style={{ fontSize: 10, color: 'var(--text4)' }}>
                     {pct.toFixed(1)}% of portfolio
                     {gains !== null && gains !== 0 && (
@@ -271,19 +228,16 @@ export default function Dashboard() {
           })}
         </div>
 
-        {/* Bottom row: Income breakdown + Recent activity */}
+        {/* Bottom row */}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
-
           {/* Income breakdown */}
           <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 12, padding: '20px 22px' }}>
-            <div style={{ fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--text3)', fontWeight: 600, marginBottom: 16 }}>
-              Income streams
-            </div>
+            <div style={{ fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--text3)', fontWeight: 600, marginBottom: 16 }}>Income streams</div>
             {[
-              { label: 'Stock dividends', value: divIncomeCZK,       sub: `YTD received: ${fmtCZK(ytdDivCZK)}`, color: 'var(--green)',  pct: totalAnnualIncome > 0 ? divIncomeCZK / totalAnnualIncome : 0 },
-              { label: 'Bank interest',   value: interestIncomeCZK,  sub: `${bankAccounts.length} accounts`,      color: 'var(--blue)',   pct: totalAnnualIncome > 0 ? interestIncomeCZK / totalAnnualIncome : 0 },
-              { label: 'Rental income',   value: rentalIncomeCZK,    sub: `${realEstate.filter(p => p.monthly_rent > 0).length} properties`, color: 'var(--teal)', pct: totalAnnualIncome > 0 ? rentalIncomeCZK / totalAnnualIncome : 0 },
-              { label: 'Crypto staking',  value: stakingIncomeCZK,   sub: `${crypto.filter(c => c.staking_apy > 0).length} assets`,    color: 'var(--purple)', pct: totalAnnualIncome > 0 ? stakingIncomeCZK / totalAnnualIncome : 0 },
+              { label: 'Stock dividends', value: divIncomeCZK,      sub: `YTD received: ${fmtCZK(ytdDivCZK)}`, color: 'var(--green)',  pct: totalAnnualIncome > 0 ? divIncomeCZK / totalAnnualIncome : 0 },
+              { label: 'Bank interest',   value: interestIncomeCZK, sub: `${bankAccounts.length} accounts`,       color: 'var(--blue)',   pct: totalAnnualIncome > 0 ? interestIncomeCZK / totalAnnualIncome : 0 },
+              { label: 'Rental income',   value: rentalIncomeCZK,   sub: `${realEstate.filter(p => p.monthly_rent > 0).length} properties`, color: 'var(--teal)', pct: totalAnnualIncome > 0 ? rentalIncomeCZK / totalAnnualIncome : 0 },
+              { label: 'Crypto staking',  value: stakingIncomeCZK,  sub: `${cryptoHoldings.filter(c => c.staking_apy > 0).length} assets`, color: 'var(--purple)', pct: totalAnnualIncome > 0 ? stakingIncomeCZK / totalAnnualIncome : 0 },
             ].map(s => (
               <div key={s.label} style={{ marginBottom: 14 }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
@@ -308,15 +262,13 @@ export default function Dashboard() {
 
           {/* Quick stats */}
           <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 12, padding: '20px 22px' }}>
-            <div style={{ fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--text3)', fontWeight: 600, marginBottom: 16 }}>
-              Portfolio snapshot
-            </div>
+            <div style={{ fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--text3)', fontWeight: 600, marginBottom: 16 }}>Portfolio snapshot</div>
             {[
               { label: 'Yield on net worth',     value: totalNetWorth > 0 ? `${((totalAnnualIncome / totalNetWorth) * 100).toFixed(2)}%` : '—', accent: 'var(--amber)' },
-              { label: 'Monthly passive income', value: fmtCZK(totalAnnualIncome / 12, 0),                                                       accent: 'var(--amber)' },
+              { label: 'Monthly passive income', value: fmtCZK(totalAnnualIncome / 12, 0), accent: 'var(--amber)' },
               { label: 'Stock P&L',              value: `${stockCostCZK > 0 ? ((stockValueCZK - stockCostCZK) / stockCostCZK * 100).toFixed(1) : 0}%`, accent: (stockValueCZK - stockCostCZK) >= 0 ? 'var(--green)' : 'var(--red)' },
               { label: 'Real estate equity',     value: `${realEstateGrossCZK > 0 ? ((realEstateEquityCZK / realEstateGrossCZK) * 100).toFixed(0) : 0}% equity`, accent: 'var(--teal)' },
-              { label: 'Holdings',               value: `${holdings.length} stocks · ${bankAccounts.length} accounts · ${crypto.length} coins · ${realEstate.length} properties`, accent: 'var(--text3)' },
+              { label: 'Holdings', value: `${holdings.length} stocks · ${bankAccounts.length} accounts · ${cryptoHoldings.length} coins · ${realEstate.length} properties`, accent: 'var(--text3)' },
             ].map((s, i) => (
               <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0', borderBottom: '1px solid var(--border)' }}>
                 <span style={{ fontSize: 11, color: 'var(--text3)' }}>{s.label}</span>

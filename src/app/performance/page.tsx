@@ -1,90 +1,62 @@
 'use client'
-import { useEffect, useState, useCallback } from 'react'
+import { useState } from 'react'
 import Sidebar from '@/components/Sidebar'
 import Badge from '@/components/Badge'
-import { supabase, Holding, DividendReceived } from '@/lib/supabase'
-import { toCZK, fmtCZK, DEFAULT_FX, fetchFxRates } from '@/lib/fx'
+import { toCZK, fmtCZK } from '@/lib/fx'
+import { useFx } from '@/hooks/useFx'
 import { useMarketData } from '@/hooks/useMarketData'
+import { useAppData } from '@/hooks/useAppData'
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, Cell, ReferenceLine,
 } from 'recharts'
 
-const CURRENT_YEAR = new Date().getFullYear()
-
 export default function PerformancePage() {
-  const [holdings, setHoldings]   = useState<Holding[]>([])
-  const [received, setReceived]   = useState<DividendReceived[]>([])
-  const [fx, setFx]               = useState(DEFAULT_FX)
-  const [loading, setLoading]     = useState(true)
-  const [fxLoading, setFxLoading] = useState(false)
-  const [fxTs, setFxTs]           = useState<string | null>(null)
-  const [sortBy, setSortBy]       = useState<'pl' | 'pct' | 'value'>('pl')
-
+  const { holdings, dividendsReceived, loading } = useAppData()
+  const { fx, fxLoading, fxTs, refresh: refreshFx } = useFx()
   const market = useMarketData()
+  const [sortBy, setSortBy] = useState<'pl' | 'pct' | 'value'>('pl')
 
-  const load = useCallback(async () => {
-    const [h, r] = await Promise.all([
-      supabase.from('holdings').select('*').order('symbol'),
-      supabase.from('dividends_received').select('*').order('payment_date', { ascending: false }),
-    ])
-    if (h.data) setHoldings(h.data)
-    if (r.data) setReceived(r.data)
-    setLoading(false)
-    return h.data ?? []
-  }, [])
-
-  useEffect(() => {
-    load().then(h => {
-      if (h.length > 0) market.refresh(h.map((hh: Holding) => hh.symbol))
-    })
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
-  const refreshFx = async () => {
-    setFxLoading(true)
-    const rates = await fetchFxRates()
-    setFx(rates)
-    setFxTs(new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }))
-    setFxLoading(false)
+  // Kick off market fetch only when idle (cache handles dedup)
+  if (holdings.length > 0 && market.state === 'idle') {
+    market.refresh(holdings.map(h => h.symbol))
   }
 
   // ── Metrics ───────────────────────────────────────────────────────────────
   const rows = holdings.map(h => {
-    const price    = market.getPrice(h.symbol, h.avg_price)
-    const mktCZK   = toCZK(price * h.shares, h.currency, fx)
-    const costCZK  = toCZK(h.avg_price * h.shares, h.currency, fx)
-    const plCZK    = mktCZK - costCZK
-    const plPct    = costCZK > 0 ? (plCZK / costCZK) * 100 : 0
-    const chgPct   = market.quotes[h.symbol]?.changePercent ?? null
-    const divIncome = received
+    const price     = market.getPrice(h.symbol, h.avg_price)
+    const mktCZK    = toCZK(price * h.shares, h.currency, fx)
+    const costCZK   = toCZK(h.avg_price * h.shares, h.currency, fx)
+    const plCZK     = mktCZK - costCZK
+    const plPct     = costCZK > 0 ? (plCZK / costCZK) * 100 : 0
+    const chgPct    = market.quotes[h.symbol]?.changePercent ?? null
+    const divIncome = dividendsReceived
       .filter(d => d.symbol === h.symbol)
       .reduce((s, d) => s + toCZK(d.gross_amount, d.currency, fx), 0)
-    const totalReturn = plCZK + divIncome
+    const totalReturn    = plCZK + divIncome
     const totalReturnPct = costCZK > 0 ? (totalReturn / costCZK) * 100 : 0
     return { h, price, mktCZK, costCZK, plCZK, plPct, chgPct, divIncome, totalReturn, totalReturnPct }
   })
 
   const sorted = [...rows].sort((a, b) => {
-    if (sortBy === 'pl')    return b.plCZK - a.plCZK
-    if (sortBy === 'pct')   return b.plPct - a.plPct
+    if (sortBy === 'pl')  return b.plCZK - a.plCZK
+    if (sortBy === 'pct') return b.plPct - a.plPct
     return b.mktCZK - a.mktCZK
   })
 
-  const totalValueCZK   = rows.reduce((s, r) => s + r.mktCZK, 0)
-  const totalCostCZK    = rows.reduce((s, r) => s + r.costCZK, 0)
-  const totalPLCZK      = totalValueCZK - totalCostCZK
-  const totalPLPct      = totalCostCZK > 0 ? (totalPLCZK / totalCostCZK) * 100 : 0
-  const totalDivCZK     = received.reduce((s, d) => s + toCZK(d.gross_amount, d.currency, fx), 0)
-  const totalReturnCZK  = totalPLCZK + totalDivCZK
-  const totalReturnPct  = totalCostCZK > 0 ? (totalReturnCZK / totalCostCZK) * 100 : 0
-
+  const totalValueCZK  = rows.reduce((s, r) => s + r.mktCZK, 0)
+  const totalCostCZK   = rows.reduce((s, r) => s + r.costCZK, 0)
+  const totalPLCZK     = totalValueCZK - totalCostCZK
+  const totalPLPct     = totalCostCZK > 0 ? (totalPLCZK / totalCostCZK) * 100 : 0
+  const totalDivCZK    = dividendsReceived.reduce((s, d) => s + toCZK(d.gross_amount, d.currency, fx), 0)
+  const totalReturnCZK = totalPLCZK + totalDivCZK
+  const totalReturnPct = totalCostCZK > 0 ? (totalReturnCZK / totalCostCZK) * 100 : 0
   const winners = rows.filter(r => r.plCZK > 0).length
   const losers  = rows.filter(r => r.plCZK < 0).length
 
-  // Monthly dividend income chart data
+  // Monthly dividend chart
   const monthlyData: Record<string, number> = {}
-  received.forEach(d => {
+  dividendsReceived.forEach(d => {
     const key = d.payment_date.slice(0, 7)
     monthlyData[key] = (monthlyData[key] ?? 0) + toCZK(d.gross_amount, d.currency, fx)
   })
@@ -96,7 +68,6 @@ export default function PerformancePage() {
       amount: Math.round(amount),
     }))
 
-  // P&L bar chart data (top/bottom 10 by absolute P&L)
   const plChartData = [...rows]
     .sort((a, b) => b.plCZK - a.plCZK)
     .slice(0, 12)
@@ -127,7 +98,12 @@ export default function PerformancePage() {
   }
 
   const marketStatusColor = { idle: 'var(--text3)', loading: 'var(--amber)', done: 'var(--green)', error: 'var(--red)' }[market.state]
-  const marketStatusText  = { idle: '', loading: '⟳ Fetching…', done: `✓ Live · ${market.fetchedAt ? new Date(market.fetchedAt).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) : ''}`, error: `⚠ ${market.errorMsg ?? 'Failed'}` }[market.state]
+  const marketStatusText  = {
+    idle: '',
+    loading: '⟳ Fetching…',
+    done: `✓ Live · ${market.fetchedAt ? new Date(market.fetchedAt).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) : ''}`,
+    error: `⚠ ${market.errorMsg ?? 'Failed'}`,
+  }[market.state]
 
   if (loading) return (
     <div style={{ display: 'flex' }}>
@@ -141,7 +117,6 @@ export default function PerformancePage() {
       <Sidebar />
       <main style={{ marginLeft: 'var(--sidebar-w)', flex: 1, padding: '28px 36px', maxWidth: 1200 }}>
 
-        {/* Header */}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 26 }}>
           <div>
             <h1 style={{ fontFamily: "'Instrument Serif', serif", fontSize: 26, fontWeight: 400, letterSpacing: -0.5 }}>Performance</h1>
@@ -152,10 +127,14 @@ export default function PerformancePage() {
             </div>
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
-            <button onClick={refreshFx} disabled={fxLoading} style={btnStyle('secondary')}>
+            <button onClick={refreshFx} disabled={fxLoading} style={btnStyle}>
               {fxLoading ? '⟳ FX…' : '↻ FX rates'}
             </button>
-            <button onClick={() => market.refresh(holdings.map(h => h.symbol))} disabled={market.state === 'loading'} style={btnStyle('secondary')}>
+            <button
+              onClick={() => market.refresh(holdings.map(h => h.symbol), true)}
+              disabled={market.state === 'loading'}
+              style={btnStyle}
+            >
               {market.state === 'loading' ? '⟳ Loading…' : '↻ Refresh prices'}
             </button>
           </div>
@@ -164,11 +143,11 @@ export default function PerformancePage() {
         {/* Summary cards */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12, marginBottom: 20 }}>
           {[
-            { label: 'Unrealized P&L', value: (totalPLCZK >= 0 ? '+' : '') + fmtCZK(totalPLCZK), accent: totalPLCZK >= 0 ? 'var(--green)' : 'var(--red)', color: totalPLCZK >= 0 ? 'var(--green)' : 'var(--red)', note: `${totalPLPct >= 0 ? '+' : ''}${totalPLPct.toFixed(2)}% on cost` },
-            { label: 'Dividend income', value: fmtCZK(totalDivCZK, 0), accent: 'var(--amber)', color: 'var(--text)', note: `${received.length} payments logged` },
-            { label: 'Total return', value: (totalReturnCZK >= 0 ? '+' : '') + fmtCZK(totalReturnCZK), accent: totalReturnCZK >= 0 ? 'var(--green)' : 'var(--red)', color: totalReturnCZK >= 0 ? 'var(--green)' : 'var(--red)', note: `${totalReturnPct >= 0 ? '+' : ''}${totalReturnPct.toFixed(2)}% incl. dividends` },
-            { label: 'Winners / Losers', value: `${winners} / ${losers}`, accent: 'var(--blue)', color: 'var(--text)', note: `${rows.filter(r => r.plCZK === 0).length} flat` },
-            { label: 'Portfolio value', value: fmtCZK(totalValueCZK), accent: 'var(--blue)', color: 'var(--text)', note: `Cost: ${fmtCZK(totalCostCZK)}` },
+            { label: 'Unrealized P&L',  value: (totalPLCZK >= 0 ? '+' : '') + fmtCZK(totalPLCZK),         accent: totalPLCZK >= 0 ? 'var(--green)' : 'var(--red)', color: totalPLCZK >= 0 ? 'var(--green)' : 'var(--red)', note: `${totalPLPct >= 0 ? '+' : ''}${totalPLPct.toFixed(2)}% on cost` },
+            { label: 'Dividend income', value: fmtCZK(totalDivCZK, 0),                                      accent: 'var(--amber)', color: 'var(--text)', note: `${dividendsReceived.length} payments logged` },
+            { label: 'Total return',    value: (totalReturnCZK >= 0 ? '+' : '') + fmtCZK(totalReturnCZK),   accent: totalReturnCZK >= 0 ? 'var(--green)' : 'var(--red)', color: totalReturnCZK >= 0 ? 'var(--green)' : 'var(--red)', note: `${totalReturnPct >= 0 ? '+' : ''}${totalReturnPct.toFixed(2)}% incl. dividends` },
+            { label: 'Winners / Losers', value: `${winners} / ${losers}`,                                   accent: 'var(--blue)', color: 'var(--text)', note: `${rows.filter(r => r.plCZK === 0).length} flat` },
+            { label: 'Portfolio value', value: fmtCZK(totalValueCZK),                                       accent: 'var(--blue)', color: 'var(--text)', note: `Cost: ${fmtCZK(totalCostCZK)}` },
           ].map((m, i) => (
             <div key={i} style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 10, padding: '14px 18px', position: 'relative', overflow: 'hidden' }}>
               <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 2, background: m.accent, opacity: 0.8 }} />
@@ -181,12 +160,10 @@ export default function PerformancePage() {
 
         {/* Charts row */}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 14 }}>
-
-          {/* P&L by position bar chart */}
           <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 10, padding: '16px 20px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
               <span style={{ fontSize: 11, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--text2)', fontWeight: 500 }}>Unrealized P&L by position</span>
-              <Badge variant="gray">top 12 by |P&L|</Badge>
+              <Badge variant="gray">top 12</Badge>
             </div>
             <ResponsiveContainer width="100%" height={200}>
               <BarChart data={plChartData} margin={{ top: 0, right: 4, left: 0, bottom: 0 }}>
@@ -204,7 +181,6 @@ export default function PerformancePage() {
             </ResponsiveContainer>
           </div>
 
-          {/* Monthly dividend income chart */}
           <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 10, padding: '16px 20px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
               <span style={{ fontSize: 11, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--text2)', fontWeight: 500 }}>Monthly dividend income</span>
@@ -226,7 +202,7 @@ export default function PerformancePage() {
           </div>
         </div>
 
-        {/* Position-level P&L table */}
+        {/* Position P&L table */}
         <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 10, overflow: 'hidden' }}>
           <div style={{ padding: '12px 18px', borderBottom: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'var(--bg3)' }}>
             <span style={{ fontSize: 11, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--text2)', fontWeight: 500 }}>Position performance</span>
@@ -249,12 +225,7 @@ export default function PerformancePage() {
               <thead>
                 <tr>
                   {['Company', 'Shares', 'Avg cost', 'Last price', 'Mkt value (CZK)', 'Unrealized P&L', 'P&L %', 'Div received', 'Total return'].map((h, i) => (
-                    <th key={h} style={{
-                      fontSize: 9, letterSpacing: '0.09em', textTransform: 'uppercase',
-                      color: 'var(--text3)', padding: '8px 14px',
-                      textAlign: i === 0 ? 'left' : 'right',
-                      borderBottom: '1px solid var(--border)', fontWeight: 400,
-                    }}>{h}</th>
+                    <th key={h} style={{ fontSize: 9, letterSpacing: '0.09em', textTransform: 'uppercase', color: 'var(--text3)', padding: '8px 14px', textAlign: i === 0 ? 'left' : 'right', borderBottom: '1px solid var(--border)', fontWeight: 400 }}>{h}</th>
                   ))}
                 </tr>
               </thead>
@@ -311,10 +282,8 @@ const tdR: React.CSSProperties = {
   textAlign: 'right', color: 'var(--text2)', fontSize: 12,
 }
 
-function btnStyle(variant: 'primary' | 'secondary'): React.CSSProperties {
-  return {
-    padding: '7px 15px', borderRadius: 6, cursor: 'pointer',
-    background: 'var(--bg2)', border: '1px solid var(--border2)',
-    color: 'var(--text2)', fontFamily: "'Geist', sans-serif", fontSize: 12,
-  }
+const btnStyle: React.CSSProperties = {
+  padding: '7px 15px', borderRadius: 6, cursor: 'pointer',
+  background: 'var(--bg2)', border: '1px solid var(--border2)',
+  color: 'var(--text2)', fontFamily: "'Geist', sans-serif", fontSize: 12,
 }

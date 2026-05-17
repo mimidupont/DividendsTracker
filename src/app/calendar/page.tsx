@@ -1,8 +1,8 @@
 'use client'
 import { useEffect, useState, useCallback } from 'react'
+import { useAppData } from '@/hooks/useAppData'
 import Sidebar from '@/components/Sidebar'
 import Badge from '@/components/Badge'
-import { supabase, Holding } from '@/lib/supabase'
 import type { DividendSummary } from '@/app/api/market/dividends/route'
 
 interface ExDivEvent {
@@ -17,16 +17,12 @@ interface ExDivEvent {
 }
 
 export default function CalendarPage() {
-  const [holdings, setHoldings] = useState<Holding[]>([])
   const [events, setEvents]     = useState<ExDivEvent[]>([])
   const [loading, setLoading]   = useState(false)
   const [fetched, setFetched]   = useState(false)
   const [error, setError]       = useState('')
-
-  useEffect(() => {
-    supabase.from('holdings').select('*').eq('is_dividend_payer', true).order('symbol')
-      .then(({ data }) => { if (data) setHoldings(data) })
-  }, [])
+  const { holdings: allHoldings } = useAppData()
+  const holdings = allHoldings.filter(h => h.is_dividend_payer)
 
   const fetchExDates = useCallback(async () => {
     if (holdings.length === 0) return

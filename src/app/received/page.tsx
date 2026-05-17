@@ -1,22 +1,15 @@
 'use client'
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import Sidebar from '@/components/Sidebar'
 import Badge from '@/components/Badge'
 import LogDividendModal from '@/components/LogDividendModal'
-import { supabase, DividendReceived } from '@/lib/supabase'
+import { useAppData } from '@/hooks/useAppData'
 import { toCZK, fmtCZK, fmtDate, DEFAULT_FX } from '@/lib/fx'
 
 export default function ReceivedPage() {
-  const [dividends, setDividends] = useState<DividendReceived[]>([])
+  const { dividendsReceived: dividends, reload: load } = useAppData()
   const [showModal, setShowModal] = useState(false)
   const fx = DEFAULT_FX
-
-  const load = async () => {
-    const { data } = await supabase.from('dividends_received').select('*').order('payment_date', { ascending: false })
-    if (data) setDividends(data)
-  }
-
-  useEffect(() => { load() }, [])
 
   const totalGrossCZK = dividends.reduce((s, d) => s + toCZK(d.gross_amount, d.currency, fx), 0)
   const totalWHT_CZK  = dividends.reduce((s, d) => s + toCZK(d.withholding_tax, d.currency, fx), 0)

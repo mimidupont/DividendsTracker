@@ -1,8 +1,8 @@
 'use client'
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
+import { useAppData } from '@/hooks/useAppData'
 import Sidebar from '@/components/Sidebar'
 import Badge from '@/components/Badge'
-import { supabase, DividendReceived } from '@/lib/supabase'
 import { toCZK, fmtCZK, fmtDate } from '@/lib/fx'
 import { useFx } from '@/hooks/useFx'
 
@@ -19,14 +19,9 @@ const tdR: React.CSSProperties = {
 }
 
 export default function TaxPage() {
-  const [dividends, setDividends] = useState<DividendReceived[]>([])
-  const [year, setYear]           = useState(new Date().getFullYear())
+  const { dividendsReceived: dividends } = useAppData()
+  const [year, setYear] = useState(new Date().getFullYear())
   const { fx } = useFx()
-
-  useEffect(() => {
-    supabase.from('dividends_received').select('*').order('payment_date', { ascending: false })
-      .then(({ data }) => { if (data) setDividends(data) })
-  }, [])
 
   const years = Array.from(new Set(dividends.map(d => new Date(d.payment_date).getFullYear()))).sort((a, b) => b - a)
   const filtered = dividends.filter(d => new Date(d.payment_date).getFullYear() === year)

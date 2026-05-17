@@ -1,7 +1,8 @@
 'use client'
-import { useEffect, useState, useCallback } from 'react'
+import { useState } from 'react'
+import { supabase } from '@/lib/supabase'
+import { useAppData } from '@/hooks/useAppData'
 import Sidebar from '@/components/Sidebar'
-import { supabase, CryptoHolding } from '@/lib/supabase'
 import { toCZK, fmtCZK } from '@/lib/fx'
 import { useFx } from '@/hooks/useFx'
 import { useCryptoPrices } from '@/hooks/useCryptoPrices'
@@ -17,26 +18,11 @@ const emptyForm = {
 }
 
 export default function CryptoPage() {
-  const [crypto, setCrypto] = useState<CryptoHolding[]>([])
-  const [loading, setLoading] = useState(true)
-  const [showAdd, setShowAdd] = useState(false)
-  const [editId, setEditId] = useState<string | null>(null)
-  const [form, setForm] = useState(emptyForm)
-  const [saving, setSaving] = useState(false)
-  const { fx, fxLoading, fxTs, refresh: refreshFx } = useFx()
-  const prices = useCryptoPrices()
+  const { cryptoHoldings: crypto, loading, reload } = useAppData()
 
-  const load = useCallback(async () => {
-    const { data } = await supabase.from('crypto_holdings').select('*').order('avg_cost_usd', { ascending: false })
-    if (data) setCrypto(data)
-    setLoading(false)
-    return data ?? []
-  }, [])
-
-  useEffect(() => {
-    load().then(c => { if (c.length > 0) prices.refresh(c.map(cc => cc.coin_id)) })
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  if (crypto.length > 0 && prices.state === 'idle') {
+    prices.refresh(crypto.map(c => c.coin_id))
+  }
 
   const totalValueCZK = crypto.reduce((s, c) =>
     s + toCZK(prices.getPrice(c.coin_id, c.avg_cost_usd) * c.amount, 'USD', fx), 0)
@@ -90,7 +76,7 @@ export default function CryptoPage() {
     setSaving(false)
     setShowAdd(false)
     resetForm()
-    load()
+    reload()
   }
 
   if (loading) return (
@@ -206,7 +192,7 @@ export default function CryptoPage() {
                         onClick={async () => {
                           if (!confirm(`Delete ${c.name}?`)) return
                           await supabase.from('crypto_holdings').delete().eq('id', c.id)
-                          load()
+                          reload()
                         }}
                         style={{ ...actionBtn, marginLeft: 4, color: 'var(--red)' }}
                       >✕</button>

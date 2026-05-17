@@ -1,8 +1,7 @@
 'use client'
-import { useEffect, useState } from 'react'
+import { useAppData } from '@/hooks/useAppData'
 import Sidebar from '@/components/Sidebar'
 import Badge from '@/components/Badge'
-import { supabase, Holding, DividendProjection } from '@/lib/supabase'
 import { toCZK, fmtCZK } from '@/lib/fx'
 import { useFx } from '@/hooks/useFx'
 import { computeProjectedTotal } from '@/lib/projections'
@@ -80,28 +79,8 @@ const fmtK = (n: number) => {
 }
 
 export default function SimulationPage() {
-  const [holdings, setHoldings]       = useState<Holding[]>([])
-  const [projections, setProjections] = useState<DividendProjection[]>([])
-  const [loading, setLoading]         = useState(true)
+  const { holdings, projections, loading } = useAppData()
   const { fx } = useFx()
-
-  const [years, setYears]               = useState(30)
-  const [contribution, setContribution] = useState(50000)
-  const [growthRate, setGrowthRate]     = useState(7)
-  const [divGrowth, setDivGrowth]       = useState(5)
-  const [withdrawalRate, setWithdrawal] = useState(4)
-  const [reinvest, setReinvest]         = useState(true)
-
-  useEffect(() => {
-    Promise.all([
-      supabase.from('holdings').select('*'),
-      supabase.from('dividend_projections').select('*').eq('year', CURRENT_YEAR + 1),
-    ]).then(([h, p]) => {
-      if (h.data) setHoldings(h.data)
-      if (p.data) setProjections(p.data)
-      setLoading(false)
-    })
-  }, [])
 
   // Use cost basis as portfolio starting value (market data not loaded on this page)
   const initialValueCZK = holdings.reduce(

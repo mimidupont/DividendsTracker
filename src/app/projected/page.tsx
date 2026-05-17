@@ -1,18 +1,12 @@
 'use client'
-import { useEffect, useState } from 'react'
+import { useAppData } from '@/hooks/useAppData'
 import Sidebar from '@/components/Sidebar'
 import Badge from '@/components/Badge'
-import { supabase, DividendProjection } from '@/lib/supabase'
 import { toCZK, fmtCZK, DEFAULT_FX } from '@/lib/fx'
 
 export default function ProjectedPage() {
-  const [projections, setProjections] = useState<DividendProjection[]>([])
+  const { projections } = useAppData()
   const fx = DEFAULT_FX
-
-  useEffect(() => {
-    supabase.from('dividend_projections').select('*').order('projected_total', { ascending: false })
-      .then(({ data }) => { if (data) setProjections(data) })
-  }, [])
 
   const years = Array.from(new Set(projections.map(p => p.year))).sort()
 

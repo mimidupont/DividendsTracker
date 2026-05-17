@@ -1,7 +1,8 @@
 'use client'
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState } from 'react'
+import { supabase, BankInterestReceived } from '@/lib/supabase'
+import { useAppData } from '@/hooks/useAppData'
 import Sidebar from '@/components/Sidebar'
-import { supabase, BankAccount, BankInterestReceived } from '@/lib/supabase'
 import { toCZK, fmtCZK, fmtDate } from '@/lib/fx'
 import { useFx } from '@/hooks/useFx'
 
@@ -30,26 +31,20 @@ const emptyForm = {
 }
 
 export default function CashPage() {
-  const [accounts, setAccounts] = useState<BankAccount[]>([])
+  const { bankAccounts: accounts, loading, reload } = useAppData()
   const [interest, setInterest] = useState<BankInterestReceived[]>([])
-  const [loading, setLoading] = useState(true)
   const [showAdd, setShowAdd] = useState(false)
   const [editId, setEditId] = useState<string | null>(null)
   const [form, setForm] = useState(emptyForm)
   const [saving, setSaving] = useState(false)
   const { fx, fxLoading, fxTs, refresh: refreshFx } = useFx()
 
-  const load = useCallback(async () => {
-    const [a, i] = await Promise.all([
-      supabase.from('bank_accounts').select('*').eq('is_active', true).order('balance', { ascending: false }),
-      supabase.from('bank_interest_received').select('*').order('payment_date', { ascending: false }).limit(20),
-    ])
-    if (a.data) setAccounts(a.data)
-    if (i.data) setInterest(i.data)
-    setLoading(false)
-  }, [])
-
-  useEffect(() => { load() }, [load])
+  // Interest log is append-only and only used on this page — keep local
+  useEffect(() => {
+    supabase.from('bank_interest_received')
+      .select('*').order('payment_date', { ascending: false }).limit(20)
+      .then(({ data }) => { if (data) setInterest(data) })
+  }, [accounts]) // re-fetches automatically whenever accounts reload
 
   const totalCZK = accounts.reduce((s, a) => s + toCZK(a.balance, a.currency, fx), 0)
   const annualInterestCZK = accounts.reduce((s, a) => s + toCZK(a.balance * a.interest_rate, a.currency, fx), 0)
@@ -92,7 +87,7 @@ export default function CashPage() {
     setSaving(false)
     setShowAdd(false)
     resetForm()
-    load()
+    reload()
   }
 
   if (loading) return (
@@ -188,7 +183,7 @@ export default function CashPage() {
                         onClick={async () => {
                           if (!confirm(`Delete "${a.name}"?`)) return
                           await supabase.from('bank_accounts').update({ is_active: false }).eq('id', a.id)
-                          load()
+                          reload()
                         }}
                         style={{ ...actionBtn, marginLeft: 4, color: 'var(--red)' }}
                       >✕</button>

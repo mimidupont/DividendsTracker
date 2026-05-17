@@ -1,7 +1,8 @@
 'use client'
-import { useEffect, useState, useCallback } from 'react'
+import { useState } from 'react'
+import { supabase } from '@/lib/supabase'
+import { useAppData } from '@/hooks/useAppData'
 import Sidebar from '@/components/Sidebar'
-import { supabase, RealEstate } from '@/lib/supabase'
 import { toCZK, fmtCZK, fmtDate } from '@/lib/fx'
 import { useFx } from '@/hooks/useFx'
 
@@ -9,26 +10,8 @@ const TYPE_LABELS: Record<string, string> = { residential: 'Residential', commer
 const TYPE_COLORS: Record<string, string> = { residential: 'var(--teal)', commercial: 'var(--amber)', land: 'var(--green)', reit: 'var(--blue)' }
 
 export default function RealEstatePage() {
-  const [properties, setProperties] = useState<RealEstate[]>([])
-  const [loading, setLoading] = useState(true)
+  const { realEstate: properties, loading, reload } = useAppData()
   const [showAdd, setShowAdd] = useState(false)
-  const [editId, setEditId] = useState<string | null>(null)
-  const [form, setForm] = useState({
-    name: '', property_type: 'residential', address: '',
-    purchase_price: '', current_value: '', currency: 'CZK',
-    purchase_date: '', monthly_rent: '0', mortgage_balance: '0',
-    mortgage_rate: '0', monthly_mortgage: '0', ownership_pct: '100', notes: '',
-  })
-  const [saving, setSaving] = useState(false)
-  const { fx, fxLoading, fxTs, refresh: refreshFx } = useFx()
-
-  const load = useCallback(async () => {
-    const { data } = await supabase.from('real_estate').select('*').order('current_value', { ascending: false })
-    if (data) setProperties(data)
-    setLoading(false)
-  }, [])
-
-  useEffect(() => { load() }, [load])
 
   const totalValueCZK = properties.reduce((s, p) => s + toCZK(p.current_value * (p.ownership_pct / 100), p.currency, fx), 0)
   const totalPurchaseCZK = properties.reduce((s, p) => s + toCZK(p.purchase_price * (p.ownership_pct / 100), p.currency, fx), 0)
@@ -65,7 +48,7 @@ export default function RealEstatePage() {
     setShowAdd(false)
     setEditId(null)
     resetForm()
-    load()
+    reload()
   }
 
   const resetForm = () => setForm({ name: '', property_type: 'residential', address: '', purchase_price: '', current_value: '', currency: 'CZK', purchase_date: '', monthly_rent: '0', mortgage_balance: '0', mortgage_rate: '0', monthly_mortgage: '0', ownership_pct: '100', notes: '' })
@@ -151,7 +134,7 @@ export default function RealEstatePage() {
                   </div>
                   <div style={{ display: 'flex', gap: 6 }}>
                     <button onClick={() => startEdit(p)} style={btnSecondary}>✎ Edit</button>
-                    <button onClick={async () => { if (!confirm(`Delete "${p.name}"?`)) return; await supabase.from('real_estate').delete().eq('id', p.id); load() }} style={{ ...btnSecondary, color: 'var(--red)' }}>✕</button>
+                    <button onClick={async () => { if (!confirm(`Delete "${p.name}"?`)) return; await supabase.from('real_estate').delete().eq('id', p.id); reload() }} style={{ ...btnSecondary, color: 'var(--red)' }}>✕</button>
                   </div>
                 </div>
 
