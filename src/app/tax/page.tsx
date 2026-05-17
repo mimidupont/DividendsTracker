@@ -1,6 +1,7 @@
 'use client'
 import { useState } from 'react'
 import { useAppData } from '@/hooks/useAppData'
+import { DividendReceived } from '@/lib/supabase'
 import Sidebar from '@/components/Sidebar'
 import Badge from '@/components/Badge'
 import { toCZK, fmtCZK, fmtDate } from '@/lib/fx'
