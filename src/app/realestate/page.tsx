@@ -5,7 +5,6 @@ import { useFx } from '@/hooks/useFx'
 import { useAppData } from '@/hooks/useAppData'
 import Sidebar from '@/components/Sidebar'
 import { toCZK, fmtCZK, fmtDate } from '@/lib/fx'
-import { useFx } from '@/hooks/useFx'
 
 const TYPE_LABELS: Record<string, string> = { residential: 'Residential', commercial: 'Commercial', land: 'Land', reit: 'REIT' }
 const TYPE_COLORS: Record<string, string> = { residential: 'var(--teal)', commercial: 'var(--amber)', land: 'var(--green)', reit: 'var(--blue)' }

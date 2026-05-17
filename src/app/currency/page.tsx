@@ -7,8 +7,6 @@ import { toCZK, fmtCZK } from '@/lib/fx'
 import { useFx } from '@/hooks/useFx'
 import { useMarketData } from '@/hooks/useMarketData'
 import { computeProjectedTotal } from '@/lib/projections'
-import { useFx } from '@/hooks/useFx'
-import { useMarketData } from '@/hooks/useMarketData'
 
 const CURRENT_YEAR = new Date().getFullYear()
 
