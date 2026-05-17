@@ -58,7 +58,7 @@ async function fetchMarketData(symbols: string[]): Promise<void> {
       quotes: { ...(cache?.quotes ?? {}), ...data.quotes },
       fetchedAt: data.fetchedAt,
       cachedAt: Date.now(),
-      symbols: [...new Set([...(cache?.symbols ?? []), ...symbols])],
+      symbols: Array.from(new Set([...(cache?.symbols ?? []), ...symbols])),
     }
     notify()
   } finally {
