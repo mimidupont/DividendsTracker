@@ -10,7 +10,7 @@ const nav = [
   ]},
   { section: 'Stocks & ETFs', accent: 'var(--green)', items: [
     { href: '/holdings',     label: 'Holdings',      icon: '◻', color: 'var(--green)' },
-    { href: '/dividends',    label: 'Dividends',     icon: '↓', color: 'var(--green)' },
+    { href: '/received',     label: 'Dividends',     icon: '↓', color: 'var(--green)' },
     { href: '/projected',    label: 'Projected',     icon: '→', color: 'var(--green)' },
     { href: '/calendar',     label: 'Ex-div cal.',   icon: '▦', color: 'var(--green)' },
   ]},
@@ -22,10 +22,6 @@ const nav = [
   ]},
   { section: 'Real Estate', accent: 'var(--teal)', items: [
     { href: '/realestate',   label: 'Properties',    icon: '⊞', color: 'var(--teal)'  },
-  ]},
-  { section: 'Planning', items: [
-    { href: '/tax',          label: 'Tax summary',   icon: '⊕', color: 'var(--text2)' },
-    { href: '/simulation',   label: 'Wealth sim.',   icon: '∿', color: 'var(--text2)' },
   ]},
 ]
 
