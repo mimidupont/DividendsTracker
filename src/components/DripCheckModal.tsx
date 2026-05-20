@@ -1,6 +1,7 @@
 'use client'
 import { useState } from 'react'
 import { supabase, Holding } from '@/lib/supabase'
+import { useProfile } from '@/lib/profile'
 import Modal from './Modal'
 import type { DividendSummary } from '@/app/api/market/dividends/route'
 
@@ -9,7 +10,7 @@ interface DripEvent {
   name: string
   exDate: string
   payDate: string
-  amount: number       // per share
+  amount: number
   currency: string
   sharesHeld: number
   grossAmount: number
@@ -27,6 +28,7 @@ export default function DripCheckModal({
   onClose: () => void
   onSaved: () => void
 }) {
+  const { activeProfile } = useProfile()
   const [loading, setLoading]   = useState(false)
   const [events, setEvents]     = useState<DripEvent[]>([])
   const [checked, setChecked]   = useState(false)
@@ -41,7 +43,6 @@ export default function DripCheckModal({
     setError('')
 
     try {
-      // Fetch dividend summaries from Yahoo Finance
       const res = await fetch('/api/market/dividends', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -54,54 +55,43 @@ export default function DripCheckModal({
 
       const data = await res.json() as { summaries: Record<string, DividendSummary> }
 
-      // Check which payments are already logged in DB
       const { data: existing } = await supabase
         .from('dividends_received')
         .select('symbol, payment_date')
+        .eq('profile_id', activeProfile?.id ?? '')
       const alreadyLogged = new Set((existing ?? []).map(d => `${d.symbol}::${d.payment_date}`))
 
-      const today   = new Date()
-      const ago90   = new Date(today.getTime() - 90 * 24 * 60 * 60 * 1000)
-
+      const today  = new Date()
+      const ago90  = new Date(today.getTime() - 90 * 24 * 60 * 60 * 1000)
       const dripEvents: DripEvent[] = []
 
       for (const h of divPayers) {
         const s: DividendSummary = data.summaries[h.symbol]
         if (!s || s.error) continue
 
-        // lastDividendValue = most recent actual per-share payment
-        const amount = s.lastDividendValue
+        const amount    = s.lastDividendValue
         const lastDivTs = s.lastDividendDate
         if (!amount || !lastDivTs) continue
 
         const payDate = new Date(lastDivTs * 1000)
-        if (payDate < ago90) continue  // too old
+        if (payDate < ago90) continue
 
-        // Estimate ex-date as ~3 weeks before pay date
-        const exDate = new Date(payDate.getTime() - 21 * 24 * 60 * 60 * 1000)
-
-        const payDateStr = payDate.toISOString().slice(0, 10)
-        const exDateStr  = exDate.toISOString().slice(0, 10)
-
+        const exDate      = new Date(payDate.getTime() - 21 * 24 * 60 * 60 * 1000)
+        const payDateStr  = payDate.toISOString().slice(0, 10)
+        const exDateStr   = exDate.toISOString().slice(0, 10)
         const grossAmount = h.shares * amount
-        const reinvestPrice = h.avg_price  // fallback; ideally current price
+        const reinvestPrice = h.avg_price
 
         dripEvents.push({
-          symbol: h.symbol,
-          name: h.name,
-          exDate: exDateStr,
-          payDate: payDateStr,
-          amount,
-          currency: h.currency,
-          sharesHeld: h.shares,
-          grossAmount,
-          reinvestPrice,
+          symbol: h.symbol, name: h.name,
+          exDate: exDateStr, payDate: payDateStr,
+          amount, currency: h.currency, sharesHeld: h.shares,
+          grossAmount, reinvestPrice,
           reinvestShares: grossAmount / reinvestPrice,
           alreadyLogged: alreadyLogged.has(`${h.symbol}::${payDateStr}`),
         })
       }
 
-      // Sort: unlogged first, then by payDate desc
       dripEvents.sort((a, b) => {
         if (a.alreadyLogged !== b.alreadyLogged) return a.alreadyLogged ? 1 : -1
         return b.payDate.localeCompare(a.payDate)
@@ -117,10 +107,11 @@ export default function DripCheckModal({
   }
 
   const applyDrip = async (ev: DripEvent) => {
+    if (!activeProfile) return
     setApplying(ev.symbol)
-    const holding = divPayers.find(h => h.symbol === ev.symbol)!
-    const wht = ev.grossAmount * 0.15
-    const net = ev.grossAmount - wht
+    const holding  = divPayers.find(h => h.symbol === ev.symbol)!
+    const wht      = ev.grossAmount * 0.15
+    const net      = ev.grossAmount - wht
 
     await supabase.from('dividends_received').insert([{
       symbol: ev.symbol,
@@ -134,11 +125,12 @@ export default function DripCheckModal({
       drip_shares_added: net / ev.reinvestPrice,
       drip_price: ev.reinvestPrice,
       notes: `DRIP: reinvested ${(net / ev.reinvestPrice).toFixed(4)} shares @ ${ev.reinvestPrice}`,
+      profile_id: activeProfile.id,
     }])
 
-    const newShares  = net / ev.reinvestPrice
+    const newShares   = net / ev.reinvestPrice
     const totalShares = holding.shares + newShares
-    const newAvg     = (holding.shares * holding.avg_price + net) / totalShares
+    const newAvg      = (holding.shares * holding.avg_price + net) / totalShares
 
     await supabase.from('holdings').update({
       shares: totalShares,

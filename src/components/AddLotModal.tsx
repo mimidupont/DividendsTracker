@@ -1,6 +1,7 @@
 'use client'
 import { useState } from 'react'
 import { supabase, Holding } from '@/lib/supabase'
+import { useProfile } from '@/lib/profile'
 import Modal from './Modal'
 import { Field, FormGrid, FormActions, ErrorBox, inputStyle } from './FormFields'
 
@@ -13,6 +14,7 @@ export default function AddLotModal({
   onClose: () => void
   onSaved: () => void
 }) {
+  const { activeProfile } = useProfile()
   const [form, setForm] = useState({
     shares: '',
     purchase_price: '',
@@ -20,7 +22,7 @@ export default function AddLotModal({
     notes: '',
   })
   const [saving, setSaving] = useState(false)
-  const [error, setError] = useState('')
+  const [error, setError]   = useState('')
 
   const set = (k: string, v: string) => setForm(f => ({ ...f, [k]: v }))
 
@@ -30,21 +32,20 @@ export default function AddLotModal({
       return
     }
     const newShares = parseFloat(form.shares)
-    const newPrice = parseFloat(form.purchase_price)
+    const newPrice  = parseFloat(form.purchase_price)
     if (isNaN(newShares) || isNaN(newPrice) || newShares <= 0 || newPrice <= 0) {
       setError('Please enter valid numbers.')
       return
     }
+    if (!activeProfile) { setError('No active profile selected.'); return }
 
     setSaving(true)
 
-    // Recalculate weighted average price and total shares
-    const totalOldCost = holding.shares * holding.avg_price
-    const totalNewCost = newShares * newPrice
-    const totalShares = holding.shares + newShares
-    const newAvgPrice = (totalOldCost + totalNewCost) / totalShares
+    const totalOldCost  = holding.shares * holding.avg_price
+    const totalNewCost  = newShares * newPrice
+    const totalShares   = holding.shares + newShares
+    const newAvgPrice   = (totalOldCost + totalNewCost) / totalShares
 
-    // Update the holding with new weighted avg and total shares
     const { error: updateErr } = await supabase.from('holdings').update({
       shares: totalShares,
       avg_price: newAvgPrice,
@@ -53,7 +54,6 @@ export default function AddLotModal({
 
     if (updateErr) { setError(updateErr.message); setSaving(false); return }
 
-    // Also insert into holding_lots table for history
     await supabase.from('holding_lots').insert([{
       holding_id: holding.id,
       symbol: holding.symbol,
@@ -61,17 +61,18 @@ export default function AddLotModal({
       purchase_price: newPrice,
       purchase_date: form.purchase_date || null,
       notes: form.notes || null,
+      profile_id: activeProfile.id,
     }])
 
     setSaving(false)
     onSaved(); onClose()
   }
 
-  const newShares = parseFloat(form.shares) || 0
-  const newPrice = parseFloat(form.purchase_price) || 0
-  const lotCost = newShares * newPrice
-  const newTotal = holding.shares + newShares
-  const newAvg = newTotal > 0
+  const newShares  = parseFloat(form.shares) || 0
+  const newPrice   = parseFloat(form.purchase_price) || 0
+  const lotCost    = newShares * newPrice
+  const newTotal   = holding.shares + newShares
+  const newAvg     = newTotal > 0
     ? (holding.shares * holding.avg_price + lotCost) / newTotal
     : 0
 
@@ -82,15 +83,9 @@ export default function AddLotModal({
       onClose={onClose}
     >
       <div style={{
-        background: 'var(--bg3)',
-        borderRadius: 8,
-        padding: '10px 14px',
-        marginBottom: 18,
-        fontSize: 11,
-        color: 'var(--text3)',
-        display: 'grid',
-        gridTemplateColumns: '1fr 1fr',
-        gap: 8,
+        background: 'var(--bg3)', borderRadius: 8, padding: '10px 14px',
+        marginBottom: 18, fontSize: 11, color: 'var(--text3)',
+        display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8,
       }}>
         <div>Current shares: <span style={{ color: 'var(--text)', fontWeight: 500 }}>{holding.shares}</span></div>
         <div>Current avg: <span style={{ color: 'var(--text)', fontWeight: 500 }}>{holding.avg_price.toFixed(2)} {holding.currency}</span></div>
@@ -114,15 +109,10 @@ export default function AddLotModal({
 
       {newShares > 0 && newPrice > 0 && (
         <div style={{
-          marginTop: 14,
-          padding: '12px 14px',
-          background: 'var(--green-bg)',
-          border: '1px solid var(--green-bd)',
-          borderRadius: 8,
-          fontSize: 11,
-          display: 'grid',
-          gridTemplateColumns: '1fr 1fr',
-          gap: 6,
+          marginTop: 14, padding: '12px 14px',
+          background: 'var(--green-bg)', border: '1px solid var(--green-bd)',
+          borderRadius: 8, fontSize: 11,
+          display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6,
         }}>
           <div style={{ color: 'var(--text3)' }}>Lot cost</div>
           <div style={{ color: 'var(--green)', fontWeight: 500 }}>

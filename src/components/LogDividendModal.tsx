@@ -1,6 +1,7 @@
 'use client'
 import { useState } from 'react'
 import { supabase } from '@/lib/supabase'
+import { useProfile } from '@/lib/profile'
 import Modal from './Modal'
 import { Field, FormGrid, FormActions, ErrorBox, inputStyle } from './FormFields'
 
@@ -13,6 +14,7 @@ export default function LogDividendModal({
   onSaved: () => void
   prefillSymbol?: string
 }) {
+  const { activeProfile } = useProfile()
   const [form, setForm] = useState({
     symbol: prefillSymbol ?? '',
     payment_date: new Date().toISOString().slice(0, 10),
@@ -25,11 +27,10 @@ export default function LogDividendModal({
     notes: '',
   })
   const [saving, setSaving] = useState(false)
-  const [error, setError] = useState('')
+  const [error, setError]   = useState('')
 
   const set = (k: string, v: string) => setForm(f => ({ ...f, [k]: v }))
 
-  // Auto-compute gross when amount × shares are filled
   const autoGross = form.amount_per_share && form.shares_held
     ? (parseFloat(form.amount_per_share) * parseFloat(form.shares_held)).toFixed(4)
     : null
@@ -39,6 +40,8 @@ export default function LogDividendModal({
       setError('Symbol, date, and gross amount are required.')
       return
     }
+    if (!activeProfile) { setError('No active profile selected.'); return }
+
     setSaving(true)
     const { error: err } = await supabase.from('dividends_received').insert([{
       symbol: form.symbol.toUpperCase(),
@@ -50,6 +53,7 @@ export default function LogDividendModal({
       withholding_tax: parseFloat(form.withholding_tax) || 0,
       currency: form.currency,
       notes: form.notes || null,
+      profile_id: activeProfile.id,
     }])
     setSaving(false)
     if (err) { setError(err.message); return }

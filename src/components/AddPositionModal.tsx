@@ -1,6 +1,7 @@
 'use client'
 import { useState, useEffect, useRef } from 'react'
 import { supabase } from '@/lib/supabase'
+import { useProfile } from '@/lib/profile'
 import Modal from './Modal'
 import { Field, FormGrid, FormActions, ErrorBox, inputStyle } from './FormFields'
 
@@ -11,6 +12,7 @@ export default function AddPositionModal({
   onClose: () => void
   onSaved: () => void
 }) {
+  const { activeProfile } = useProfile()
   const [form, setForm] = useState({
     symbol: '', name: '', shares: '', avg_price: '',
     currency: 'USD', exchange: '', purchase_date: '', is_dividend_payer: true,
@@ -32,7 +34,6 @@ export default function AddPositionModal({
       setLookingUp(true)
       setLookupStatus('idle')
       try {
-        // Use our existing /api/market route to look up the symbol
         const res = await fetch('/api/market', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -47,9 +48,7 @@ export default function AddPositionModal({
             ...f,
             name: q.longName || f.name,
             currency: q.currency || f.currency,
-            // avg_price hint: don't overwrite if user already typed something
             avg_price: f.avg_price || '',
-            // dividend payer: true if Yahoo returns a dividend yield
             is_dividend_payer: q.dividendYield != null ? q.dividendYield > 0 : f.is_dividend_payer,
           }))
           setLookupStatus(q.longName ? 'found' : 'notfound')
@@ -72,6 +71,8 @@ export default function AddPositionModal({
       setError('Ticker, name, shares, and price are required.')
       return
     }
+    if (!activeProfile) { setError('No active profile selected.'); return }
+
     setSaving(true)
     const { error: err } = await supabase.from('holdings').insert([{
       symbol: form.symbol.toUpperCase().trim(),
@@ -82,6 +83,7 @@ export default function AddPositionModal({
       exchange: form.exchange.trim() || null,
       purchase_date: form.purchase_date || null,
       is_dividend_payer: form.is_dividend_payer,
+      profile_id: activeProfile.id,
     }])
     setSaving(false)
     if (err) { setError(err.message); return }
