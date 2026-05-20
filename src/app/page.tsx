@@ -7,6 +7,7 @@ import { useMarketData } from '@/hooks/useMarketData'
 import { useCryptoPrices } from '@/hooks/useCryptoPrices'
 import { useAppData } from '@/hooks/useAppData'
 import { computeProjectedTotal } from '@/lib/projections'
+import { useProfile } from '@/lib/profile'
 
 function greeting() {
   const h = new Date().getHours()
