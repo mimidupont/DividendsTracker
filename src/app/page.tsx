@@ -110,7 +110,7 @@ export default function Dashboard() {
       </main>
     </div>
   )
-
+const { activeProfile } = useProfile()
   return (
     <div style={{ display: 'flex' }}>
       <Sidebar />
@@ -123,7 +123,7 @@ export default function Dashboard() {
               {new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}
             </div>
             <h1 style={{ fontFamily: "'Syne', sans-serif", fontSize: 28, fontWeight: 700, letterSpacing: '-0.02em', lineHeight: 1.1 }}>
-              {greeting()}, <span style={{ color: 'var(--green)' }}>Eliot</span>
+              {greeting()}, <span style={{ color: 'var(--green)' }}>{activeProfile?.display_name ?? 'there'}</span>
             </h1>
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
