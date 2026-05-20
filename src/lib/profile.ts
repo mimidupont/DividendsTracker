@@ -26,15 +26,13 @@ let inFlight: Promise<Profile[]> | null = null
 export async function loadProfiles(): Promise<Profile[]> {
   if (profilesCache) return profilesCache
   if (inFlight) return inFlight
-  inFlight = supabase
-    .from('profiles')
-    .select('*')
-    .order('created_at')
-    .then(({ data }) => {
-      profilesCache = (data ?? []) as Profile[]
-      inFlight = null
-      return profilesCache
-    })
+  inFlight = Promise.resolve(
+    supabase.from('profiles').select('*').order('created_at')
+  ).then(({ data }) => {
+    profilesCache = (data ?? []) as Profile[]
+    inFlight = null
+    return profilesCache
+  })
   return inFlight
 }
 
