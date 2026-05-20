@@ -2,6 +2,7 @@
 import { useEffect, useState } from 'react'
 import { supabase, BankAccount, BankInterestReceived } from '@/lib/supabase'
 import { useAppData } from '@/hooks/useAppData'
+import { useProfile } from '@/lib/profile'
 import Sidebar from '@/components/Sidebar'
 import { toCZK, fmtCZK, fmtDate } from '@/lib/fx'
 import { useFx } from '@/hooks/useFx'
@@ -32,32 +33,30 @@ const emptyForm = {
 
 export default function CashPage() {
   const { bankAccounts: accounts, loading, reload } = useAppData()
+  const { activeProfile } = useProfile()
   const [interest, setInterest] = useState<BankInterestReceived[]>([])
-  const [showAdd, setShowAdd] = useState(false)
-  const [editId, setEditId] = useState<string | null>(null)
-  const [form, setForm] = useState(emptyForm)
-  const [saving, setSaving] = useState(false)
+  const [showAdd, setShowAdd]   = useState(false)
+  const [editId, setEditId]     = useState<string | null>(null)
+  const [form, setForm]         = useState(emptyForm)
+  const [saving, setSaving]     = useState(false)
   const { fx, fxLoading, fxTs, refresh: refreshFx } = useFx()
 
-  // Interest log is append-only and only used on this page — keep local
   useEffect(() => {
     supabase.from('bank_interest_received')
       .select('*').order('payment_date', { ascending: false }).limit(20)
       .then(({ data }) => { if (data) setInterest(data) })
-  }, [accounts]) // re-fetches automatically whenever accounts reload
+  }, [accounts])
 
-  const totalCZK = accounts.reduce((s, a) => s + toCZK(a.balance, a.currency, fx), 0)
-  const annualInterestCZK = accounts.reduce((s, a) => s + toCZK(a.balance * a.interest_rate, a.currency, fx), 0)
-  const avgRate = accounts.length > 0 ? accounts.reduce((s, a) => s + a.interest_rate, 0) / accounts.length : 0
+  const totalCZK           = accounts.reduce((s, a) => s + toCZK(a.balance, a.currency, fx), 0)
+  const annualInterestCZK  = accounts.reduce((s, a) => s + toCZK(a.balance * a.interest_rate, a.currency, fx), 0)
+  const avgRate            = accounts.length > 0 ? accounts.reduce((s, a) => s + a.interest_rate, 0) / accounts.length : 0
 
   const resetForm = () => { setForm(emptyForm); setEditId(null) }
 
   const startEdit = (a: BankAccount) => {
     setForm({
-      name: a.name,
-      institution: a.institution,
-      account_type: a.account_type,
-      balance: String(a.balance),
+      name: a.name, institution: a.institution,
+      account_type: a.account_type, balance: String(a.balance),
       currency: a.currency,
       interest_rate: String((a.interest_rate * 100).toFixed(2)),
       notes: a.notes ?? '',
@@ -68,6 +67,7 @@ export default function CashPage() {
 
   const saveAccount = async () => {
     if (!form.name || !form.institution || !form.balance) return
+    if (!activeProfile) return
     setSaving(true)
     const payload = {
       name: form.name,
@@ -82,7 +82,7 @@ export default function CashPage() {
     if (editId) {
       await supabase.from('bank_accounts').update(payload).eq('id', editId)
     } else {
-      await supabase.from('bank_accounts').insert([payload])
+      await supabase.from('bank_accounts').insert([{ ...payload, profile_id: activeProfile.id }])
     }
     setSaving(false)
     setShowAdd(false)
@@ -113,11 +113,10 @@ export default function CashPage() {
           </div>
         </div>
 
-        {/* Summary cards */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 20 }}>
           {[
-            { label: 'Total cash', value: fmtCZK(totalCZK), accent: 'var(--blue)', note: `${accounts.length} accounts` },
-            { label: 'Annual interest', value: fmtCZK(annualInterestCZK), accent: 'var(--amber)', note: `Avg rate ${(avgRate * 100).toFixed(2)}%` },
+            { label: 'Total cash',       value: fmtCZK(totalCZK),               accent: 'var(--blue)',  note: `${accounts.length} accounts` },
+            { label: 'Annual interest',  value: fmtCZK(annualInterestCZK),       accent: 'var(--amber)', note: `Avg rate ${(avgRate * 100).toFixed(2)}%` },
             { label: 'Monthly interest', value: fmtCZK(annualInterestCZK / 12, 0), accent: 'var(--green)', note: 'Est. passive income' },
           ].map((m, i) => (
             <div key={i} style={{ ...cardStyle, borderTop: `2px solid ${m.accent}` }}>
@@ -128,11 +127,8 @@ export default function CashPage() {
           ))}
         </div>
 
-        {/* Accounts list */}
         <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 12, overflow: 'hidden', marginBottom: 16 }}>
-          <div style={tableHeader}>
-            <span style={tableHeaderLabel}>Account overview</span>
-          </div>
+          <div style={tableHeader}><span style={tableHeaderLabel}>Account overview</span></div>
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>
               <tr>
@@ -143,11 +139,14 @@ export default function CashPage() {
             </thead>
             <tbody>
               {accounts.map(a => {
-                const balCZK = toCZK(a.balance, a.currency, fx)
+                const balCZK    = toCZK(a.balance, a.currency, fx)
                 const annualCZK = toCZK(a.balance * a.interest_rate, a.currency, fx)
                 const typeColor = ACCOUNT_TYPE_COLORS[a.account_type] ?? 'var(--text3)'
                 return (
-                  <tr key={a.id} style={trStyle} onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg3)')} onMouseLeave={e => (e.currentTarget.style.background = '')}>
+                  <tr key={a.id} style={trStyle}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg3)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = '')}
+                  >
                     <td style={tdL}>
                       <div style={{ fontWeight: 500, fontSize: 13 }}>{a.name}</div>
                       <div style={{ fontSize: 10, color: 'var(--text4)' }}>{a.institution}</div>
@@ -173,20 +172,12 @@ export default function CashPage() {
                       </span>
                     </td>
                     <td style={{ padding: '9px 14px', borderBottom: '1px solid var(--border)', whiteSpace: 'nowrap' }}>
-                      <button
-                        title="Edit account"
-                        onClick={() => startEdit(a)}
-                        style={actionBtn}
-                      >✎</button>
-                      <button
-                        title="Delete account"
-                        onClick={async () => {
-                          if (!confirm(`Delete "${a.name}"?`)) return
-                          await supabase.from('bank_accounts').update({ is_active: false }).eq('id', a.id)
-                          reload()
-                        }}
-                        style={{ ...actionBtn, marginLeft: 4, color: 'var(--red)' }}
-                      >✕</button>
+                      <button title="Edit account" onClick={() => startEdit(a)} style={actionBtn}>✎</button>
+                      <button title="Delete account" onClick={async () => {
+                        if (!confirm(`Delete "${a.name}"?`)) return
+                        await supabase.from('bank_accounts').update({ is_active: false }).eq('id', a.id)
+                        reload()
+                      }} style={{ ...actionBtn, marginLeft: 4, color: 'var(--red)' }}>✕</button>
                     </td>
                   </tr>
                 )
@@ -204,7 +195,6 @@ export default function CashPage() {
           </table>
         </div>
 
-        {/* Add / Edit form */}
         {showAdd && (
           <div style={{ background: 'var(--bg2)', border: '1px solid var(--blue-bd)', borderRadius: 12, padding: '24px 28px', marginBottom: 16 }}>
             <div style={{ fontFamily: "'Syne', sans-serif", fontSize: 16, fontWeight: 600, marginBottom: 18 }}>
@@ -212,8 +202,8 @@ export default function CashPage() {
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
               {[
-                { label: 'Account name', key: 'name', placeholder: 'e.g. Spořicí účet' },
-                { label: 'Institution', key: 'institution', placeholder: 'e.g. Raiffeisen Bank' },
+                { label: 'Account name', key: 'name',        placeholder: 'e.g. Spořicí účet' },
+                { label: 'Institution',  key: 'institution', placeholder: 'e.g. Raiffeisen Bank' },
               ].map(f => (
                 <div key={f.key}>
                   <div style={inputLabel}>{f.label}</div>
@@ -257,7 +247,6 @@ export default function CashPage() {
           </div>
         )}
 
-        {/* Interest received log */}
         {interest.length > 0 && (
           <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 12, overflow: 'hidden' }}>
             <div style={tableHeader}><span style={tableHeaderLabel}>Interest received</span></div>
@@ -273,7 +262,10 @@ export default function CashPage() {
                 {interest.map(i => {
                   const acct = accounts.find(a => a.id === i.account_id)
                   return (
-                    <tr key={i.id} onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg3)')} onMouseLeave={e => (e.currentTarget.style.background = '')}>
+                    <tr key={i.id}
+                      onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg3)')}
+                      onMouseLeave={e => (e.currentTarget.style.background = '')}
+                    >
                       <td style={tdL}>{acct?.name ?? '—'}</td>
                       <td style={tdR}>{fmtDate(i.payment_date)}</td>
                       <td style={{ ...tdR, color: 'var(--green)', fontFamily: "'DM Mono', monospace" }}>+{i.gross_amount.toFixed(2)} {i.currency}</td>
@@ -291,49 +283,16 @@ export default function CashPage() {
   )
 }
 
-const cardStyle: React.CSSProperties = {
-  background: 'var(--bg2)', border: '1px solid var(--border)',
-  borderRadius: 12, padding: '18px 20px',
-}
-const labelStyle: React.CSSProperties = {
-  fontSize: 9, letterSpacing: '0.12em', textTransform: 'uppercase',
-  color: 'var(--text3)', marginBottom: 8, fontWeight: 500,
-}
-const tableHeader: React.CSSProperties = {
-  padding: '12px 18px', borderBottom: '1px solid var(--border)',
-  background: 'var(--bg3)', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-}
-const tableHeaderLabel: React.CSSProperties = {
-  fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--text3)', fontWeight: 600,
-}
-const th: React.CSSProperties = {
-  fontSize: 9, letterSpacing: '0.09em', textTransform: 'uppercase',
-  color: 'var(--text4)', padding: '8px 14px', borderBottom: '1px solid var(--border)', fontWeight: 400,
-}
+const cardStyle: React.CSSProperties = { background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 12, padding: '18px 20px' }
+const labelStyle: React.CSSProperties = { fontSize: 9, letterSpacing: '0.12em', textTransform: 'uppercase', color: 'var(--text3)', marginBottom: 8, fontWeight: 500 }
+const tableHeader: React.CSSProperties = { padding: '12px 18px', borderBottom: '1px solid var(--border)', background: 'var(--bg3)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }
+const tableHeaderLabel: React.CSSProperties = { fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--text3)', fontWeight: 600 }
+const th: React.CSSProperties = { fontSize: 9, letterSpacing: '0.09em', textTransform: 'uppercase', color: 'var(--text4)', padding: '8px 14px', borderBottom: '1px solid var(--border)', fontWeight: 400 }
 const tdL: React.CSSProperties = { padding: '9px 14px', borderBottom: '1px solid var(--border)' }
 const tdR: React.CSSProperties = { padding: '9px 14px', borderBottom: '1px solid var(--border)', textAlign: 'right', color: 'var(--text2)', fontSize: 12 }
 const trStyle: React.CSSProperties = { transition: 'background 0.1s' }
-const actionBtn: React.CSSProperties = {
-  background: 'none', border: '1px solid var(--border2)', borderRadius: 4, cursor: 'pointer',
-  color: 'var(--text3)', fontSize: 12, width: 24, height: 24,
-  display: 'inline-flex', alignItems: 'center', justifyContent: 'center', padding: 0,
-}
-const btnSecondary: React.CSSProperties = {
-  padding: '7px 14px', borderRadius: 6, cursor: 'pointer',
-  background: 'var(--bg3)', border: '1px solid var(--border2)',
-  color: 'var(--text2)', fontFamily: "'Inter', sans-serif", fontSize: 12,
-}
-const btnPrimary = (color: string, bd: string, bg: string): React.CSSProperties => ({
-  padding: '7px 16px', borderRadius: 6, cursor: 'pointer',
-  background: bg, border: `1px solid ${bd}`, color,
-  fontFamily: "'Inter', sans-serif", fontSize: 12, fontWeight: 500,
-})
-const inputLabel: React.CSSProperties = {
-  fontSize: 10, color: 'var(--text3)', letterSpacing: '0.08em',
-  textTransform: 'uppercase', display: 'block', marginBottom: 5, fontWeight: 500,
-}
-const inputStyle: React.CSSProperties = {
-  width: '100%', padding: '8px 10px', borderRadius: 6,
-  border: '1px solid var(--border2)', background: 'var(--bg)',
-  color: 'var(--text)', fontFamily: "'Inter', sans-serif", fontSize: 13, outline: 'none', boxSizing: 'border-box',
-}
+const actionBtn: React.CSSProperties = { background: 'none', border: '1px solid var(--border2)', borderRadius: 4, cursor: 'pointer', color: 'var(--text3)', fontSize: 12, width: 24, height: 24, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', padding: 0 }
+const btnSecondary: React.CSSProperties = { padding: '7px 14px', borderRadius: 6, cursor: 'pointer', background: 'var(--bg3)', border: '1px solid var(--border2)', color: 'var(--text2)', fontFamily: "'Inter', sans-serif", fontSize: 12 }
+const btnPrimary = (color: string, bd: string, bg: string): React.CSSProperties => ({ padding: '7px 16px', borderRadius: 6, cursor: 'pointer', background: bg, border: `1px solid ${bd}`, color, fontFamily: "'Inter', sans-serif", fontSize: 12, fontWeight: 500 })
+const inputLabel: React.CSSProperties = { fontSize: 10, color: 'var(--text3)', letterSpacing: '0.08em', textTransform: 'uppercase', display: 'block', marginBottom: 5, fontWeight: 500 }
+const inputStyle: React.CSSProperties = { width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid var(--border2)', background: 'var(--bg)', color: 'var(--text)', fontFamily: "'Inter', sans-serif", fontSize: 13, outline: 'none', boxSizing: 'border-box' }

@@ -1,49 +1,41 @@
 'use client'
 import { useState } from 'react'
 import { supabase, RealEstate } from '@/lib/supabase'
-import { useFx } from '@/hooks/useFx'
 import { useAppData } from '@/hooks/useAppData'
+import { useProfile } from '@/lib/profile'
+import { useFx } from '@/hooks/useFx'
 import Sidebar from '@/components/Sidebar'
 import { toCZK, fmtCZK, fmtDate } from '@/lib/fx'
 
-const TYPE_LABELS: Record<string, string> = { residential: 'Residential', commercial: 'Commercial', land: 'Land', reit: 'REIT' }
-const TYPE_COLORS: Record<string, string> = { residential: 'var(--teal)', commercial: 'var(--amber)', land: 'var(--green)', reit: 'var(--blue)' }
+const TYPE_LABELS: Record<string, string>  = { residential: 'Residential', commercial: 'Commercial', land: 'Land', reit: 'REIT' }
+const TYPE_COLORS: Record<string, string>  = { residential: 'var(--teal)', commercial: 'var(--amber)', land: 'var(--green)', reit: 'var(--blue)' }
 
 export default function RealEstatePage() {
   const { realEstate: properties, loading, reload } = useAppData()
+  const { activeProfile } = useProfile()
   const [showAdd, setShowAdd] = useState(false)
   const { fx, fxLoading, fxTs, refresh: refreshFx } = useFx()
   const [editId, setEditId]   = useState<string | null>(null)
   const [saving, setSaving]   = useState(false)
   const [form, setForm]       = useState({
-    name: '',
-    property_type: 'residential',
-    address: '',
-    purchase_price: '',
-    current_value: '',
-    currency: 'CZK',
-    purchase_date: '',
-    monthly_rent: '0',
-    mortgage_balance: '0',
-    mortgage_rate: '0',
-    monthly_mortgage: '0',
-    ownership_pct: '100',
-    notes: '',
+    name: '', property_type: 'residential', address: '',
+    purchase_price: '', current_value: '', currency: 'CZK',
+    purchase_date: '', monthly_rent: '0', mortgage_balance: '0',
+    mortgage_rate: '0', monthly_mortgage: '0', ownership_pct: '100', notes: '',
   })
 
-  const totalValueCZK = properties.reduce((s, p) => s + toCZK(p.current_value * (p.ownership_pct / 100), p.currency, fx), 0)
-  const totalPurchaseCZK = properties.reduce((s, p) => s + toCZK(p.purchase_price * (p.ownership_pct / 100), p.currency, fx), 0)
+  const totalValueCZK    = properties.reduce((s, p) => s + toCZK(p.current_value    * (p.ownership_pct / 100), p.currency, fx), 0)
+  const totalPurchaseCZK = properties.reduce((s, p) => s + toCZK(p.purchase_price   * (p.ownership_pct / 100), p.currency, fx), 0)
   const totalMortgageCZK = properties.reduce((s, p) => s + toCZK(p.mortgage_balance, p.currency, fx), 0)
-  const totalEquityCZK = totalValueCZK - totalMortgageCZK
-  const totalRentalCZK = properties.reduce((s, p) => s + toCZK(p.monthly_rent * 12 * (p.ownership_pct / 100), p.currency, fx), 0)
-  const totalGainCZK = totalValueCZK - totalPurchaseCZK
+  const totalEquityCZK   = totalValueCZK - totalMortgageCZK
+  const totalRentalCZK   = properties.reduce((s, p) => s + toCZK(p.monthly_rent * 12 * (p.ownership_pct / 100), p.currency, fx), 0)
 
   const saveProperty = async () => {
     if (!form.name || !form.purchase_price || !form.current_value) return
+    if (!activeProfile) return
     setSaving(true)
     const payload = {
-      name: form.name,
-      property_type: form.property_type,
+      name: form.name, property_type: form.property_type,
       address: form.address || null,
       purchase_price: parseFloat(form.purchase_price),
       current_value: parseFloat(form.current_value),
@@ -60,7 +52,7 @@ export default function RealEstatePage() {
     if (editId) {
       await supabase.from('real_estate').update(payload).eq('id', editId)
     } else {
-      await supabase.from('real_estate').insert([payload])
+      await supabase.from('real_estate').insert([{ ...payload, profile_id: activeProfile.id }])
     }
     setSaving(false)
     setShowAdd(false)
@@ -69,7 +61,12 @@ export default function RealEstatePage() {
     reload()
   }
 
-  const resetForm = () => setForm({ name: '', property_type: 'residential', address: '', purchase_price: '', current_value: '', currency: 'CZK', purchase_date: '', monthly_rent: '0', mortgage_balance: '0', mortgage_rate: '0', monthly_mortgage: '0', ownership_pct: '100', notes: '' })
+  const resetForm = () => setForm({
+    name: '', property_type: 'residential', address: '',
+    purchase_price: '', current_value: '', currency: 'CZK',
+    purchase_date: '', monthly_rent: '0', mortgage_balance: '0',
+    mortgage_rate: '0', monthly_mortgage: '0', ownership_pct: '100', notes: '',
+  })
 
   const startEdit = (p: RealEstate) => {
     setForm({
@@ -109,10 +106,10 @@ export default function RealEstatePage() {
 
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 20 }}>
           {[
-            { label: 'Market value', value: fmtCZK(totalValueCZK), accent: 'var(--teal)', note: `${properties.length} properties` },
-            { label: 'Net equity', value: fmtCZK(totalEquityCZK), accent: 'var(--green)', note: `${totalValueCZK > 0 ? ((totalEquityCZK / totalValueCZK) * 100).toFixed(0) : 0}% of value` },
-            { label: 'Mortgage debt', value: fmtCZK(totalMortgageCZK), accent: 'var(--red)', note: 'Outstanding balance' },
-            { label: 'Annual rental income', value: totalRentalCZK > 0 ? fmtCZK(totalRentalCZK) : '—', accent: 'var(--amber)', note: `${properties.filter(p => p.monthly_rent > 0).length} rentals` },
+            { label: 'Market value',         value: fmtCZK(totalValueCZK),   accent: 'var(--teal)',  note: `${properties.length} properties` },
+            { label: 'Net equity',            value: fmtCZK(totalEquityCZK),  accent: 'var(--green)', note: `${totalValueCZK > 0 ? ((totalEquityCZK / totalValueCZK) * 100).toFixed(0) : 0}% of value` },
+            { label: 'Mortgage debt',         value: fmtCZK(totalMortgageCZK), accent: 'var(--red)',  note: 'Outstanding balance' },
+            { label: 'Annual rental income',  value: totalRentalCZK > 0 ? fmtCZK(totalRentalCZK) : '—', accent: 'var(--amber)', note: `${properties.filter(p => p.monthly_rent > 0).length} rentals` },
           ].map((m, i) => (
             <div key={i} style={{ ...cardStyle, borderTop: `2px solid ${m.accent}` }}>
               <div style={labelStyle}>{m.label}</div>
@@ -122,20 +119,18 @@ export default function RealEstatePage() {
           ))}
         </div>
 
-        {/* Property cards */}
         <div style={{ display: 'grid', gap: 14, marginBottom: 16 }}>
           {properties.map(p => {
-            const valueCZK = toCZK(p.current_value * (p.ownership_pct / 100), p.currency, fx)
-            const purchaseCZK = toCZK(p.purchase_price * (p.ownership_pct / 100), p.currency, fx)
-            const mortgageCZK = toCZK(p.mortgage_balance, p.currency, fx)
-            const equityCZK = valueCZK - mortgageCZK
-            const gainCZK = valueCZK - purchaseCZK
-            const gainPct = purchaseCZK > 0 ? (gainCZK / purchaseCZK) * 100 : 0
+            const valueCZK      = toCZK(p.current_value    * (p.ownership_pct / 100), p.currency, fx)
+            const purchaseCZK   = toCZK(p.purchase_price   * (p.ownership_pct / 100), p.currency, fx)
+            const mortgageCZK   = toCZK(p.mortgage_balance, p.currency, fx)
+            const equityCZK     = valueCZK - mortgageCZK
+            const gainCZK       = valueCZK - purchaseCZK
+            const gainPct       = purchaseCZK > 0 ? (gainCZK / purchaseCZK) * 100 : 0
             const monthlyRentCZK = toCZK(p.monthly_rent, p.currency, fx)
-            const ltvPct = valueCZK > 0 ? (mortgageCZK / valueCZK) * 100 : 0
-            const yieldPct = valueCZK > 0 ? (p.monthly_rent * 12 / p.current_value) * 100 : 0
-            const typeColor = TYPE_COLORS[p.property_type] ?? 'var(--teal)'
-
+            const ltvPct        = valueCZK > 0 ? (mortgageCZK / valueCZK) * 100 : 0
+            const yieldPct      = valueCZK > 0 ? (p.monthly_rent * 12 / p.current_value) * 100 : 0
+            const typeColor     = TYPE_COLORS[p.property_type] ?? 'var(--teal)'
             return (
               <div key={p.id} style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 14, padding: '22px 26px' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 18 }}>
@@ -147,23 +142,27 @@ export default function RealEstatePage() {
                       </span>
                       {p.is_primary_residence && <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: 'var(--blue-bg)', color: 'var(--blue)', border: '1px solid var(--blue-bd)' }}>Primary</span>}
                     </div>
-                    {p.address && <div style={{ fontSize: 11, color: 'var(--text4)' }}>{p.address}</div>}
+                    {p.address     && <div style={{ fontSize: 11, color: 'var(--text4)' }}>{p.address}</div>}
                     {p.purchase_date && <div style={{ fontSize: 10, color: 'var(--text4)', marginTop: 2 }}>Purchased {fmtDate(p.purchase_date)}</div>}
                   </div>
                   <div style={{ display: 'flex', gap: 6 }}>
                     <button onClick={() => startEdit(p)} style={btnSecondary}>✎ Edit</button>
-                    <button onClick={async () => { if (!confirm(`Delete "${p.name}"?`)) return; await supabase.from('real_estate').delete().eq('id', p.id); reload() }} style={{ ...btnSecondary, color: 'var(--red)' }}>✕</button>
+                    <button onClick={async () => {
+                      if (!confirm(`Delete "${p.name}"?`)) return
+                      await supabase.from('real_estate').delete().eq('id', p.id)
+                      reload()
+                    }} style={{ ...btnSecondary, color: 'var(--red)' }}>✕</button>
                   </div>
                 </div>
 
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 16 }}>
                   {[
-                    { label: 'Market value', value: fmtCZK(valueCZK), sub: `${p.current_value.toLocaleString()} ${p.currency}`, color: 'var(--teal)' },
-                    { label: 'Net equity', value: fmtCZK(equityCZK), sub: `${(100 - ltvPct).toFixed(0)}% owned`, color: 'var(--green)' },
-                    { label: 'Capital gain', value: (gainCZK >= 0 ? '+' : '') + fmtCZK(gainCZK), sub: `${gainPct >= 0 ? '+' : ''}${gainPct.toFixed(1)}%`, color: gainCZK >= 0 ? 'var(--green)' : 'var(--red)' },
-                    { label: 'Mortgage', value: mortgageCZK > 0 ? fmtCZK(mortgageCZK) : '—', sub: mortgageCZK > 0 ? `${(p.mortgage_rate * 100).toFixed(2)}% rate` : 'No mortgage', color: 'var(--red)' },
-                    { label: 'Monthly rent', value: p.monthly_rent > 0 ? fmtCZK(monthlyRentCZK) : '—', sub: p.monthly_rent > 0 ? `Yield ${yieldPct.toFixed(1)}%` : 'Owner occupied', color: 'var(--amber)' },
-                    { label: 'Ownership', value: `${p.ownership_pct}%`, sub: `${p.currency} asset`, color: 'var(--text2)' },
+                    { label: 'Market value',  value: fmtCZK(valueCZK),    sub: `${p.current_value.toLocaleString()} ${p.currency}`, color: 'var(--teal)' },
+                    { label: 'Net equity',    value: fmtCZK(equityCZK),   sub: `${(100 - ltvPct).toFixed(0)}% owned`,              color: 'var(--green)' },
+                    { label: 'Capital gain',  value: (gainCZK >= 0 ? '+' : '') + fmtCZK(gainCZK), sub: `${gainPct >= 0 ? '+' : ''}${gainPct.toFixed(1)}%`, color: gainCZK >= 0 ? 'var(--green)' : 'var(--red)' },
+                    { label: 'Mortgage',      value: mortgageCZK > 0 ? fmtCZK(mortgageCZK) : '—', sub: mortgageCZK > 0 ? `${(p.mortgage_rate * 100).toFixed(2)}% rate` : 'No mortgage', color: 'var(--red)' },
+                    { label: 'Monthly rent',  value: p.monthly_rent > 0 ? fmtCZK(monthlyRentCZK) : '—', sub: p.monthly_rent > 0 ? `Yield ${yieldPct.toFixed(1)}%` : 'Owner occupied', color: 'var(--amber)' },
+                    { label: 'Ownership',     value: `${p.ownership_pct}%`, sub: `${p.currency} asset`, color: 'var(--text2)' },
                   ].map((stat, i) => (
                     <div key={i}>
                       <div style={{ fontSize: 9, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--text4)', marginBottom: 4, fontWeight: 500 }}>{stat.label}</div>
@@ -173,7 +172,6 @@ export default function RealEstatePage() {
                   ))}
                 </div>
 
-                {/* Equity bar */}
                 {p.mortgage_balance > 0 && (
                   <div style={{ marginTop: 16 }}>
                     <div style={{ height: 4, borderRadius: 2, background: 'var(--bg4)', overflow: 'hidden' }}>
@@ -190,7 +188,6 @@ export default function RealEstatePage() {
           })}
         </div>
 
-        {/* Add/Edit form */}
         {showAdd && (
           <div style={{ background: 'var(--bg2)', border: '1px solid var(--teal-bd)', borderRadius: 14, padding: '26px 30px' }}>
             <div style={{ fontFamily: "'Syne', sans-serif", fontSize: 17, fontWeight: 700, marginBottom: 20 }}>
@@ -202,16 +199,16 @@ export default function RealEstatePage() {
                 <input style={inputStyle} placeholder="e.g. Prague Flat – Žižkov" value={form.name} onChange={e => setForm(p => ({ ...p, name: e.target.value }))} />
               </div>
               {[
-                { label: 'Type', key: 'property_type', type: 'select', options: [['residential', 'Residential'], ['commercial', 'Commercial'], ['land', 'Land'], ['reit', 'REIT']] },
-                { label: 'Currency', key: 'currency', type: 'select', options: [['CZK', 'CZK'], ['EUR', 'EUR'], ['USD', 'USD']] },
-                { label: 'Purchase price', key: 'purchase_price', placeholder: '2800000', type: 'number' },
-                { label: 'Current value', key: 'current_value', placeholder: '3400000', type: 'number' },
-                { label: 'Monthly rent', key: 'monthly_rent', placeholder: '0', type: 'number' },
-                { label: 'Mortgage balance', key: 'mortgage_balance', placeholder: '0', type: 'number' },
-                { label: 'Mortgage rate (%)', key: 'mortgage_rate', placeholder: '0', type: 'number' },
-                { label: 'Monthly mortgage', key: 'monthly_mortgage', placeholder: '0', type: 'number' },
-                { label: 'Ownership (%)', key: 'ownership_pct', placeholder: '100', type: 'number' },
-                { label: 'Purchase date', key: 'purchase_date', type: 'date' },
+                { label: 'Type',             key: 'property_type', type: 'select', options: [['residential','Residential'],['commercial','Commercial'],['land','Land'],['reit','REIT']] },
+                { label: 'Currency',         key: 'currency',      type: 'select', options: [['CZK','CZK'],['EUR','EUR'],['USD','USD']] },
+                { label: 'Purchase price',   key: 'purchase_price', placeholder: '2800000', type: 'number' },
+                { label: 'Current value',    key: 'current_value',  placeholder: '3400000', type: 'number' },
+                { label: 'Monthly rent',     key: 'monthly_rent',   placeholder: '0',       type: 'number' },
+                { label: 'Mortgage balance', key: 'mortgage_balance', placeholder: '0',     type: 'number' },
+                { label: 'Mortgage rate (%)', key: 'mortgage_rate', placeholder: '0',       type: 'number' },
+                { label: 'Monthly mortgage', key: 'monthly_mortgage', placeholder: '0',     type: 'number' },
+                { label: 'Ownership (%)',    key: 'ownership_pct',  placeholder: '100',     type: 'number' },
+                { label: 'Purchase date',    key: 'purchase_date',  type: 'date' },
               ].map((f: any) => (
                 <div key={f.key}>
                   <div style={inputLabel}>{f.label}</div>
@@ -242,7 +239,7 @@ export default function RealEstatePage() {
   )
 }
 
-const cardStyle: React.CSSProperties = { background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 12, padding: '18px 20px' }
+const cardStyle: React.CSSProperties  = { background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 12, padding: '18px 20px' }
 const labelStyle: React.CSSProperties = { fontSize: 9, letterSpacing: '0.12em', textTransform: 'uppercase', color: 'var(--text3)', marginBottom: 8, fontWeight: 500 }
 const btnSecondary: React.CSSProperties = { padding: '7px 14px', borderRadius: 6, cursor: 'pointer', background: 'var(--bg3)', border: '1px solid var(--border2)', color: 'var(--text2)', fontFamily: "'Inter', sans-serif", fontSize: 12 }
 const btnPrimary = (color: string, bd: string, bg: string): React.CSSProperties => ({ padding: '7px 16px', borderRadius: 6, cursor: 'pointer', background: bg, border: `1px solid ${bd}`, color, fontFamily: "'Inter', sans-serif", fontSize: 12, fontWeight: 500 })
