@@ -3,6 +3,7 @@ import { useAppData } from '@/hooks/useAppData'
 import Sidebar from '@/components/Sidebar'
 import Badge from '@/components/Badge'
 import { toCZK, fmtCZK, DEFAULT_FX } from '@/lib/fx'
+import { tdR } from '@/lib/ui'
 
 export default function ProjectedPage() {
   const { projections } = useAppData()
@@ -81,12 +82,4 @@ export default function ProjectedPage() {
       </main>
     </div>
   )
-}
-
-const tdR: React.CSSProperties = {
-  padding: '9px 14px',
-  borderBottom: '1px solid var(--border)',
-  textAlign: 'right',
-  color: 'var(--text2)',
-  fontSize: 12,
 }

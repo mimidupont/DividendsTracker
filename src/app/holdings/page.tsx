@@ -14,13 +14,7 @@ import { useFx } from '@/hooks/useFx'
 import { useMarketData } from '@/hooks/useMarketData'
 import { useAppData } from '@/hooks/useAppData'
 import { computeProjectedTotal } from '@/lib/projections'
-import { tdR, btnStyle } from '@/lib/ui'
-
-const actionBtn: React.CSSProperties = {
-  background: 'none', border: '1px solid var(--border2)', borderRadius: 4, cursor: 'pointer',
-  color: 'var(--text3)', fontSize: 12, width: 24, height: 24,
-  display: 'inline-flex', alignItems: 'center', justifyContent: 'center', padding: 0,
-}
+import { tdR, tdRMono, btnStyle, actionBtn } from '@/lib/ui'
 
 export default function HoldingsPage() {
   const { holdings, projections, loading, reload } = useAppData()

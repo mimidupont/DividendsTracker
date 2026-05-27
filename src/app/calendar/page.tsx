@@ -4,6 +4,7 @@ import { useAppData } from '@/hooks/useAppData'
 import Sidebar from '@/components/Sidebar'
 import Badge from '@/components/Badge'
 import type { DividendSummary } from '@/app/api/market/dividends/route'
+import { tdR } from '@/lib/ui'
 
 interface ExDivEvent {
   symbol: string
@@ -242,9 +243,4 @@ export default function CalendarPage() {
       </main>
     </div>
   )
-}
-
-const tdR: React.CSSProperties = {
-  padding: '10px 14px', borderBottom: '1px solid var(--border)',
-  textAlign: 'right', color: 'var(--text2)', fontSize: 12,
 }

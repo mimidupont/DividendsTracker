@@ -8,6 +8,7 @@ import { useMarketData } from '@/hooks/useMarketData'
 import { useAppData } from '@/hooks/useAppData'
 import { computeProjectedTotal } from '@/lib/projections'
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from 'recharts'
+import { tdR, btnStyle } from '@/lib/ui'
 
 const SECTORS: Record<string, string> = {
   SPY5: 'ETF', SPYW: 'ETF',
@@ -320,14 +321,4 @@ export default function AllocationPage() {
       </main>
     </div>
   )
-}
-
-const tdR: React.CSSProperties = {
-  padding: '9px 14px', borderBottom: '1px solid var(--border)',
-  textAlign: 'right', color: 'var(--text2)', fontSize: 12,
-}
-const btnStyle: React.CSSProperties = {
-  padding: '7px 15px', borderRadius: 6, cursor: 'pointer',
-  background: 'var(--bg2)', border: '1px solid var(--border2)',
-  color: 'var(--text2)', fontFamily: "'Geist', sans-serif", fontSize: 12,
 }

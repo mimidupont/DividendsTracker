@@ -6,6 +6,9 @@ import { useProfile } from '@/lib/profile'
 import Sidebar from '@/components/Sidebar'
 import { toCZK, fmtCZK, fmtDate } from '@/lib/fx'
 import { useFx } from '@/hooks/useFx'
+import { cardStyle, cardLabelStyle, tableHeader, tableHeaderLabel,
+         th, tdL, tdR, actionBtn, btnSecondary, btnPrimary,
+         inputStyle, inputLabel } from '@/lib/ui'
 
 const ACCOUNT_TYPE_LABELS: Record<string, string> = {
   savings: 'Savings',
@@ -120,7 +123,7 @@ export default function CashPage() {
             { label: 'Monthly interest', value: fmtCZK(annualInterestCZK / 12, 0), accent: 'var(--green)', note: 'Est. passive income' },
           ].map((m, i) => (
             <div key={i} style={{ ...cardStyle, borderTop: `2px solid ${m.accent}` }}>
-              <div style={labelStyle}>{m.label}</div>
+              <div style={cardLabelStyle}>{m.label}</div>
               <div style={{ fontFamily: "'Syne', sans-serif", fontSize: 22, fontWeight: 700, letterSpacing: '-0.02em', marginBottom: 4 }}>{m.value}</div>
               <div style={{ fontSize: 10, color: 'var(--text4)' }}>{m.note}</div>
             </div>
@@ -282,17 +285,3 @@ export default function CashPage() {
     </div>
   )
 }
-
-const cardStyle: React.CSSProperties = { background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 12, padding: '18px 20px' }
-const labelStyle: React.CSSProperties = { fontSize: 9, letterSpacing: '0.12em', textTransform: 'uppercase', color: 'var(--text3)', marginBottom: 8, fontWeight: 500 }
-const tableHeader: React.CSSProperties = { padding: '12px 18px', borderBottom: '1px solid var(--border)', background: 'var(--bg3)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }
-const tableHeaderLabel: React.CSSProperties = { fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--text3)', fontWeight: 600 }
-const th: React.CSSProperties = { fontSize: 9, letterSpacing: '0.09em', textTransform: 'uppercase', color: 'var(--text4)', padding: '8px 14px', borderBottom: '1px solid var(--border)', fontWeight: 400 }
-const tdL: React.CSSProperties = { padding: '9px 14px', borderBottom: '1px solid var(--border)' }
-const tdR: React.CSSProperties = { padding: '9px 14px', borderBottom: '1px solid var(--border)', textAlign: 'right', color: 'var(--text2)', fontSize: 12 }
-const trStyle: React.CSSProperties = { transition: 'background 0.1s' }
-const actionBtn: React.CSSProperties = { background: 'none', border: '1px solid var(--border2)', borderRadius: 4, cursor: 'pointer', color: 'var(--text3)', fontSize: 12, width: 24, height: 24, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', padding: 0 }
-const btnSecondary: React.CSSProperties = { padding: '7px 14px', borderRadius: 6, cursor: 'pointer', background: 'var(--bg3)', border: '1px solid var(--border2)', color: 'var(--text2)', fontFamily: "'Inter', sans-serif", fontSize: 12 }
-const btnPrimary = (color: string, bd: string, bg: string): React.CSSProperties => ({ padding: '7px 16px', borderRadius: 6, cursor: 'pointer', background: bg, border: `1px solid ${bd}`, color, fontFamily: "'Inter', sans-serif", fontSize: 12, fontWeight: 500 })
-const inputLabel: React.CSSProperties = { fontSize: 10, color: 'var(--text3)', letterSpacing: '0.08em', textTransform: 'uppercase', display: 'block', marginBottom: 5, fontWeight: 500 }
-const inputStyle: React.CSSProperties = { width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid var(--border2)', background: 'var(--bg)', color: 'var(--text)', fontFamily: "'Inter', sans-serif", fontSize: 13, outline: 'none', boxSizing: 'border-box' }

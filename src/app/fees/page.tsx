@@ -5,6 +5,7 @@ import Badge from '@/components/Badge'
 import { supabase, Holding } from '@/lib/supabase'
 import { toCZK, fmtCZK, DEFAULT_FX, fetchFxRates } from '@/lib/fx'
 import { useMarketData } from '@/hooks/useMarketData'
+import { tdR } from '@/lib/ui'
 
 // Known expense ratios for ETFs and funds (as decimals)
 const EXPENSE_RATIOS: Record<string, { ter: number; label: string; type: 'etf' | 'stock' }> = {
@@ -354,7 +355,3 @@ export default function FeeScannerPage() {
   )
 }
 
-const tdR: React.CSSProperties = {
-  padding: '9px 14px', borderBottom: '1px solid var(--border)',
-  textAlign: 'right', color: 'var(--text2)', fontSize: 12,
-}
