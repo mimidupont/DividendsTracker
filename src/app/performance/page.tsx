@@ -128,17 +128,17 @@ export default function PerformancePage() {
             </div>
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
-            <button onClick={() => market.refresh(...)} disabled={...} style={btnStyle}>
-              {fxLoading ? '⟳ FX…' : '↻ FX rates'}
-            </button>
-            <button
-              onClick={() => market.refresh(holdings.map(h => h.symbol), true)}
-              disabled={market.state === 'loading'}
-              style={btnStyle}
-            >
-              {market.state === 'loading' ? '⟳ Loading…' : '↻ Refresh prices'}
-            </button>
-          </div>
+			<button onClick={refreshFx} disabled={fxLoading} style={btnStyle('secondary')}>
+				{fxLoading ? '⟳ FX…' : '↻ FX rates'}
+			</button>
+			<button
+				onClick={() => market.refresh(holdings.map(h => h.symbol), true)}
+				disabled={market.state === 'loading'}
+				style={btnStyle('secondary')}
+		>
+    {market.state === 'loading' ? '⟳ Loading…' : '↻ Refresh prices'}
+  </button>
+</div>
         </div>
 
         {/* Summary cards */}
