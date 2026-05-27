@@ -175,7 +175,7 @@ export default function PerformancePage() {
                 <ReferenceLine y={0} stroke="var(--border2)" />
                 <Bar dataKey="pl" name="pl" radius={[3, 3, 0, 0]}>
                   {plChartData.map((entry, i) => (
-                    <Cell key={i} fill={entry.pl >= 0 ? 'var(--green-mid)' : 'var(--red)'} opacity={0.85} />
+                    <Cell key={i} fill={entry.pl >= 0 ? 'var(--green)' : 'var(--red)'} opacity={0.85} />
                   ))}
                 </Bar>
               </BarChart>

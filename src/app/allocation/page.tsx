@@ -294,7 +294,7 @@ export default function AllocationPage() {
                     <td style={{ padding: '9px 14px', borderBottom: '1px solid var(--border)', textAlign: 'right' }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'flex-end' }}>
                         <div style={{ width: 60, height: 4, background: 'var(--bg3)', borderRadius: 2, overflow: 'hidden' }}>
-                          <div style={{ height: '100%', width: `${Math.min(valuePct, 100)}%`, background: 'var(--green-mid)', borderRadius: 2 }} />
+                          <div style={{ height: '100%', width: `${Math.min(valuePct, 100)}%`, background: 'var(--green)', borderRadius: 2 }} />
                         </div>
                         <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, minWidth: 36, textAlign: 'right' }}>{valuePct.toFixed(1)}%</span>
                       </div>
