@@ -161,7 +161,7 @@ export default function AllocationPage() {
                 </button>
               ))}
             </div>
-            <button onClick={refreshFx} disabled={fxLoading} style={btnStyle}>
+            <button onClick={refreshFx} disabled={fxLoading} style={btnStyle('secondary')}>
               {fxLoading ? '⟳ FX…' : '↻ FX rates'}
             </button>
           </div>

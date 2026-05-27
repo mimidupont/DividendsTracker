@@ -128,7 +128,7 @@ export default function PerformancePage() {
             </div>
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
-            <button onClick={refreshFx} disabled={fxLoading} style={btnStyle}>
+            <button onClick={() => market.refresh(...)} disabled={...} style={btnStyle}>
               {fxLoading ? '⟳ FX…' : '↻ FX rates'}
             </button>
             <button
