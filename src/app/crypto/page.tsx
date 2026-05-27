@@ -9,7 +9,7 @@ import { useFx } from '@/hooks/useFx'
 import { useCryptoPrices } from '@/hooks/useCryptoPrices'
 import { tdR, tdL, actionBtn, btnSecondary, btnPrimary,
          inputStyle, inputLabel, cardStyle, cardLabelStyle,
-         tableHeader, tableHeaderLabel } from '@/lib/ui'
+         tableHeader, tableHeaderLabel, th } from '@/lib/ui'
 
 const emptyForm = {
   coin_id: '', symbol: '', name: '',
@@ -129,7 +129,7 @@ export default function CryptoPage() {
             <thead>
               <tr>
                 {['Asset', 'Amount', 'Avg cost', 'Price', 'Value (CZK)', 'P&L', 'Staking APY', 'Wallet', ''].map((h, i) => (
-                  <th key={h} style={{ ...thStyle, textAlign: i <= 1 ? 'left' : 'right' }}>{h}</th>
+                  <th key={h} style={{ ...th, textAlign: i <= 1 ? 'left' : 'right' }}>{h}</th>
                 ))}
               </tr>
             </thead>
