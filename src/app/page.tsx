@@ -26,7 +26,8 @@ export default function Dashboard() {
     holdings, projections, dividendsReceived,
     bankAccounts, cryptoHoldings, realEstate, loading,
   } = useAppData()
-
+  
+  const { activeProfile } = useProfile()
   const { fx, fxLoading, fxTs, refresh: refreshFx } = useFx()
   const market = useMarketData()
   const cryptoPrices = useCryptoPrices()
@@ -111,7 +112,6 @@ export default function Dashboard() {
       </main>
     </div>
   )
-const { activeProfile } = useProfile()
   return (
     <div style={{ display: 'flex' }}>
       <Sidebar />
