@@ -146,7 +146,7 @@ export default function CashPage() {
                 const annualCZK = toCZK(a.balance * a.interest_rate, a.currency, fx)
                 const typeColor = ACCOUNT_TYPE_COLORS[a.account_type] ?? 'var(--text3)'
                 return (
-                  <tr key={a.id} style={trStyle}
+                  <tr key={a.id}
                     onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg3)')}
                     onMouseLeave={e => (e.currentTarget.style.background = '')}
                   >
