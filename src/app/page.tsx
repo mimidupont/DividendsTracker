@@ -1,13 +1,17 @@
 'use client'
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import Sidebar from '@/components/Sidebar'
 import { toCZK, fmtCZK } from '@/lib/fx'
 import { useFx } from '@/hooks/useFx'
 import { useMarketData } from '@/hooks/useMarketData'
 import { useCryptoPrices } from '@/hooks/useCryptoPrices'
 import { useAppData } from '@/hooks/useAppData'
+import { usePortfolioSnapshots } from '@/hooks/usePortfolioSnapshots'
 import { computeProjectedTotal } from '@/lib/projections'
-import { useProfile } from '@/lib/profile'
+import {
+  AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip,
+  ResponsiveContainer, ReferenceLine,
+} from 'recharts'
 
 function greeting() {
   const h = new Date().getHours()
@@ -21,18 +25,28 @@ interface AssetBlock {
   href: string
 }
 
+type PLWindow = '7d' | '30d' | 'ytd'
+
+const PL_WINDOWS: { key: PLWindow; label: string; days: number | 'ytd' }[] = [
+  { key: '7d',  label: '7 days',  days: 7 },
+  { key: '30d', label: '30 days', days: 30 },
+  { key: 'ytd', label: 'YTD',     days: 'ytd' },
+]
+
 export default function Dashboard() {
   const {
     holdings, projections, dividendsReceived,
     bankAccounts, cryptoHoldings, realEstate, loading,
   } = useAppData()
-  
-  const { activeProfile } = useProfile()
+
   const { fx, fxLoading, fxTs, refresh: refreshFx } = useFx()
   const market = useMarketData()
   const cryptoPrices = useCryptoPrices()
+  const { snapshots, saveSnapshot, getPLSummary } = usePortfolioSnapshots()
 
-  // Kick off market + crypto fetches when data arrives (only if not already cached)
+  const [plWindow, setPlWindow] = useState<PLWindow>('30d')
+
+  // Kick off market + crypto fetches when data arrives
   useEffect(() => {
     if (holdings.length > 0) market.refresh(holdings.map(h => h.symbol))
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -43,37 +57,49 @@ export default function Dashboard() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cryptoHoldings.length])
 
-  // ── Stock values ─────────────────────────────────────────
+  // ── Asset values ──────────────────────────────────────────────────────────
   const stockValueCZK = holdings.reduce((s, h) =>
     s + toCZK(market.getPrice(h.symbol, h.avg_price) * h.shares, h.currency, fx), 0)
   const stockCostCZK = holdings.reduce((s, h) =>
     s + toCZK(h.avg_price * h.shares, h.currency, fx), 0)
 
-  // ── Cash values ──────────────────────────────────────────
   const cashValueCZK = bankAccounts.reduce((s, a) =>
     s + toCZK(a.balance, a.currency, fx), 0)
 
-  // ── Crypto values ────────────────────────────────────────
   const cryptoValueCZK = cryptoHoldings.reduce((s, c) => {
     const priceUSD = cryptoPrices.getPrice(c.coin_id, c.avg_cost_usd)
     return s + toCZK(priceUSD * c.amount, 'USD', fx)
   }, 0)
 
-  // ── Real estate (net equity) ─────────────────────────────
   const realEstateGrossCZK = realEstate.reduce((s, p) =>
     s + toCZK(p.current_value * (p.ownership_pct / 100), p.currency, fx), 0)
   const mortgageCZK = realEstate.reduce((s, p) =>
     s + toCZK(p.mortgage_balance, p.currency, fx), 0)
   const realEstateEquityCZK = realEstateGrossCZK - mortgageCZK
 
-  // ── Total net worth ──────────────────────────────────────
   const totalNetWorth = stockValueCZK + cashValueCZK + cryptoValueCZK + realEstateEquityCZK
   const totalInvested = stockCostCZK + cashValueCZK +
     cryptoHoldings.reduce((s, c) => s + toCZK(c.avg_cost_usd * c.amount, 'USD', fx), 0) +
     realEstate.reduce((s, p) => s + toCZK(p.purchase_price * (p.ownership_pct / 100), p.currency, fx), 0)
   const totalGainCZK = totalNetWorth - totalInvested
 
-  // ── Annual income ────────────────────────────────────────
+  // ── Save today's snapshot once market data is loaded ─────────────────────
+  useEffect(() => {
+    if (market.state === 'done' && totalNetWorth > 0) {
+      saveSnapshot({
+        total_value_czk: totalNetWorth,
+        stocks_czk:      stockValueCZK,
+        cash_czk:        cashValueCZK,
+        crypto_czk:      cryptoValueCZK,
+        realestate_czk:  realEstateEquityCZK,
+        fx_usd: fx['USD'] ?? 23.50,
+        fx_eur: fx['EUR'] ?? 25.60,
+      })
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [market.state, totalNetWorth])
+
+  // ── Income ─────────────────────────────────────────────────────────────────
   const divIncomeCZK = holdings.reduce((s, h) => {
     const liveAnnual = market.getAnnualDiv(h.symbol)
     if (liveAnnual != null) return s + toCZK(liveAnnual * h.shares, h.currency, fx)
@@ -91,7 +117,6 @@ export default function Dashboard() {
   }, 0)
   const totalAnnualIncome = divIncomeCZK + interestIncomeCZK + rentalIncomeCZK + stakingIncomeCZK
 
-  // ── Asset blocks ─────────────────────────────────────────
   const assetBlocks: AssetBlock[] = [
     { label: 'Stocks & ETFs',  value: stockValueCZK,       color: 'var(--green)',  href: '/holdings' },
     { label: 'Cash & Savings', value: cashValueCZK,         color: 'var(--blue)',   href: '/cash' },
@@ -104,6 +129,70 @@ export default function Dashboard() {
     .filter(d => new Date(d.payment_date).getFullYear() === CURRENT_YEAR)
     .reduce((s, d) => s + toCZK(d.gross_amount, d.currency, fx), 0)
 
+  // ── P&L chart data ─────────────────────────────────────────────────────────
+  const selectedWindow = PL_WINDOWS.find(w => w.key === plWindow)!
+  const plSummary = totalNetWorth > 0
+    ? getPLSummary(totalNetWorth, selectedWindow.days)
+    : { pl: 0, plPct: null, label: '', fromDate: null, fromValue: null }
+
+  // Build chart data: historical snapshots + today
+  const today = new Date().toISOString().slice(0, 10)
+  const cutoff = (() => {
+    if (selectedWindow.days === 'ytd') return `${CURRENT_YEAR}-01-01`
+    const d = new Date()
+    d.setDate(d.getDate() - (selectedWindow.days as number))
+    return d.toISOString().slice(0, 10)
+  })()
+
+  const chartSnapshots = snapshots.filter(s => s.snapshot_date >= cutoff)
+
+  // Add today's live value if not already in snapshots
+  const todayInSnapshots = chartSnapshots.some(s => s.snapshot_date === today)
+  const chartData = [
+    ...chartSnapshots.map(s => ({
+      date: s.snapshot_date,
+      value: s.total_value_czk,
+      isToday: s.snapshot_date === today,
+    })),
+    ...(!todayInSnapshots && totalNetWorth > 0 ? [{
+      date: today,
+      value: totalNetWorth,
+      isToday: true,
+    }] : []),
+  ].sort((a, b) => a.date.localeCompare(b.date))
+
+  // Reference line = first value in the window
+  const referenceValue = chartData.length > 0 ? chartData[0].value : null
+
+  const plPositive = plSummary.pl >= 0
+  const plColor = plPositive ? 'var(--green)' : 'var(--red)'
+
+  const fmtAxisDate = (d: string) => {
+    const dt = new Date(d + 'T00:00:00Z')
+    return dt.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })
+  }
+
+  const ChartTooltip = ({ active, payload, label }: any) => {
+    if (!active || !payload?.length) return null
+    const val: number = payload[0].value
+    const ref = referenceValue ?? val
+    const diff = val - ref
+    const diffPct = ref > 0 ? (diff / ref) * 100 : 0
+    return (
+      <div style={{
+        background: 'var(--bg2)', border: '1px solid var(--border2)',
+        borderRadius: 8, padding: '10px 14px', fontSize: 11,
+        boxShadow: '0 4px 12px rgba(0,0,0,0.08)',
+      }}>
+        <div style={{ color: 'var(--text3)', marginBottom: 4 }}>{fmtAxisDate(label)}</div>
+        <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 13, fontWeight: 600 }}>{fmtCZK(val)}</div>
+        <div style={{ color: diff >= 0 ? 'var(--green)' : 'var(--red)', marginTop: 2 }}>
+          {diff >= 0 ? '+' : ''}{fmtCZK(diff)} ({diffPct >= 0 ? '+' : ''}{diffPct.toFixed(2)}%)
+        </div>
+      </div>
+    )
+  }
+
   if (loading) return (
     <div style={{ display: 'flex' }}>
       <Sidebar />
@@ -112,6 +201,7 @@ export default function Dashboard() {
       </main>
     </div>
   )
+
   return (
     <div style={{ display: 'flex' }}>
       <Sidebar />
@@ -124,7 +214,7 @@ export default function Dashboard() {
               {new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}
             </div>
             <h1 style={{ fontFamily: "'Syne', sans-serif", fontSize: 28, fontWeight: 700, letterSpacing: '-0.02em', lineHeight: 1.1 }}>
-              {greeting()}, <span style={{ color: 'var(--green)' }}>{activeProfile?.display_name ?? 'there'}</span>
+              {greeting()}, <span style={{ color: 'var(--green)' }}>Eliot</span>
             </h1>
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
@@ -199,6 +289,167 @@ export default function Dashboard() {
               ))}
             </div>
           </div>
+        </div>
+
+        {/* ── P&L Evolution Chart ─────────────────────────────────────────── */}
+        <div style={{
+          background: 'var(--bg2)', border: '1px solid var(--border)',
+          borderRadius: 16, padding: '24px 28px', marginBottom: 20,
+        }}>
+          {/* Header row */}
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 20 }}>
+            <div>
+              <div style={{ fontSize: 10, letterSpacing: '0.12em', textTransform: 'uppercase', color: 'var(--text3)', fontWeight: 500, marginBottom: 6 }}>
+                Portfolio P&amp;L
+              </div>
+              {/* P&L summary for selected window */}
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
+                <span style={{
+                  fontFamily: "'Syne', sans-serif", fontSize: 28, fontWeight: 700,
+                  letterSpacing: '-0.02em', color: plColor,
+                }}>
+                  {plSummary.pl >= 0 ? '+' : ''}{fmtCZK(plSummary.pl)}
+                </span>
+                {plSummary.plPct !== null && (
+                  <span style={{ fontSize: 14, color: plColor, fontFamily: "'DM Mono', monospace" }}>
+                    {plSummary.plPct >= 0 ? '+' : ''}{plSummary.plPct.toFixed(2)}%
+                  </span>
+                )}
+              </div>
+              {plSummary.fromDate && (
+                <div style={{ fontSize: 11, color: 'var(--text4)', marginTop: 2 }}>
+                  vs {fmtAxisDate(plSummary.fromDate)}
+                  {plSummary.fromValue && (
+                    <span style={{ marginLeft: 6 }}>({fmtCZK(plSummary.fromValue)})</span>
+                  )}
+                </div>
+              )}
+              {snapshots.length === 0 && (
+                <div style={{ fontSize: 11, color: 'var(--amber)', marginTop: 4 }}>
+                  ⓘ History builds daily — check back tomorrow for trend data
+                </div>
+              )}
+            </div>
+
+            {/* Window selector */}
+            <div style={{ display: 'flex', border: '1px solid var(--border2)', borderRadius: 8, overflow: 'hidden' }}>
+              {PL_WINDOWS.map(w => (
+                <button key={w.key} onClick={() => setPlWindow(w.key)} style={{
+                  padding: '6px 16px', border: 'none', cursor: 'pointer',
+                  fontSize: 12, fontFamily: "'Inter', sans-serif",
+                  background: plWindow === w.key ? (plPositive ? 'var(--green-bg)' : 'var(--red-bg)') : 'var(--bg)',
+                  color: plWindow === w.key ? plColor : 'var(--text3)',
+                  borderRight: w.key !== 'ytd' ? '1px solid var(--border2)' : 'none',
+                  fontWeight: plWindow === w.key ? 500 : 400,
+                  transition: 'background 0.15s',
+                }}>
+                  {w.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* P&L period cards */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10, marginBottom: 20 }}>
+            {PL_WINDOWS.map(w => {
+              const summary = totalNetWorth > 0 ? getPLSummary(totalNetWorth, w.days) : { pl: 0, plPct: null }
+              const positive = summary.pl >= 0
+              const color = positive ? 'var(--green)' : 'var(--red)'
+              const bg    = positive ? 'var(--green-bg)' : 'var(--red-bg)'
+              const bd    = positive ? 'var(--green-bd)' : 'var(--red-bd)'
+              const isActive = plWindow === w.key
+              return (
+                <button
+                  key={w.key}
+                  onClick={() => setPlWindow(w.key)}
+                  style={{
+                    padding: '12px 16px', borderRadius: 10, cursor: 'pointer', textAlign: 'left',
+                    background: isActive ? bg : 'var(--bg3)',
+                    border: `1px solid ${isActive ? bd : 'var(--border)'}`,
+                    transition: 'all 0.15s',
+                    fontFamily: "'Inter', sans-serif",
+                  }}
+                >
+                  <div style={{ fontSize: 9, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--text4)', marginBottom: 5, fontWeight: 500 }}>
+                    {w.label}
+                  </div>
+                  <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 14, fontWeight: 600, color: isActive ? color : (positive ? 'var(--green)' : 'var(--red)') }}>
+                    {summary.pl >= 0 ? '+' : ''}{fmtCZK(summary.pl, 0)}
+                  </div>
+                  {summary.plPct !== null && (
+                    <div style={{ fontSize: 10, color: 'var(--text3)', marginTop: 2 }}>
+                      {summary.plPct >= 0 ? '+' : ''}{summary.plPct.toFixed(2)}%
+                    </div>
+                  )}
+                  {summary.plPct === null && (
+                    <div style={{ fontSize: 10, color: 'var(--text4)', marginTop: 2 }}>no data yet</div>
+                  )}
+                </button>
+              )
+            })}
+          </div>
+
+          {/* Area chart */}
+          {chartData.length >= 2 ? (
+            <ResponsiveContainer width="100%" height={180}>
+              <AreaChart data={chartData} margin={{ top: 4, right: 4, left: 0, bottom: 0 }}>
+                <defs>
+                  <linearGradient id="plGradient" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%"  stopColor={plPositive ? '#1a7a3a' : '#dc2626'} stopOpacity={0.15} />
+                    <stop offset="95%" stopColor={plPositive ? '#1a7a3a' : '#dc2626'} stopOpacity={0} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+                <XAxis
+                  dataKey="date"
+                  tickFormatter={fmtAxisDate}
+                  tick={{ fontSize: 10, fill: 'var(--text4)' }}
+                  axisLine={false}
+                  tickLine={false}
+                  interval="preserveStartEnd"
+                />
+                <YAxis
+                  tickFormatter={n => `${(n / 1000).toFixed(0)}k`}
+                  tick={{ fontSize: 10, fill: 'var(--text4)' }}
+                  axisLine={false}
+                  tickLine={false}
+                  width={44}
+                  domain={['auto', 'auto']}
+                />
+                <Tooltip content={<ChartTooltip />} />
+                {referenceValue && (
+                  <ReferenceLine
+                    y={referenceValue}
+                    stroke="var(--border2)"
+                    strokeDasharray="4 4"
+                  />
+                )}
+                <Area
+                  type="monotone"
+                  dataKey="value"
+                  stroke={plPositive ? 'var(--green)' : 'var(--red)'}
+                  strokeWidth={2}
+                  fill="url(#plGradient)"
+                  dot={false}
+                  activeDot={{ r: 4, fill: plPositive ? 'var(--green)' : 'var(--red)', strokeWidth: 0 }}
+                />
+              </AreaChart>
+            </ResponsiveContainer>
+          ) : (
+            <div style={{
+              height: 180, display: 'flex', alignItems: 'center', justifyContent: 'center',
+              color: 'var(--text4)', fontSize: 12, flexDirection: 'column', gap: 6,
+              background: 'var(--bg3)', borderRadius: 10,
+            }}>
+              <div style={{ fontSize: 20, opacity: 0.4 }}>◎</div>
+              <div>Chart builds as daily snapshots accumulate</div>
+              <div style={{ fontSize: 11, color: 'var(--text4)' }}>
+                {snapshots.length === 0
+                  ? 'First snapshot saved today — come back tomorrow'
+                  : `${snapshots.length} snapshot${snapshots.length > 1 ? 's' : ''} saved — need at least 2 to show a trend`}
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Asset class cards */}
