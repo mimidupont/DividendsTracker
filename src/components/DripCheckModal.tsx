@@ -2,7 +2,8 @@
 import { useState } from 'react'
 import { supabase, Holding } from '@/lib/supabase'
 import { useProfile } from '@/lib/profile'
-import { toCZK, DEFAULT_FX } from '@/lib/fx'
+import { toCZK, fxRate } from '@/lib/fx'
+import { todayISO, addDays, unixToISODate, fmtISODate } from '@/lib/date'
 import { useFx } from '@/hooks/useFx'
 import { useMarketData } from '@/hooks/useMarketData'
 import Modal from './Modal'
@@ -52,6 +53,7 @@ export default function DripCheckModal({
   const divPayers = holdings.filter(h => h.is_dividend_payer)
 
   const checkDividends = async () => {
+    if (!activeProfile) { setError('No active profile selected.'); return }
     setLoading(true)
     setError('')
 
@@ -71,14 +73,17 @@ export default function DripCheckModal({
 
       const data = await res.json() as { summaries: Record<string, DividendSummary> }
 
-      const { data: existing } = await supabase
+      const { data: existing, error: existingErr } = await supabase
         .from('dividends_received')
         .select('symbol, payment_date')
-        .eq('profile_id', activeProfile?.id ?? '')
+        .eq('profile_id', activeProfile.id)
+      // Without this list a payment could be logged twice, double-counting the
+      // income and the DRIP shares. Fail loudly rather than risk that.
+      if (existingErr) throw new Error(`Could not read the dividend log: ${existingErr.message}`)
       const alreadyLogged = new Set((existing ?? []).map(d => `${d.symbol}::${d.payment_date}`))
 
-      const today = new Date()
-      const ago90 = new Date(today.getTime() - 90 * 24 * 60 * 60 * 1000)
+      const today = todayISO()
+      const ago90 = addDays(today, -90)
       const dripEvents: DripEvent[] = []
 
       for (const h of divPayers) {
@@ -86,31 +91,45 @@ export default function DripCheckModal({
         if (!s || s.error) continue
 
         const amountPerShare = s.lastDividendValue
-        const lastDivTs      = s.lastDividendDate
-        if (!amountPerShare || !lastDivTs) continue
+        // Accept the ISO pay date as well as the Unix one. StockAnalysis only
+        // supplies the ISO form, and the old code required the Unix field —
+        // which meant DRIP silently found nothing for every SA-covered ticker,
+        // i.e. essentially the whole portfolio.
+        const payDateStr = s.lastDividendDateISO ?? unixToISODate(s.lastDividendDate)
+        if (!amountPerShare || !payDateStr) continue
 
-        const payDate = new Date(lastDivTs * 1000)
-        if (payDate < ago90) continue
+        // Only already-paid dividends can be reinvested
+        if (payDateStr > today) continue
+        if (payDateStr < ago90) continue
 
-        const exDate     = new Date(payDate.getTime() - 21 * 24 * 60 * 60 * 1000)
-        const payDateStr = payDate.toISOString().slice(0, 10)
-        const exDateStr  = exDate.toISOString().slice(0, 10)
+        // Prefer the reported ex-date; fall back to pay date − 21 days
+        const exDateStr = s.exDividendDateISO && s.exDividendDateISO <= payDateStr
+          ? s.exDividendDateISO
+          : addDays(payDateStr, -21)
+
+        // Dividends are declared in the security's own currency, which is not
+        // always the currency the position was booked in.
+        const divCurrency = s.currency || h.currency
 
         // --- Money amounts ---
         const grossNative = h.shares * amountPerShare
-        const grossCZK    = toCZK(grossNative, h.currency, fx)
+        const grossCZK    = toCZK(grossNative, divCurrency, fx)
         const whtNative   = grossNative * WHT_RATE
         const whtCZK      = grossCZK * WHT_RATE
         // Broker reinvests the CZK net amount
         const netCZK      = grossCZK - whtCZK
 
-        // --- Reinvest price: live market price in native ccy, converted to CZK ---
-        // Falls back to avg_price if live price not available
+        // --- Reinvest price: live market price in its own ccy, converted to CZK ---
+        // Falls back to avg_price if a live price is not available
         const reinvestPriceNative = market.getPrice(h.symbol, h.avg_price)
-        const reinvestPriceCZK    = toCZK(reinvestPriceNative, h.currency, fx)
+        const priceCurrency = market.hasPrice(h.symbol)
+          ? market.getQuoteCurrency(h.symbol, h.currency)
+          : h.currency
+        const reinvestPriceCZK    = toCZK(reinvestPriceNative, priceCurrency, fx)
 
         // Shares = CZK net ÷ CZK price (matches broker behaviour)
         const reinvestShares = reinvestPriceCZK > 0 ? netCZK / reinvestPriceCZK : 0
+        if (reinvestShares <= 0) continue
 
         dripEvents.push({
           symbol: h.symbol,
@@ -118,7 +137,7 @@ export default function DripCheckModal({
           exDate: exDateStr,
           payDate: payDateStr,
           amountPerShare,
-          currency: h.currency,
+          currency: divCurrency,
           sharesHeld: h.shares,
           grossNative,
           grossCZK,
@@ -148,12 +167,23 @@ export default function DripCheckModal({
 
   const applyDrip = async (ev: DripEvent) => {
     if (!activeProfile) return
-    setApplying(ev.symbol)
+    const holding = divPayers.find(h => h.symbol === ev.symbol)
+    if (!holding) { setError(`${ev.symbol} is no longer in your holdings.`); return }
 
-    const holding = divPayers.find(h => h.symbol === ev.symbol)!
+    // The cost basis is booked in the holding's currency, so the reinvested
+    // amount has to be expressed in that same currency. Bail out rather than
+    // guessing at a rate — a wrong one corrupts the cost basis permanently.
+    const holdingRate = fxRate(holding.currency, fx)
+    if (holdingRate == null) {
+      setError(`No FX rate for ${holding.currency} — cannot compute the new cost basis for ${ev.symbol}.`)
+      return
+    }
+
+    setApplying(ev.symbol)
+    setError('')
 
     // Log the dividend payment
-    await supabase.from('dividends_received').insert([{
+    const { error: logErr } = await supabase.from('dividends_received').insert([{
       symbol: ev.symbol,
       payment_date: ev.payDate,
       ex_date: ev.exDate,
@@ -168,19 +198,33 @@ export default function DripCheckModal({
       profile_id: activeProfile.id,
     }])
 
-    // Update holding: add fractional shares, recalculate weighted avg price
-    const newTotalShares = holding.shares + ev.reinvestShares
-    // New avg price = (old cost basis in native + net reinvestment in native) / new shares
-    // Net reinvestment in native = netCZK / fxRate
-    const fxRate = fx[ev.currency] ?? fx['USD'] ?? DEFAULT_FX['USD']
-    const netNative = ev.netCZK / fxRate
-    const newAvgPrice = (holding.shares * holding.avg_price + netNative) / newTotalShares
+    if (logErr) {
+      // Stop here: bumping the share count without logging the dividend would
+      // leave the position overstated with no record of why.
+      setError(`Could not log the ${ev.symbol} dividend: ${logErr.message}`)
+      setApplying(null)
+      return
+    }
 
-    await supabase.from('holdings').update({
+    // Update holding: add fractional shares, recalculate weighted avg price.
+    // New avg = (old cost basis + reinvested amount) / new share count, all in
+    // the holding's own currency.
+    const newTotalShares = holding.shares + ev.reinvestShares
+    const netInHoldingCcy = ev.netCZK / holdingRate
+    const newAvgPrice = (holding.shares * holding.avg_price + netInHoldingCcy) / newTotalShares
+
+    const { error: updErr } = await supabase.from('holdings').update({
       shares: newTotalShares,
       avg_price: newAvgPrice,
       updated_at: new Date().toISOString(),
     }).eq('id', holding.id)
+
+    if (updErr) {
+      setError(`Dividend logged, but the ${ev.symbol} position could not be updated: ${updErr.message}`)
+      setApplying(null)
+      onSaved()
+      return
+    }
 
     setDone(d => [...d, ev.symbol])
     setApplying(null)
@@ -258,7 +302,7 @@ export default function DripCheckModal({
                     <div>
                       <span style={{ fontWeight: 600, fontSize: 14 }}>{ev.symbol}</span>
                       <span style={{ fontSize: 11, color: 'var(--text3)', marginLeft: 8 }}>
-                        paid {ev.payDate} · ex ~{ev.exDate}
+                        paid {fmtISODate(ev.payDate)} · ex ~{fmtISODate(ev.exDate)}
                       </span>
                     </div>
                     <span style={{ fontWeight: 500, color: 'var(--green)', fontSize: 13 }}>
@@ -334,7 +378,7 @@ export default function DripCheckModal({
               display: 'flex', justifyContent: 'space-between', alignItems: 'center',
               fontSize: 12, color: 'var(--text3)',
             }}>
-              <span>{ev.symbol} · {ev.payDate} · {fmt2(ev.amountPerShare)} {ev.currency}/share</span>
+              <span>{ev.symbol} · {fmtISODate(ev.payDate)} · {fmt2(ev.amountPerShare)} {ev.currency}/share</span>
               <span style={{ color: 'var(--green)' }}>
                 {done.includes(ev.symbol) ? '✓ Applied' : '✓ Already logged'}
               </span>

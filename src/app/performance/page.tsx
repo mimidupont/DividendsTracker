@@ -1,5 +1,5 @@
 'use client'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import Sidebar from '@/components/Sidebar'
 import Badge from '@/components/Badge'
 import { toCZK, fmtCZK } from '@/lib/fx'
@@ -7,36 +7,47 @@ import { useFx } from '@/hooks/useFx'
 import { useMarketData } from '@/hooks/useMarketData'
 import { tdR, btnStyle } from '@/lib/ui'
 import { useAppData } from '@/hooks/useAppData'
+import { positionsMetrics, portfolioTotals } from '@/lib/portfolio'
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, Cell, ReferenceLine,
 } from 'recharts'
 
+/** Cash actually received: gross minus withholding tax. */
+const netOf = (d: { gross_amount: number; withholding_tax: number | null }) =>
+  d.gross_amount - (d.withholding_tax ?? 0)
+
 export default function PerformancePage() {
-  const { holdings, dividendsReceived, loading } = useAppData()
-  const { fx, fxLoading, fxTs, refresh: refreshFx } = useFx()
+  const { holdings, projections, dividendsReceived, loading, error } = useAppData()
+  const { fx, fxLive, fxLoading, fxTs, refresh: refreshFx } = useFx()
   const market = useMarketData()
   const [sortBy, setSortBy] = useState<'pl' | 'pct' | 'value'>('pl')
 
-  // Kick off market fetch only when idle (cache handles dedup)
-  if (holdings.length > 0 && market.state === 'idle') {
-    market.refresh(holdings.map(h => h.symbol))
-  }
+  // Fetch from an effect — refreshing during render mutates shared state while
+  // React is rendering.
+  const symbolKey = holdings.map(h => h.symbol).join(',')
+  useEffect(() => {
+    if (symbolKey) market.refresh(symbolKey.split(','))
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [symbolKey])
 
   // ── Metrics ───────────────────────────────────────────────────────────────
-  const rows = holdings.map(h => {
-    const price     = market.getPrice(h.symbol, h.avg_price)
-    const mktCZK    = toCZK(price * h.shares, h.currency, fx)
-    const costCZK   = toCZK(h.avg_price * h.shares, h.currency, fx)
-    const plCZK     = mktCZK - costCZK
-    const plPct     = costCZK > 0 ? (plCZK / costCZK) * 100 : 0
-    const chgPct    = market.quotes[h.symbol]?.changePercent ?? null
+  const rows = positionsMetrics(holdings, market, fx, projections).map(m => {
+    // Dividends contribute to return net of withholding tax — the withheld
+    // portion never reached the account, so counting it overstated returns.
     const divIncome = dividendsReceived
-      .filter(d => d.symbol === h.symbol)
-      .reduce((s, d) => s + toCZK(d.gross_amount, d.currency, fx), 0)
-    const totalReturn    = plCZK + divIncome
-    const totalReturnPct = costCZK > 0 ? (totalReturn / costCZK) * 100 : 0
-    return { h, price, mktCZK, costCZK, plCZK, plPct, chgPct, divIncome, totalReturn, totalReturnPct }
+      .filter(d => d.symbol === m.holding.symbol)
+      .reduce((s, d) => s + toCZK(netOf(d), d.currency, fx), 0)
+    const totalReturn    = m.plCZK + divIncome
+    return {
+      ...m,
+      h: m.holding,
+      mktCZK: m.marketCZK,
+      chgPct: m.changePercent,
+      divIncome,
+      totalReturn,
+      totalReturnPct: m.costCZK > 0 ? (totalReturn / m.costCZK) * 100 : 0,
+    }
   })
 
   const sorted = [...rows].sort((a, b) => {
@@ -45,11 +56,14 @@ export default function PerformancePage() {
     return b.mktCZK - a.mktCZK
   })
 
-  const totalValueCZK  = rows.reduce((s, r) => s + r.mktCZK, 0)
-  const totalCostCZK   = rows.reduce((s, r) => s + r.costCZK, 0)
-  const totalPLCZK     = totalValueCZK - totalCostCZK
-  const totalPLPct     = totalCostCZK > 0 ? (totalPLCZK / totalCostCZK) * 100 : 0
-  const totalDivCZK    = dividendsReceived.reduce((s, d) => s + toCZK(d.gross_amount, d.currency, fx), 0)
+  const totals         = portfolioTotals(rows)
+  const totalValueCZK  = totals.marketCZK
+  const totalCostCZK   = totals.costCZK
+  const totalPLCZK     = totals.plCZK
+  const totalPLPct     = totals.plPct
+  // Portfolio-wide dividends include symbols already sold, so this is summed
+  // over the log rather than over current positions.
+  const totalDivCZK    = dividendsReceived.reduce((s, d) => s + toCZK(netOf(d), d.currency, fx), 0)
   const totalReturnCZK = totalPLCZK + totalDivCZK
   const totalReturnPct = totalCostCZK > 0 ? (totalReturnCZK / totalCostCZK) * 100 : 0
   const winners = rows.filter(r => r.plCZK > 0).length
@@ -59,15 +73,20 @@ export default function PerformancePage() {
   const monthlyData: Record<string, number> = {}
   dividendsReceived.forEach(d => {
     const key = d.payment_date.slice(0, 7)
-    monthlyData[key] = (monthlyData[key] ?? 0) + toCZK(d.gross_amount, d.currency, fx)
+    monthlyData[key] = (monthlyData[key] ?? 0) + toCZK(netOf(d), d.currency, fx)
   })
   const monthlyChart = Object.entries(monthlyData)
     .sort(([a], [b]) => a.localeCompare(b))
     .slice(-12)
-    .map(([month, amount]) => ({
-      month: new Date(month + '-01').toLocaleDateString('en-GB', { month: 'short', year: '2-digit' }),
-      amount: Math.round(amount),
-    }))
+    .map(([month, amount]) => {
+      const [y, m] = month.split('-').map(Number)
+      return {
+        // Built from the parts rather than parsing "YYYY-MM-01", which lands on
+        // UTC midnight and reads back as the previous month west of Greenwich.
+        month: new Date(y, m - 1, 1).toLocaleDateString('en-GB', { month: 'short', year: '2-digit' }),
+        amount: Math.round(amount),
+      }
+    })
 
   const plChartData = [...rows]
     .sort((a, b) => b.plCZK - a.plCZK)
@@ -124,8 +143,14 @@ export default function PerformancePage() {
             <div style={{ fontSize: 11, color: 'var(--text3)', marginTop: 4, display: 'flex', gap: 10 }}>
               {holdings.length} positions · All values in CZK
               {fxTs && <span style={{ color: 'var(--green)' }}>· FX {fxTs}</span>}
+              {!fxLive && <span style={{ color: 'var(--amber)' }}>· FX fallback rates</span>}
               {marketStatusText && <span style={{ color: marketStatusColor }}>{marketStatusText}</span>}
             </div>
+            {error && (
+              <div style={{ fontSize: 11, color: 'var(--amber)', marginTop: 4 }}>
+                ⚠ Some data could not be loaded: {error}
+              </div>
+            )}
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
 			<button onClick={refreshFx} disabled={fxLoading} style={btnStyle('secondary')}>
@@ -145,7 +170,7 @@ export default function PerformancePage() {
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12, marginBottom: 20 }}>
           {[
             { label: 'Unrealized P&L',  value: (totalPLCZK >= 0 ? '+' : '') + fmtCZK(totalPLCZK),         accent: totalPLCZK >= 0 ? 'var(--green)' : 'var(--red)', color: totalPLCZK >= 0 ? 'var(--green)' : 'var(--red)', note: `${totalPLPct >= 0 ? '+' : ''}${totalPLPct.toFixed(2)}% on cost` },
-            { label: 'Dividend income', value: fmtCZK(totalDivCZK, 0),                                      accent: 'var(--amber)', color: 'var(--text)', note: `${dividendsReceived.length} payments logged` },
+            { label: 'Dividend income', value: fmtCZK(totalDivCZK, 0),                                      accent: 'var(--amber)', color: 'var(--text)', note: `net of WHT · ${dividendsReceived.length} payments` },
             { label: 'Total return',    value: (totalReturnCZK >= 0 ? '+' : '') + fmtCZK(totalReturnCZK),   accent: totalReturnCZK >= 0 ? 'var(--green)' : 'var(--red)', color: totalReturnCZK >= 0 ? 'var(--green)' : 'var(--red)', note: `${totalReturnPct >= 0 ? '+' : ''}${totalReturnPct.toFixed(2)}% incl. dividends` },
             { label: 'Winners / Losers', value: `${winners} / ${losers}`,                                   accent: 'var(--blue)', color: 'var(--text)', note: `${rows.filter(r => r.plCZK === 0).length} flat` },
             { label: 'Portfolio value', value: fmtCZK(totalValueCZK),                                       accent: 'var(--blue)', color: 'var(--text)', note: `Cost: ${fmtCZK(totalCostCZK)}` },
@@ -225,13 +250,13 @@ export default function PerformancePage() {
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
               <thead>
                 <tr>
-                  {['Company', 'Shares', 'Avg cost', 'Last price', 'Mkt value (CZK)', 'Unrealized P&L', 'P&L %', 'Div received', 'Total return'].map((h, i) => (
+                  {['Company', 'Shares', 'Avg cost', 'Last price', 'Mkt value (CZK)', 'Unrealized P&L', 'P&L %', 'Div received (net)', 'Total return'].map((h, i) => (
                     <th key={h} style={{ fontSize: 9, letterSpacing: '0.09em', textTransform: 'uppercase', color: 'var(--text3)', padding: '8px 14px', textAlign: i === 0 ? 'left' : 'right', borderBottom: '1px solid var(--border)', fontWeight: 400 }}>{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
-                {sorted.map(({ h, price, mktCZK, costCZK, plCZK, plPct, chgPct, divIncome, totalReturn, totalReturnPct }) => (
+                {sorted.map(({ h, price, priceCurrency, isLivePrice, mktCZK, costCZK, plCZK, plPct, chgPct, divIncome, totalReturn, totalReturnPct }) => (
                   <tr key={h.id}
                     onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg3)')}
                     onMouseLeave={e => (e.currentTarget.style.background = '')}
@@ -248,7 +273,11 @@ export default function PerformancePage() {
                     <td style={tdR}>
                       {market.state === 'loading'
                         ? <span style={{ color: 'var(--text4)' }}>…</span>
-                        : <>{price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}<span style={{ fontSize: 10, color: 'var(--text3)', marginLeft: 3 }}>{h.currency}</span></>
+                        : <>
+                            {price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                            <span style={{ fontSize: 10, color: 'var(--text3)', marginLeft: 3 }}>{priceCurrency}</span>
+                            {!isLivePrice && <span style={{ fontSize: 9, color: 'var(--text4)', marginLeft: 3 }} title="No live quote — showing average cost">at cost</span>}
+                          </>
                       }
                     </td>
                     <td style={{ ...tdR, fontFamily: "'DM Mono', monospace", fontSize: 12 }}>{fmtCZK(mktCZK)}</td>

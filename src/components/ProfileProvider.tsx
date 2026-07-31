@@ -16,6 +16,14 @@ export default function ProfileProvider({ children }: { children: React.ReactNod
       const stored = getStoredProfileId()
       const match  = list.find(p => p.id === stored) ?? list[0]
       setActiveRaw(match)
+
+      // Persist and announce the resolved profile even when it was only a
+      // default. Without this, a browser with no stored id left localStorage
+      // empty, and every data hook — which keys off that id — loaded nothing.
+      if (stored !== match.id) {
+        setStoredProfileId(match.id)
+        window.dispatchEvent(new CustomEvent('divvy:profile-change', { detail: match.id }))
+      }
     })
   }, [])
 

@@ -1,14 +1,12 @@
 'use client'
+import { useEffect } from 'react'
 import { useAppData } from '@/hooks/useAppData'
 import Sidebar from '@/components/Sidebar'
 import Badge from '@/components/Badge'
-import { supabase, Holding, DividendProjection } from '@/lib/supabase'
-import { toCZK, fmtCZK } from '@/lib/fx'
+import { fmtCZK } from '@/lib/fx'
 import { useFx } from '@/hooks/useFx'
 import { useMarketData } from '@/hooks/useMarketData'
-import { computeProjectedTotal } from '@/lib/projections'
-
-const CURRENT_YEAR = new Date().getFullYear()
+import { positionsMetrics, exposureCurrency } from '@/lib/portfolio'
 
 const CCY_COLORS: Record<string, string> = {
   USD: '#4a9448', EUR: '#185fa5', CZK: '#7a5810', GBP: '#8a2b22',
@@ -16,31 +14,30 @@ const CCY_COLORS: Record<string, string> = {
 
 export default function CurrencyPage() {
   const { holdings, projections, loading } = useAppData()
-  const { fx, fxTs, fxLoading, refresh: refreshFx } = useFx()
+  const { fx, fxLive, fxTs, fxLoading, refresh: refreshFx } = useFx()
   const market = useMarketData()
 
-  if (holdings.length > 0 && market.state === 'idle') {
-    market.refresh(holdings.map(h => h.symbol))
-  }
+  const symbolKey = holdings.map(h => h.symbol).join(',')
+  useEffect(() => {
+    if (symbolKey) market.refresh(symbolKey.split(','))
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [symbolKey])
 
   // Per-holding metrics
-  const enriched = holdings.map(h => {
-    const mktCZK    = toCZK(market.getPrice(h.symbol, h.avg_price) * h.shares, h.currency, fx)
-    const liveAnnual = market.getAnnualDiv(h.symbol)
-    const proj      = projections.find(p => p.symbol === h.symbol)
-    const divCZK    = liveAnnual != null
-      ? toCZK(liveAnnual * h.shares, h.currency, fx)
-      : proj ? toCZK(computeProjectedTotal(proj, holdings), proj.currency, fx) : 0
-    return { h, mktCZK, divCZK }
-  })
+  const enriched = positionsMetrics(holdings, market, fx, projections).map(m => ({
+    h: m.holding,
+    mktCZK: m.marketCZK,
+    divCZK: m.annualDivCZK ?? 0,
+    ccy: exposureCurrency(m),
+  }))
 
   const totalMktCZK = enriched.reduce((s, r) => s + r.mktCZK, 0)
   const totalDivCZK = enriched.reduce((s, r) => s + r.divCZK, 0)
 
-  // Group by currency
+  // Group by the currency the holding actually trades in
   const ccyMap: Record<string, { mktCZK: number; divCZK: number; holdings: typeof enriched }> = {}
   for (const r of enriched) {
-    const c = r.h.currency
+    const c = r.ccy
     if (!ccyMap[c]) ccyMap[c] = { mktCZK: 0, divCZK: 0, holdings: [] }
     ccyMap[c].mktCZK += r.mktCZK
     ccyMap[c].divCZK += r.divCZK
@@ -68,6 +65,7 @@ export default function CurrencyPage() {
             <div style={{ fontSize: 11, color: 'var(--text3)', marginTop: 4 }}>
               Portfolio exposure by currency · All values in CZK
               {fxTs && <span style={{ color: 'var(--green)', marginLeft: 8 }}>· FX {fxTs}</span>}
+              {!fxLive && <span style={{ color: 'var(--amber)', marginLeft: 8 }}>· fallback rates</span>}
             </div>
           </div>
           <button onClick={refreshFx} disabled={fxLoading} style={{ padding: '7px 15px', borderRadius: 6, cursor: 'pointer', background: 'var(--bg2)', border: '1px solid var(--border2)', color: 'var(--text2)', fontFamily: "'Geist', sans-serif", fontSize: 12 }}>
@@ -115,8 +113,8 @@ export default function CurrencyPage() {
               </div>
               {/* Holdings list */}
               <div style={{ padding: '0 18px 12px', display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                {ccyHoldings.sort((a, b) => b.mktCZK - a.mktCZK).map(({ h, mktCZK: hMkt }) => (
-                  <div key={h.symbol} style={{ background: 'var(--bg3)', border: '1px solid var(--border)', borderRadius: 6, padding: '6px 12px', fontSize: 11 }}>
+                {[...ccyHoldings].sort((a, b) => b.mktCZK - a.mktCZK).map(({ h, mktCZK: hMkt }) => (
+                  <div key={h.id} style={{ background: 'var(--bg3)', border: '1px solid var(--border)', borderRadius: 6, padding: '6px 12px', fontSize: 11 }}>
                     <span style={{ fontWeight: 600 }}>{h.symbol}</span>
                     <span style={{ color: 'var(--text3)', marginLeft: 8 }}>{fmtCZK(hMkt)}</span>
                     <span style={{ color: 'var(--text4)', marginLeft: 4 }}>({totalMktCZK > 0 ? ((hMkt / totalMktCZK) * 100).toFixed(1) : 0}%)</span>

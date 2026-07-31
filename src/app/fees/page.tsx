@@ -1,10 +1,12 @@
 'use client'
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState } from 'react'
 import Sidebar from '@/components/Sidebar'
 import Badge from '@/components/Badge'
-import { supabase, Holding } from '@/lib/supabase'
-import { toCZK, fmtCZK, DEFAULT_FX, fetchFxRates } from '@/lib/fx'
+import { fmtCZK } from '@/lib/fx'
+import { useFx } from '@/hooks/useFx'
+import { useAppData } from '@/hooks/useAppData'
 import { useMarketData } from '@/hooks/useMarketData'
+import { positionsMetrics } from '@/lib/portfolio'
 import { tdR } from '@/lib/ui'
 
 // Known expense ratios for ETFs and funds (as decimals)
@@ -45,42 +47,25 @@ const IBKR_COMMISSION = {
 const ASSUMED_TURNOVER = 0.10 // 10% per year
 
 export default function FeeScannerPage() {
-  const [holdings, setHoldings] = useState<Holding[]>([])
-  const [fx, setFx]             = useState(DEFAULT_FX)
-  const [loading, setLoading]   = useState(true)
-  const [fxLoading, setFxLoading] = useState(false)
-  const [fxTs, setFxTs]         = useState<string | null>(null)
+  // Shared, profile-scoped store. This page used to query `holdings` directly
+  // with no profile filter, so it analysed every profile's positions at once.
+  const { holdings, projections, loading } = useAppData()
+  const { fx, fxLive, fxLoading, fxTs, refresh: refreshFx } = useFx()
   const [horizon, setHorizon]   = useState(10)    // years for drag calc
   const [growth, setGrowth]     = useState(7)     // % annual return assumption
 
   const market = useMarketData()
 
-  const load = useCallback(async () => {
-    const { data } = await supabase.from('holdings').select('*').order('symbol')
-    if (data) setHoldings(data)
-    setLoading(false)
-    return data ?? []
-  }, [])
-
+  const symbolKey = holdings.map(h => h.symbol).join(',')
   useEffect(() => {
-    load().then(h => {
-      if (h.length > 0) market.refresh(h.map((hh: Holding) => hh.symbol))
-    })
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
-  const refreshFx = async () => {
-    setFxLoading(true)
-    const rates = await fetchFxRates()
-    setFx(rates)
-    setFxTs(new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }))
-    setFxLoading(false)
-  }
+    if (symbolKey) market.refresh(symbolKey.split(','))
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [symbolKey])
 
   // ── Per-holding fee analysis ───────────────────────────────────────────────
-  const rows = holdings.map(h => {
-    const price   = market.getPrice(h.symbol, h.avg_price)
-    const mktCZK  = toCZK(price * h.shares, h.currency, fx)
+  const rows = positionsMetrics(holdings, market, fx, projections).map(m => {
+    const h       = m.holding
+    const mktCZK  = m.marketCZK
     const info    = EXPENSE_RATIOS[h.symbol]
     const ter     = info?.ter ?? 0
     const isEtf   = info?.type === 'etf'
@@ -122,6 +107,10 @@ export default function FeeScannerPage() {
     : 0
   const etfValue  = rows.filter(r => r.isEtf).reduce((s, r) => s + r.mktCZK, 0)
   const etfPct    = totalValueCZK > 0 ? (etfValue / totalValueCZK) * 100 : 0
+  const feePctOfPortfolio = totalValueCZK > 0 ? (totalAnnualFeesCZK / totalValueCZK) * 100 : 0
+  // Positions with no TER entry are assumed fee-free, which is only true for
+  // individual stocks. Flag unknown tickers instead of quietly scoring them 0%.
+  const unmappedSymbols = rows.filter(r => !EXPENSE_RATIOS[r.h.symbol]).map(r => r.h.symbol)
 
   const sorted = [...rows].sort((a, b) => b.totalAnnualCZK - a.totalAnnualCZK)
 
@@ -132,7 +121,7 @@ export default function FeeScannerPage() {
     return { label: 'High',  variant: 'red' as const }
   }
 
-  const portfolioRating = feeRating(totalValueCZK > 0 ? (totalAnnualFeesCZK / totalValueCZK) * 100 : 0)
+  const portfolioRating = feeRating(feePctOfPortfolio)
 
   if (loading) return (
     <div style={{ display: 'flex' }}>
@@ -153,6 +142,7 @@ export default function FeeScannerPage() {
             <div style={{ fontSize: 11, color: 'var(--text3)', marginTop: 4 }}>
               Expense ratios, brokerage costs &amp; long-run fee drag · IBKR account
               {fxTs && <span style={{ color: 'var(--green)', marginLeft: 8 }}>· FX {fxTs}</span>}
+              {!fxLive && <span style={{ color: 'var(--amber)', marginLeft: 8 }}>· fallback rates</span>}
             </div>
           </div>
           <button onClick={refreshFx} disabled={fxLoading} style={{
@@ -164,10 +154,21 @@ export default function FeeScannerPage() {
           </button>
         </div>
 
+        {unmappedSymbols.length > 0 && (
+          <div style={{
+            background: 'var(--amber-bg)', border: '1px solid var(--amber-bd)',
+            color: 'var(--amber)', borderRadius: 8, padding: '9px 14px',
+            marginBottom: 14, fontSize: 11, lineHeight: 1.6,
+          }}>
+            ⚠ No expense ratio on file for {unmappedSymbols.join(', ')} — they are counted at 0% TER,
+            so the totals below understate costs if any of them is a fund.
+          </div>
+        )}
+
         {/* Summary cards */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 20 }}>
           {[
-            { label: 'Est. annual fees', value: fmtCZK(totalAnnualFeesCZK, 0), accent: 'var(--amber)', note: `${((totalAnnualFeesCZK / totalValueCZK) * 100).toFixed(3)}% of portfolio` },
+            { label: 'Est. annual fees', value: fmtCZK(totalAnnualFeesCZK, 0), accent: 'var(--amber)', note: `${feePctOfPortfolio.toFixed(3)}% of portfolio` },
             { label: 'Weighted avg TER', value: `${(wtdTer * 100).toFixed(3)}%`, accent: wtdTer < 0.002 ? 'var(--green)' : 'var(--amber)', note: `ETFs are ${etfPct.toFixed(0)}% of portfolio` },
             { label: `Fee drag (${horizon}y)`, value: fmtCZK(totalFeeDragCZK, 0), accent: 'var(--red)', note: `vs. 0% cost at ${growth}% growth` },
             { label: 'Fee rating', value: portfolioRating.label, accent: portfolioRating.variant === 'green' ? 'var(--green)' : portfolioRating.variant === 'amber' ? 'var(--amber)' : 'var(--red)', note: 'Overall portfolio efficiency' },
@@ -217,6 +218,9 @@ export default function FeeScannerPage() {
             <div style={{ display: 'flex', gap: 6 }}>
               <Badge variant="amber">{rows.filter(r => r.isEtf).length} ETFs with TER</Badge>
               <Badge variant="gray">{rows.filter(r => !r.isEtf).length} individual stocks</Badge>
+              {unmappedSymbols.length > 0 && (
+                <Badge variant="red">{unmappedSymbols.length} unknown TER</Badge>
+              )}
             </div>
           </div>
           <div style={{ overflowX: 'auto' }}>
@@ -279,7 +283,7 @@ export default function FeeScannerPage() {
               <tfoot>
                 <tr style={{ background: 'var(--bg3)' }}>
                   <td colSpan={2} style={{ padding: '10px 14px', borderTop: '1px solid var(--border)', fontWeight: 600, fontSize: 12 }}>Total</td>
-                  <td style={{ ...tdR, borderTop: '1px solid var(--border)', fontFamily: "'DM Mono', monospace', fontWeight: 600" }}>{fmtCZK(totalValueCZK)}</td>
+                  <td style={{ ...tdR, borderTop: '1px solid var(--border)', fontFamily: "'DM Mono', monospace", fontWeight: 600 }}>{fmtCZK(totalValueCZK)}</td>
                   <td style={{ ...tdR, borderTop: '1px solid var(--border)' }}>
                     <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 12 }}>{(wtdTer * 100).toFixed(3)}% wtd</span>
                   </td>

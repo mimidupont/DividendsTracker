@@ -1,13 +1,15 @@
 'use client'
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import Sidebar from '@/components/Sidebar'
 import { toCZK, fmtCZK } from '@/lib/fx'
+import { todayISO, addDays, fmtISODateShort, yearOf } from '@/lib/date'
 import { useFx } from '@/hooks/useFx'
 import { useMarketData } from '@/hooks/useMarketData'
 import { useCryptoPrices } from '@/hooks/useCryptoPrices'
 import { useAppData } from '@/hooks/useAppData'
+import { useProfile } from '@/lib/profile'
 import { usePortfolioSnapshots } from '@/hooks/usePortfolioSnapshots'
-import { computeProjectedTotal } from '@/lib/projections'
+import { positionsMetrics, portfolioTotals } from '@/lib/portfolio'
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, ReferenceLine,
@@ -36,32 +38,41 @@ const PL_WINDOWS: { key: PLWindow; label: string; days: number | 'ytd' }[] = [
 export default function Dashboard() {
   const {
     holdings, projections, dividendsReceived,
-    bankAccounts, cryptoHoldings, realEstate, loading,
+    bankAccounts, cryptoHoldings, realEstate, loading, error,
   } = useAppData()
 
-  const { fx, fxLoading, fxTs, refresh: refreshFx } = useFx()
+  const { activeProfile } = useProfile()
+  const { fx, fxLive, fxLoading, fxTs, refresh: refreshFx } = useFx()
   const market = useMarketData()
   const cryptoPrices = useCryptoPrices()
   const { snapshots, saveSnapshot, getPLSummary } = usePortfolioSnapshots()
 
   const [plWindow, setPlWindow] = useState<PLWindow>('30d')
 
-  // Kick off market + crypto fetches when data arrives
-  useEffect(() => {
-    if (holdings.length > 0) market.refresh(holdings.map(h => h.symbol))
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [holdings.length])
+  // Kick off market + crypto fetches when data arrives.
+  // Keyed on the symbol list, not its length: swapping profiles can keep the
+  // count identical while every ticker changes.
+  const symbolKey = holdings.map(h => h.symbol).join(',')
+  const coinKey   = cryptoHoldings.map(c => c.coin_id).join(',')
 
   useEffect(() => {
-    if (cryptoHoldings.length > 0) cryptoPrices.refresh(cryptoHoldings.map(c => c.coin_id))
+    if (symbolKey) market.refresh(symbolKey.split(','))
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cryptoHoldings.length])
+  }, [symbolKey])
+
+  useEffect(() => {
+    if (coinKey) cryptoPrices.refresh(coinKey.split(','))
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [coinKey])
 
   // ── Asset values ──────────────────────────────────────────────────────────
-  const stockValueCZK = holdings.reduce((s, h) =>
-    s + toCZK(market.getPrice(h.symbol, h.avg_price) * h.shares, h.currency, fx), 0)
-  const stockCostCZK = holdings.reduce((s, h) =>
-    s + toCZK(h.avg_price * h.shares, h.currency, fx), 0)
+  const positions = useMemo(
+    () => positionsMetrics(holdings, market, fx, projections),
+    [holdings, market, fx, projections]
+  )
+  const stockTotals   = portfolioTotals(positions)
+  const stockValueCZK = stockTotals.marketCZK
+  const stockCostCZK  = stockTotals.costCZK
 
   const cashValueCZK = bankAccounts.reduce((s, a) =>
     s + toCZK(a.balance, a.currency, fx), 0)
@@ -70,43 +81,49 @@ export default function Dashboard() {
     const priceUSD = cryptoPrices.getPrice(c.coin_id, c.avg_cost_usd)
     return s + toCZK(priceUSD * c.amount, 'USD', fx)
   }, 0)
+  const cryptoCostCZK = cryptoHoldings.reduce((s, c) =>
+    s + toCZK(c.avg_cost_usd * c.amount, 'USD', fx), 0)
 
+  // Ownership share applies to the debt as well as the asset — counting 100% of
+  // a mortgage against a 50%-owned property understated equity by half the loan.
   const realEstateGrossCZK = realEstate.reduce((s, p) =>
     s + toCZK(p.current_value * (p.ownership_pct / 100), p.currency, fx), 0)
   const mortgageCZK = realEstate.reduce((s, p) =>
-    s + toCZK(p.mortgage_balance, p.currency, fx), 0)
+    s + toCZK(p.mortgage_balance * (p.ownership_pct / 100), p.currency, fx), 0)
   const realEstateEquityCZK = realEstateGrossCZK - mortgageCZK
+  const realEstateCostCZK = realEstate.reduce((s, p) =>
+    s + toCZK(p.purchase_price * (p.ownership_pct / 100), p.currency, fx), 0)
 
   const totalNetWorth = stockValueCZK + cashValueCZK + cryptoValueCZK + realEstateEquityCZK
-  const totalInvested = stockCostCZK + cashValueCZK +
-    cryptoHoldings.reduce((s, c) => s + toCZK(c.avg_cost_usd * c.amount, 'USD', fx), 0) +
-    realEstate.reduce((s, p) => s + toCZK(p.purchase_price * (p.ownership_pct / 100), p.currency, fx), 0)
-  const totalGainCZK = totalNetWorth - totalInvested
+  // Cash is excluded from both sides: it has no cost basis, and including it
+  // dilutes the return percentage without contributing any gain.
+  const investedCZK = stockCostCZK + cryptoCostCZK + realEstateCostCZK
+  const investedValueCZK = stockValueCZK + cryptoValueCZK + realEstateGrossCZK
+  const totalGainCZK = investedValueCZK - investedCZK
 
-  // ── Save today's snapshot once market data is loaded ─────────────────────
+  // ── Save today's snapshot once every asset class has priced ───────────────
+  // Waiting for crypto too: saving as soon as equities landed recorded a net
+  // worth with crypto still valued at cost.
+  const cryptoReady = cryptoHoldings.length === 0 || cryptoPrices.state === 'done'
+  const pricesReady = holdings.length === 0 || market.state === 'done'
+
   useEffect(() => {
-    if (market.state === 'done' && totalNetWorth > 0) {
+    if (!loading && !error && fxLive && pricesReady && cryptoReady && totalNetWorth > 0) {
       saveSnapshot({
         total_value_czk: totalNetWorth,
         stocks_czk:      stockValueCZK,
         cash_czk:        cashValueCZK,
         crypto_czk:      cryptoValueCZK,
         realestate_czk:  realEstateEquityCZK,
-        fx_usd: fx['USD'] ?? 23.50,
-        fx_eur: fx['EUR'] ?? 25.60,
+        fx_usd: fx['USD'],
+        fx_eur: fx['EUR'],
       })
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [market.state, totalNetWorth])
+  }, [loading, error, fxLive, pricesReady, cryptoReady, totalNetWorth])
 
   // ── Income ─────────────────────────────────────────────────────────────────
-  const divIncomeCZK = holdings.reduce((s, h) => {
-    const liveAnnual = market.getAnnualDiv(h.symbol)
-    if (liveAnnual != null) return s + toCZK(liveAnnual * h.shares, h.currency, fx)
-    const proj = projections.find(p => p.symbol === h.symbol)
-    if (!proj) return s
-    return s + toCZK(computeProjectedTotal(proj, holdings), proj.currency, fx)
-  }, 0)
+  const divIncomeCZK = stockTotals.annualDivCZK
   const interestIncomeCZK = bankAccounts.reduce((s, a) =>
     s + toCZK(a.balance * a.interest_rate, a.currency, fx), 0)
   const rentalIncomeCZK = realEstate.reduce((s, p) =>
@@ -124,9 +141,10 @@ export default function Dashboard() {
     { label: 'Real Estate',    value: realEstateEquityCZK,  color: 'var(--teal)',   href: '/realestate' },
   ]
 
-  const CURRENT_YEAR = new Date().getFullYear()
+  const today = todayISO()
+  const CURRENT_YEAR = yearOf(today)
   const ytdDivCZK = dividendsReceived
-    .filter(d => new Date(d.payment_date).getFullYear() === CURRENT_YEAR)
+    .filter(d => yearOf(d.payment_date) === CURRENT_YEAR)
     .reduce((s, d) => s + toCZK(d.gross_amount, d.currency, fx), 0)
 
   // ── P&L chart data ─────────────────────────────────────────────────────────
@@ -136,13 +154,9 @@ export default function Dashboard() {
     : { pl: 0, plPct: null, label: '', fromDate: null, fromValue: null }
 
   // Build chart data: historical snapshots + today
-  const today = new Date().toISOString().slice(0, 10)
-  const cutoff = (() => {
-    if (selectedWindow.days === 'ytd') return `${CURRENT_YEAR}-01-01`
-    const d = new Date()
-    d.setDate(d.getDate() - (selectedWindow.days as number))
-    return d.toISOString().slice(0, 10)
-  })()
+  const cutoff = selectedWindow.days === 'ytd'
+    ? `${CURRENT_YEAR}-01-01`
+    : addDays(today, -(selectedWindow.days as number))
 
   const chartSnapshots = snapshots.filter(s => s.snapshot_date >= cutoff)
 
@@ -167,10 +181,7 @@ export default function Dashboard() {
   const plPositive = plSummary.pl >= 0
   const plColor = plPositive ? 'var(--green)' : 'var(--red)'
 
-  const fmtAxisDate = (d: string) => {
-    const dt = new Date(d + 'T00:00:00Z')
-    return dt.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })
-  }
+  const fmtAxisDate = fmtISODateShort
 
   const ChartTooltip = ({ active, payload, label }: any) => {
     if (!active || !payload?.length) return null
@@ -214,13 +225,15 @@ export default function Dashboard() {
               {new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}
             </div>
             <h1 style={{ fontFamily: "'Syne', sans-serif", fontSize: 28, fontWeight: 700, letterSpacing: '-0.02em', lineHeight: 1.1 }}>
-              {greeting()}, <span style={{ color: 'var(--green)' }}>Eliot</span>
+              {greeting()}
+              {activeProfile && <>, <span style={{ color: 'var(--green)' }}>{activeProfile.display_name}</span></>}
             </h1>
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
             <button onClick={refreshFx} disabled={fxLoading} style={btnSecondary}>
               {fxLoading ? '⟳' : '↻'} FX rates
               {fxTs && <span style={{ color: 'var(--green)', marginLeft: 6 }}>{fxTs}</span>}
+              {!fxLoading && !fxLive && <span style={{ color: 'var(--amber)', marginLeft: 6 }}>fallback</span>}
             </button>
             <button
               onClick={() => market.refresh(holdings.map(h => h.symbol), true)}
@@ -231,6 +244,19 @@ export default function Dashboard() {
             </button>
           </div>
         </div>
+
+        {/* Anything that would make the totals below wrong is stated, not hidden */}
+        {(error || !fxLive || market.state === 'error') && (
+          <div style={{
+            background: 'var(--amber-bg)', border: '1px solid var(--amber-bd)',
+            color: 'var(--amber)', borderRadius: 10, padding: '10px 14px',
+            marginBottom: 16, fontSize: 11, lineHeight: 1.6,
+          }}>
+            {error && <div>⚠ Some data could not be loaded — totals are incomplete: {error}</div>}
+            {!fxLive && <div>⚠ Live FX unavailable — CZK values use fallback rates and are approximate.</div>}
+            {market.state === 'error' && <div>⚠ Live prices unavailable — positions are valued at cost. {market.errorMsg}</div>}
+          </div>
+        )}
 
         {/* Net Worth Hero */}
         <div style={{
@@ -251,7 +277,7 @@ export default function Dashboard() {
                   {totalGainCZK >= 0 ? '▲' : '▼'} {totalGainCZK >= 0 ? '+' : ''}{fmtCZK(totalGainCZK)} total gain
                 </div>
                 <div style={{ fontSize: 11, color: 'var(--text4)' }}>
-                  {totalInvested > 0 ? `${((totalGainCZK / totalInvested) * 100).toFixed(1)}% on invested` : ''}
+                  {investedCZK > 0 ? `${((totalGainCZK / investedCZK) * 100).toFixed(1)}% on invested` : ''}
                 </div>
               </div>
             </div>
@@ -417,7 +443,7 @@ export default function Dashboard() {
                   domain={['auto', 'auto']}
                 />
                 <Tooltip content={<ChartTooltip />} />
-                {referenceValue && (
+                {referenceValue != null && (
                   <ReferenceLine
                     y={referenceValue}
                     stroke="var(--border2)"

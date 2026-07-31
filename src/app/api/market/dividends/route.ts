@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getYahooSession, toYahoo, fetchYahooQuoteSummary, batchedMap } from '@/lib/yahoo'
-import { batchFetchSAQuotes, isSASupported } from '@/lib/stockanalysis'
+import { batchFetchSAQuotes } from '@/lib/stockanalysis'
+import { unixToISODate } from '@/lib/date'
 
 export interface DividendSummary {
   symbol: string
@@ -11,10 +12,12 @@ export interface DividendSummary {
   lastDividendDate: number | null      // Unix timestamp
   payoutFrequency: number | null
   currency: string
-  /** ISO string of ex-date when coming from SA (more reliable) */
+  /** ISO ex-date ("YYYY-MM-DD"). Preferred over the Unix field — no TZ ambiguity. */
   exDividendDateISO?: string | null
-  /** ISO string of pay date when coming from SA */
+  /** ISO pay date ("YYYY-MM-DD"). */
   payDividendDateISO?: string | null
+  /** ISO date of the most recent *paid* dividend, whichever source supplied it. */
+  lastDividendDateISO?: string | null
   dataSource?: 'stockanalysis' | 'yahoo'
   error?: string
 }
@@ -24,7 +27,7 @@ export interface DividendSummaryResponse {
   fetchedAt: string
 }
 
-// ─── Yahoo fetch (unchanged) ──────────────────────────────────────────────────
+// ─── Yahoo fetch ──────────────────────────────────────────────────────────────
 
 async function fetchYahooDividendSummary(
   symbol: string,
@@ -49,23 +52,22 @@ async function fetchYahooDividendSummary(
     const ks  = result.defaultKeyStatistics ?? {}
 
     const exDate     = cal.exDividendDate?.raw ?? sd.exDividendDate?.raw ?? null
+    const payDate    = cal.dividendDate?.raw ?? null
     const lastDiv    = ks.lastDividendValue?.raw ?? null
+    const lastDivTs  = ks.lastDividendDate?.raw ?? null
     const annualRate: number | null = sd.trailingAnnualDividendRate?.raw ?? null
-
-    let freq: number | null = null
-    if (annualRate && lastDiv && lastDiv > 0) {
-      const ratio = annualRate / lastDiv
-      freq = ratio < 1.5 ? 1 : ratio < 3 ? 2 : ratio < 8 ? 4 : 12
-    }
 
     return {
       symbol,
       exDividendDate: exDate,
+      exDividendDateISO: unixToISODate(exDate),
+      payDividendDateISO: unixToISODate(payDate),
       dividendRate: sd.dividendRate?.raw ?? null,
       trailingAnnualDividendRate: annualRate,
       lastDividendValue: lastDiv,
-      lastDividendDate: ks.lastDividendDate?.raw ?? null,
-      payoutFrequency: freq,
+      lastDividendDate: lastDivTs,
+      lastDividendDateISO: unixToISODate(lastDivTs),
+      payoutFrequency: estimateFrequency(annualRate, lastDiv),
       currency: sd.currency ?? 'USD',
       dataSource: 'yahoo',
     }
@@ -77,9 +79,9 @@ async function fetchYahooDividendSummary(
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 /** Convert an ISO date string "YYYY-MM-DD" to a Unix timestamp (midnight UTC) */
-function isoToUnix(iso: string | null): number | null {
+function isoToUnix(iso: string | null | undefined): number | null {
   if (!iso) return null
-  const ms = Date.parse(iso)
+  const ms = Date.parse(`${iso}T00:00:00Z`)
   return isNaN(ms) ? null : Math.floor(ms / 1000)
 }
 
@@ -90,23 +92,43 @@ function estimateFrequency(annual: number | null, perPayment: number | null): nu
   return ratio < 1.5 ? 1 : ratio < 3 ? 2 : ratio < 8 ? 4 : 12
 }
 
+/**
+ * Most recent pay date that is not in the future.
+ * StockAnalysis' `payDividendDate` is the *next* scheduled payment when one has
+ * been declared, so it can only be treated as "last paid" once it is in the past.
+ */
+function lastPaidDate(payDateISO: string | null | undefined, todayISO: string): string | null {
+  if (!payDateISO) return null
+  return payDateISO <= todayISO ? payDateISO : null
+}
+
 // ─── Route handler ────────────────────────────────────────────────────────────
 
 export async function POST(req: NextRequest) {
   try {
-    const { symbols } = (await req.json()) as { symbols: string[] }
-    if (!symbols?.length) {
+    const body = (await req.json()) as { symbols?: unknown }
+    const symbols = Array.isArray(body.symbols)
+      ? Array.from(new Set(
+          body.symbols.filter((s): s is string => typeof s === 'string' && s.trim().length > 0)
+        ))
+      : []
+    if (!symbols.length) {
       return NextResponse.json({ error: 'symbols array required' }, { status: 400 })
     }
 
-    // 1. StockAnalysis pass — reliable ex-dates and dividend amounts for US tickers
+    const today = new Date().toISOString().slice(0, 10)
+
+    // 1. StockAnalysis pass — reliable ex-dates and dividend amounts
     const saResults = await batchFetchSAQuotes(symbols, 6)
 
     // 2. Which symbols still need Yahoo?
+    //    Also ask Yahoo whenever SA gave us no *paid* dividend date, since the
+    //    DRIP flow keys off the last payment and SA only publishes the next one.
     const needsYahoo = symbols.filter(s => {
       const sa = saResults[s]
-      // Need Yahoo if: SA doesn't support the symbol, OR SA has no dividend data
-      return !sa || !!sa.error || (sa.exDividendDate === null && sa.annualDividend === null)
+      if (!sa || sa.error) return true
+      if (sa.exDividendDate === null && sa.annualDividend === null) return true
+      return lastPaidDate(sa.payDividendDate, today) === null
     })
 
     // 3. Yahoo pass for the remainder
@@ -121,7 +143,6 @@ export async function POST(req: NextRequest) {
         )
         yahooMap = Object.fromEntries(results.map(r => [r.symbol, r]))
       } else {
-        // No session — fill empty
         for (const s of needsYahoo) {
           yahooMap[s] = {
             symbol: s, exDividendDate: null, dividendRate: null,
@@ -143,31 +164,34 @@ export async function POST(req: NextRequest) {
       if (sa && !sa.error && (sa.exDividendDate || sa.annualDividend)) {
         // SA has useful dividend data — use it as primary
         const annual = sa.annualDividend ?? null
-        const perPmt = sa.lastDividendAmount ?? null
-        const freq   = estimateFrequency(annual, perPmt) ?? 4
+        const perPmt = sa.lastDividendAmount ?? yahoo?.lastDividendValue ?? null
+        const freq   = estimateFrequency(annual, perPmt) ?? yahoo?.payoutFrequency ?? 4
+
+        // SA's pay date is the *next* payment once declared; only treat it as
+        // the last payment when it has already happened. Otherwise use Yahoo's.
+        const lastPaidISO =
+          lastPaidDate(sa.payDividendDate, today) ?? yahoo?.lastDividendDateISO ?? null
 
         summaries[symbol] = {
           symbol,
-          // Convert ISO date strings to Unix timestamps so existing
-          // calendar/DRIP code works without changes
+          // Unix timestamps kept so older callers keep working
           exDividendDate:           isoToUnix(sa.exDividendDate),
           exDividendDateISO:        sa.exDividendDate,
           payDividendDateISO:       sa.payDividendDate,
+          lastDividendDateISO:      lastPaidISO,
           dividendRate:             annual,
           trailingAnnualDividendRate: annual,
           lastDividendValue:        perPmt,
-          // SA doesn't give us a lastDividendDate timestamp directly —
-          // fall through to Yahoo if it has one
-          lastDividendDate:         yahoo?.lastDividendDate ?? null,
+          lastDividendDate:         isoToUnix(lastPaidISO),
           payoutFrequency:          freq,
-          currency:                 'USD',
+          // SA_SYMBOL_MAP knows the native trading currency — the old code
+          // hardcoded USD, which mispriced every CZK and EUR listing.
+          currency:                 sa.currency || yahoo?.currency || 'USD',
           dataSource:               'stockanalysis',
         }
       } else if (yahoo) {
-        // SA not available / no dividend data → use Yahoo
         summaries[symbol] = yahoo
       } else {
-        // Both failed
         summaries[symbol] = {
           symbol,
           exDividendDate: null, dividendRate: null,

@@ -1,12 +1,12 @@
 'use client'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import Sidebar from '@/components/Sidebar'
 import Badge from '@/components/Badge'
-import { toCZK, fmtCZK } from '@/lib/fx'
+import { fmtCZK } from '@/lib/fx'
 import { useFx } from '@/hooks/useFx'
 import { useMarketData } from '@/hooks/useMarketData'
 import { useAppData } from '@/hooks/useAppData'
-import { computeProjectedTotal } from '@/lib/projections'
+import { positionsMetrics, exposureCurrency } from '@/lib/portfolio'
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from 'recharts'
 import { tdR, btnStyle } from '@/lib/ui'
 
@@ -46,30 +46,29 @@ export default function AllocationPage() {
   const market = useMarketData()
   const [view, setView] = useState<'value' | 'income'>('value')
 
-  if (holdings.length > 0 && market.state === 'idle') {
-    market.refresh(holdings.map(h => h.symbol))
-  }
+  const symbolKey = holdings.map(h => h.symbol).join(',')
+  useEffect(() => {
+    if (symbolKey) market.refresh(symbolKey.split(','))
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [symbolKey])
 
   // ── Per-holding values ──────────────────────────────────────────────────────
-  const enriched = holdings.map(h => {
-    const price       = market.getPrice(h.symbol, h.avg_price)
-    const mktCZK      = toCZK(price * h.shares, h.currency, fx)
-    const liveAnnual  = market.getAnnualDiv(h.symbol)
-    const proj        = projections.find(p => p.symbol === h.symbol)
-    const annualDivCZK = liveAnnual != null
-      ? toCZK(liveAnnual * h.shares, h.currency, fx)
-      : proj ? toCZK(computeProjectedTotal(proj, holdings), proj.currency, fx) : 0
-    const sector = SECTORS[h.symbol] ?? 'Other'
-    return { h, mktCZK, annualDivCZK, sector }
-  })
+  const enriched = positionsMetrics(holdings, market, fx, projections).map(m => ({
+    h: m.holding,
+    mktCZK: m.marketCZK,
+    annualDivCZK: m.annualDivCZK ?? 0,
+    // Currency exposure follows where the asset actually trades, not the
+    // currency the purchase happened to be booked in.
+    ccy: exposureCurrency(m),
+    sector: SECTORS[m.holding.symbol] ?? 'Other',
+  }))
 
   const totalMktCZK = enriched.reduce((s, r) => s + r.mktCZK, 0)
   const totalDivCZK = enriched.reduce((s, r) => s + r.annualDivCZK, 0)
 
   // ── Currency breakdown ──────────────────────────────────────────────────────
   const ccyMap: Record<string, { mktCZK: number; divCZK: number; count: number }> = {}
-  enriched.forEach(({ h, mktCZK, annualDivCZK }) => {
-    const c = h.currency
+  enriched.forEach(({ ccy: c, mktCZK, annualDivCZK }) => {
     if (!ccyMap[c]) ccyMap[c] = { mktCZK: 0, divCZK: 0, count: 0 }
     ccyMap[c].mktCZK += mktCZK
     ccyMap[c].divCZK += annualDivCZK
@@ -270,7 +269,7 @@ export default function AllocationPage() {
               </tr>
             </thead>
             <tbody>
-              {topHoldings.map(({ h, mktCZK, annualDivCZK, sector }, idx) => {
+              {topHoldings.map(({ h, mktCZK, annualDivCZK, sector, ccy }, idx) => {
                 const valuePct  = totalMktCZK > 0 ? (mktCZK / totalMktCZK) * 100 : 0
                 const incomePct = totalDivCZK > 0 ? (annualDivCZK / totalDivCZK) * 100 : 0
                 const sectorColor = SECTOR_COLORS[sector] ?? '#888'
@@ -288,7 +287,7 @@ export default function AllocationPage() {
                       <span style={{ fontSize: 10, padding: '2px 7px', borderRadius: 4, background: sectorColor + '18', color: sectorColor, border: `1px solid ${sectorColor}40` }}>{sector}</span>
                     </td>
                     <td style={{ padding: '9px 14px', borderBottom: '1px solid var(--border)', textAlign: 'right' }}>
-                      <Badge variant={h.currency === 'USD' ? 'gray' : h.currency === 'EUR' ? 'blue' : 'amber'}>{h.currency}</Badge>
+                      <Badge variant={ccy === 'USD' ? 'gray' : ccy === 'EUR' ? 'blue' : 'amber'}>{ccy}</Badge>
                     </td>
                     <td style={{ ...tdR, fontFamily: "'DM Mono', monospace" }}>{fmtCZK(mktCZK)}</td>
                     <td style={{ padding: '9px 14px', borderBottom: '1px solid var(--border)', textAlign: 'right' }}>

@@ -4,19 +4,23 @@ import Sidebar from '@/components/Sidebar'
 import Badge from '@/components/Badge'
 import LogDividendModal from '@/components/LogDividendModal'
 import { useAppData } from '@/hooks/useAppData'
-import { toCZK, fmtCZK, fmtDate, DEFAULT_FX } from '@/lib/fx'
+import { useFx } from '@/hooks/useFx'
+import { toCZK, fmtCZK } from '@/lib/fx'
+import { fmtISODate, todayISO, yearOf } from '@/lib/date'
 
 export default function ReceivedPage() {
   const { dividendsReceived: dividends, reload: load } = useAppData()
   const [showModal, setShowModal] = useState(false)
-  const fx = DEFAULT_FX
+  // Live rates, like every other page — this used to be pinned to the
+  // hardcoded fallback table, so the CZK column disagreed with the dashboard.
+  const { fx, fxLive, fxTs } = useFx()
 
   const totalGrossCZK = dividends.reduce((s, d) => s + toCZK(d.gross_amount, d.currency, fx), 0)
-  const totalWHT_CZK  = dividends.reduce((s, d) => s + toCZK(d.withholding_tax, d.currency, fx), 0)
+  const totalWHT_CZK  = dividends.reduce((s, d) => s + toCZK(d.withholding_tax ?? 0, d.currency, fx), 0)
   const totalNetCZK   = totalGrossCZK - totalWHT_CZK
 
-  const currentYear = new Date().getFullYear()
-  const ytd = dividends.filter(d => new Date(d.payment_date).getFullYear() === currentYear)
+  const currentYear = yearOf(todayISO())
+  const ytd = dividends.filter(d => yearOf(d.payment_date) === currentYear)
   const ytdCZK = ytd.reduce((s, d) => s + toCZK(d.gross_amount, d.currency, fx), 0)
 
   return (
@@ -30,7 +34,11 @@ export default function ReceivedPage() {
             <h1 style={{ fontFamily: "'Instrument Serif', serif", fontSize: 26, fontWeight: 400, letterSpacing: -0.5 }}>
               Dividends received
             </h1>
-            <div style={{ fontSize: 11, color: 'var(--text3)', marginTop: 3 }}>{dividends.length} payments logged</div>
+            <div style={{ fontSize: 11, color: 'var(--text3)', marginTop: 3 }}>
+              {dividends.length} payments logged · converted at
+              {fxLive ? <span style={{ color: 'var(--green)' }}> live rates{fxTs ? ` (${fxTs})` : ''}</span>
+                      : <span style={{ color: 'var(--amber)' }}> fallback rates</span>}
+            </div>
           </div>
           <button onClick={() => setShowModal(true)} style={{
             padding: '7px 16px', borderRadius: 6, cursor: 'pointer',
@@ -80,12 +88,15 @@ export default function ReceivedPage() {
                   onMouseLeave={e => (e.currentTarget.style.background = '')}
                 >
                   <td style={{ padding: '9px 13px', borderBottom: '1px solid var(--border)', fontWeight: 500 }}>{d.symbol}</td>
-                  <td style={{ padding: '9px 13px', borderBottom: '1px solid var(--border)', color: 'var(--text2)' }}>{fmtDate(d.payment_date)}</td>
-                  <td style={tdR}>{d.shares_held}</td>
-                  <td style={tdR}>{d.amount_per_share}</td>
+                  <td style={{ padding: '9px 13px', borderBottom: '1px solid var(--border)', color: 'var(--text2)' }}>{fmtISODate(d.payment_date)}</td>
+                  <td style={tdR}>{d.shares_held.toLocaleString(undefined, { maximumFractionDigits: 4 })}</td>
+                  <td style={tdR}>{d.amount_per_share.toLocaleString(undefined, { maximumFractionDigits: 4 })}</td>
                   <td style={{ ...tdR, color: 'var(--green)', fontFamily: "'DM Mono', monospace" }}>+{fmtCZK(toCZK(d.gross_amount, d.currency, fx), 2)}</td>
-                  <td style={{ ...tdR, color: 'var(--red)', fontFamily: "'DM Mono', monospace" }}>−{fmtCZK(toCZK(d.withholding_tax, d.currency, fx), 2)}</td>
-                  <td style={{ ...tdR, fontWeight: 500, fontFamily: "'DM Mono', monospace" }}>{fmtCZK(toCZK(d.net_amount, d.currency, fx), 2)}</td>
+                  <td style={{ ...tdR, color: 'var(--red)', fontFamily: "'DM Mono', monospace" }}>−{fmtCZK(toCZK(d.withholding_tax ?? 0, d.currency, fx), 2)}</td>
+                  <td style={{ ...tdR, fontWeight: 500, fontFamily: "'DM Mono', monospace" }}>
+                    {/* net_amount is a generated column; fall back to the arithmetic if it is absent */}
+                    {fmtCZK(toCZK(d.net_amount ?? (d.gross_amount - (d.withholding_tax ?? 0)), d.currency, fx), 2)}
+                  </td>
                   <td style={tdR}>
                     {d.drip_shares_added ? (
                       <Badge variant="green">+{d.drip_shares_added.toFixed(4)} sh</Badge>

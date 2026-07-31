@@ -28,11 +28,15 @@ export async function loadProfiles(): Promise<Profile[]> {
   if (inFlight) return inFlight
   inFlight = Promise.resolve(
     supabase.from('profiles').select('*').order('created_at')
-  ).then(({ data }) => {
-    profilesCache = (data ?? []) as Profile[]
-    inFlight = null
-    return profilesCache
-  })
+  ).then(({ data, error }) => {
+    if (error) console.error('[profiles] load failed:', error.message)
+    const list = (data ?? []) as Profile[]
+    // Never cache a failed or empty result — doing so pins the app in a
+    // profile-less state for the rest of the session, with no way to recover
+    // short of a reload.
+    if (list.length > 0) profilesCache = list
+    return list
+  }).finally(() => { inFlight = null })
   return inFlight
 }
 

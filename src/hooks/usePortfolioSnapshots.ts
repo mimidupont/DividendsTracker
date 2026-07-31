@@ -1,6 +1,7 @@
 'use client'
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import { getStoredProfileId } from '@/lib/profile'
+import { todayISO, addDays, fmtISODate } from '@/lib/date'
 
 export interface PortfolioSnapshot {
   snapshot_date: string
@@ -19,26 +20,32 @@ interface PLSummary {
   fromValue: number | null
 }
 
-// Cache for this session
-let cachedSnapshots: PortfolioSnapshot[] | null = null
-let cachedProfileId: string | null = null
+const EMPTY_SUMMARY: PLSummary = { pl: 0, plPct: null, label: '', fromDate: null, fromValue: null }
+
+// Cache for this session, keyed by profile
+const cacheByProfile: Record<string, PortfolioSnapshot[]> = {}
 
 export function usePortfolioSnapshots() {
-  const [snapshots, setSnapshots]   = useState<PortfolioSnapshot[]>(cachedSnapshots ?? [])
-  const [loading, setLoading]       = useState(false)
-  const [lastSaved, setLastSaved]   = useState<string | null>(null)
+  const [snapshots, setSnapshots] = useState<PortfolioSnapshot[]>([])
+  const [loading, setLoading]     = useState(false)
+  // Which profile+date pairs this session has already written, so repeated
+  // renders can't fire the same upsert several times over.
+  const savedRef = useRef<Set<string>>(new Set())
+  const savingRef = useRef(false)
 
   const load = useCallback(async () => {
     const profileId = getStoredProfileId()
     if (!profileId) return
     setLoading(true)
     try {
-      const res = await fetch(`/api/snapshots?profileId=${profileId}&days=400`)
+      const res = await fetch(`/api/snapshots?profileId=${encodeURIComponent(profileId)}&days=400`)
       if (!res.ok) return
       const { snapshots: data } = await res.json()
-      cachedSnapshots = data
-      cachedProfileId = profileId
-      setSnapshots(data ?? [])
+      const list: PortfolioSnapshot[] = Array.isArray(data) ? data : []
+      // Sort defensively — every consumer below assumes ascending dates.
+      list.sort((a, b) => a.snapshot_date.localeCompare(b.snapshot_date))
+      cacheByProfile[profileId] = list
+      setSnapshots(list)
     } finally {
       setLoading(false)
     }
@@ -46,11 +53,17 @@ export function usePortfolioSnapshots() {
 
   useEffect(() => {
     const profileId = getStoredProfileId()
-    if (cachedSnapshots && cachedProfileId === profileId) {
-      setSnapshots(cachedSnapshots)
+    if (profileId && cacheByProfile[profileId]) {
+      setSnapshots(cacheByProfile[profileId])
     } else {
       load()
     }
+
+    // Switching profile must swap the history too, not keep showing the
+    // previous profile's curve.
+    const onProfileChange = () => { setSnapshots([]); load() }
+    window.addEventListener('divvy:profile-change', onProfileChange)
+    return () => window.removeEventListener('divvy:profile-change', onProfileChange)
   }, [load])
 
   const saveSnapshot = useCallback(async (payload: {
@@ -64,26 +77,29 @@ export function usePortfolioSnapshots() {
   }) => {
     const profileId = getStoredProfileId()
     if (!profileId) return
+    if (!Number.isFinite(payload.total_value_czk) || payload.total_value_czk <= 0) return
 
-    const today = new Date().toISOString().slice(0, 10)
-    // Don't re-save if already saved today
-    if (lastSaved === today) return
+    const date = todayISO()
+    const key = `${profileId}::${date}`
+    if (savedRef.current.has(key) || savingRef.current) return
+    savingRef.current = true
 
     try {
       const res = await fetch('/api/snapshots', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ profileId, ...payload }),
+        body: JSON.stringify({ profileId, snapshotDate: date, ...payload }),
       })
       if (res.ok) {
-        setLastSaved(today)
-        // Reload to include today's snapshot
+        savedRef.current.add(key)
         await load()
       }
     } catch {
       // Silently fail — snapshots are best-effort
+    } finally {
+      savingRef.current = false
     }
-  }, [lastSaved, load])
+  }, [load])
 
   // ── Derived P&L summaries ──────────────────────────────────────────────────
 
@@ -91,36 +107,37 @@ export function usePortfolioSnapshots() {
     currentValue: number,
     daysAgo: number | 'ytd'
   ): PLSummary => {
-    if (snapshots.length === 0) {
-      return { pl: 0, plPct: null, label: '', fromDate: null, fromValue: null }
-    }
+    if (snapshots.length === 0) return EMPTY_SUMMARY
 
-    const today = new Date()
-    let targetDate: string
+    const today = todayISO()
+    const targetDate = daysAgo === 'ytd'
+      ? `${today.slice(0, 4)}-01-01`
+      : addDays(today, -daysAgo)
 
-    if (daysAgo === 'ytd') {
-      targetDate = `${today.getFullYear()}-01-01`
-    } else {
-      const d = new Date(today)
-      d.setDate(d.getDate() - daysAgo)
-      targetDate = d.toISOString().slice(0, 10)
-    }
-
-    // Find the closest snapshot on or before targetDate
+    // Baseline = the newest snapshot at or before the target date. Today's own
+    // snapshot is never a valid baseline for a look-back window.
     const candidates = snapshots.filter(s => s.snapshot_date <= targetDate)
-    if (candidates.length === 0) {
-      // No data that far back — use oldest available
-      const oldest = snapshots[0]
-      const pl = currentValue - oldest.total_value_czk
-      const plPct = oldest.total_value_czk > 0 ? (pl / oldest.total_value_czk) * 100 : null
-      return { pl, plPct, label: `since ${oldest.snapshot_date}`, fromDate: oldest.snapshot_date, fromValue: oldest.total_value_czk }
-    }
+    const baseline = candidates.length > 0
+      ? candidates[candidates.length - 1]
+      : snapshots[0]
 
-    const closest = candidates[candidates.length - 1]
-    const pl = currentValue - closest.total_value_czk
-    const plPct = closest.total_value_czk > 0 ? (pl / closest.total_value_czk) * 100 : null
-    const label = daysAgo === 'ytd' ? 'YTD' : `${daysAgo}d`
-    return { pl, plPct, label, fromDate: closest.snapshot_date, fromValue: closest.total_value_czk }
+    // Only one data point, and it is today: there is no history to compare to
+    // yet, so report "no data" rather than a fabricated 0%.
+    if (candidates.length === 0 && baseline.snapshot_date >= today) return EMPTY_SUMMARY
+
+    const pl = currentValue - baseline.total_value_czk
+    const plPct = baseline.total_value_czk > 0 ? (pl / baseline.total_value_czk) * 100 : null
+    const label = candidates.length === 0
+      ? `since ${fmtISODate(baseline.snapshot_date)}`
+      : daysAgo === 'ytd' ? 'YTD' : `${daysAgo}d`
+
+    return {
+      pl,
+      plPct,
+      label,
+      fromDate: baseline.snapshot_date,
+      fromValue: baseline.total_value_czk,
+    }
   }, [snapshots])
 
   return { snapshots, loading, saveSnapshot, getPLSummary }

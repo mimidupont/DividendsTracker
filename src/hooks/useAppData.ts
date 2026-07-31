@@ -7,7 +7,7 @@
  * invalidated and data is re-fetched automatically.
  */
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { supabase, Holding, DividendProjection, DividendReceived, BankAccount, CryptoHolding, RealEstate } from '@/lib/supabase'
+import { supabase, supabaseConfigError, Holding, DividendProjection, DividendReceived, BankAccount, CryptoHolding, RealEstate } from '@/lib/supabase'
 import { getStoredProfileId } from '@/lib/profile'
 
 const CACHE_TTL = 5 * 60 * 1000
@@ -21,11 +21,15 @@ interface AppData {
   realEstate: RealEstate[]
   cachedAt: number
   profileId: string | null
+  /** Non-null when one or more queries failed — totals would be understated. */
+  error: string | null
 }
 
 // Cache is keyed by profile ID so switching profiles gets fresh data
 const cacheByProfile: Record<string, AppData> = {}
-let inFlight: Promise<AppData> | null = null
+// In-flight requests are keyed too: a shared promise handed to a second profile
+// would have resolved with the first profile's rows.
+const inFlightByProfile: Record<string, Promise<AppData>> = {}
 const subscribers = new Set<(d: AppData) => void>()
 
 function notify(d: AppData) {
@@ -35,19 +39,31 @@ function notify(d: AppData) {
 function isCacheValid(profileId: string | null): boolean {
   if (!profileId) return false
   const c = cacheByProfile[profileId]
-  return !!c && Date.now() - c.cachedAt < CACHE_TTL
+  return !!c && !c.error && Date.now() - c.cachedAt < CACHE_TTL
 }
 
 async function fetchAll(profileId: string): Promise<AppData> {
-  const CURRENT_YEAR = new Date().getFullYear()
+  if (supabaseConfigError) {
+    return { ...EMPTY, cachedAt: Date.now(), profileId, error: supabaseConfigError }
+  }
   const [h, p, div, b, c, r] = await Promise.all([
     supabase.from('holdings').select('*').eq('profile_id', profileId).order('symbol'),
-    supabase.from('dividend_projections').select('*').eq('profile_id', profileId).eq('year', CURRENT_YEAR + 1).order('projected_total', { ascending: false }),
+    // Every year is fetched — the projections page shows a multi-year table and
+    // income estimates need whichever year is currently relevant, not a single
+    // hardcoded one.
+    supabase.from('dividend_projections').select('*').eq('profile_id', profileId).order('year').order('projected_total', { ascending: false }),
     supabase.from('dividends_received').select('*').eq('profile_id', profileId).order('payment_date', { ascending: false }),
     supabase.from('bank_accounts').select('*').eq('profile_id', profileId).eq('is_active', true).order('balance', { ascending: false }),
     supabase.from('crypto_holdings').select('*').eq('profile_id', profileId).order('avg_cost_usd', { ascending: false }),
     supabase.from('real_estate').select('*').eq('profile_id', profileId).order('current_value', { ascending: false }),
   ])
+
+  // A failed query used to be indistinguishable from "you own nothing", which
+  // quietly wiped an asset class out of net worth. Surface it instead.
+  const failures = [h, p, div, b, c, r]
+    .map(res => res.error?.message)
+    .filter((m): m is string => !!m)
+
   return {
     holdings:          h.data   ?? [],
     projections:       p.data   ?? [],
@@ -57,22 +73,25 @@ async function fetchAll(profileId: string): Promise<AppData> {
     realEstate:        r.data   ?? [],
     cachedAt:          Date.now(),
     profileId,
+    error:             failures.length ? failures.join(' · ') : null,
   }
 }
 
 async function getOrFetch(profileId: string, force = false): Promise<AppData> {
   if (!force && isCacheValid(profileId)) return cacheByProfile[profileId]
-  if (inFlight) return inFlight
-  inFlight = fetchAll(profileId).then(data => {
-    cacheByProfile[profileId] = data
-    inFlight = null
-    notify(data)
-    return data
-  }).catch(err => {
-    inFlight = null
-    throw err
-  })
-  return inFlight
+  const existing = inFlightByProfile[profileId]
+  if (existing) return existing
+
+  const request = fetchAll(profileId)
+    .then(data => {
+      cacheByProfile[profileId] = data
+      notify(data)
+      return data
+    })
+    .finally(() => { delete inFlightByProfile[profileId] })
+
+  inFlightByProfile[profileId] = request
+  return request
 }
 
 // ─── Hook ─────────────────────────────────────────────────────────────────────
@@ -85,23 +104,26 @@ interface UseAppData extends AppData {
 const EMPTY: AppData = {
   holdings: [], projections: [], dividendsReceived: [],
   bankAccounts: [], cryptoHoldings: [], realEstate: [],
-  cachedAt: 0, profileId: null,
+  cachedAt: 0, profileId: null, error: null,
 }
 
 export function useAppData(): UseAppData {
-  const profileId = getStoredProfileId()
-  const [data, setData]       = useState<AppData>(() => (profileId && cacheByProfile[profileId]) ? cacheByProfile[profileId] : EMPTY)
-  const [loading, setLoading] = useState(!profileId || !isCacheValid(profileId))
-  const activeProfileRef      = useRef(profileId)
+  // Deliberately not seeded from localStorage: the server renders with no
+  // profile, so reading one during the first client render desynchronises
+  // hydration. The effect below fills it in immediately after mount.
+  const [data, setData]       = useState<AppData>(EMPTY)
+  const [loading, setLoading] = useState(true)
+  const activeProfileRef      = useRef<string | null>(null)
 
-  // Re-fetch when profile changes
   const loadForProfile = useCallback(async (pid: string, force = false) => {
     setLoading(true)
     try {
       const d = await getOrFetch(pid, force)
-      setData({ ...d })
+      // A slow response for a profile the user has since switched away from
+      // must not overwrite the current one.
+      if (activeProfileRef.current === pid) setData({ ...d })
     } finally {
-      setLoading(false)
+      if (activeProfileRef.current === pid) setLoading(false)
     }
   }, [])
 
@@ -131,6 +153,7 @@ export function useAppData(): UseAppData {
     // Listen for profile switches
     const onProfileChange = (e: Event) => {
       const newPid = (e as CustomEvent<string>).detail
+      if (!newPid) return
       activeProfileRef.current = newPid
       loadForProfile(newPid, true)
     }
@@ -143,8 +166,9 @@ export function useAppData(): UseAppData {
   }, [loadForProfile])
 
   const reload = useCallback(async () => {
-    const pid = activeProfileRef.current
+    const pid = activeProfileRef.current ?? getStoredProfileId()
     if (!pid) return
+    activeProfileRef.current = pid
     await loadForProfile(pid, true)
   }, [loadForProfile])
 

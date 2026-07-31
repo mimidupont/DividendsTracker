@@ -1,9 +1,18 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+
+// Checked per request rather than thrown at import time, which would fail the
+// build (module scope is evaluated without the runtime environment).
+const configError = supabaseUrl && supabaseAnonKey
+  ? null
+  : 'Supabase is not configured on the server — set NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY.'
+
 const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  supabaseUrl ?? 'http://localhost:54321',
+  supabaseAnonKey ?? 'missing-anon-key'
 )
 
 export interface PortfolioSnapshot {
@@ -15,11 +24,20 @@ export interface PortfolioSnapshot {
   realestate_czk: number
 }
 
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
+
 // GET /api/snapshots?profileId=xxx&days=365
 export async function GET(req: NextRequest) {
+  if (configError) return NextResponse.json({ error: configError }, { status: 500 })
   const { searchParams } = new URL(req.url)
   const profileId = searchParams.get('profileId')
-  const days      = parseInt(searchParams.get('days') ?? '365', 10)
+
+  // A non-numeric ?days= used to produce NaN and then an "Invalid Date",
+  // which Postgres rejected — the chart just silently stayed empty.
+  const parsedDays = Number.parseInt(searchParams.get('days') ?? '365', 10)
+  const days = Number.isFinite(parsedDays)
+    ? Math.min(Math.max(parsedDays, 1), 3650)
+    : 365
 
   if (!profileId) {
     return NextResponse.json({ error: 'profileId required' }, { status: 400 })
@@ -44,34 +62,55 @@ export async function GET(req: NextRequest) {
 }
 
 // POST /api/snapshots
-// Body: { profileId, total_value_czk, stocks_czk, cash_czk, crypto_czk, realestate_czk, fx_usd, fx_eur }
+// Body: { profileId, snapshotDate?, total_value_czk, stocks_czk, cash_czk,
+//         crypto_czk, realestate_czk, fx_usd, fx_eur }
 export async function POST(req: NextRequest) {
+  if (configError) return NextResponse.json({ error: configError }, { status: 500 })
   const body = await req.json()
-  const { profileId, total_value_czk, stocks_czk, cash_czk, crypto_czk, realestate_czk, fx_usd, fx_eur } = body
+  const {
+    profileId, snapshotDate,
+    total_value_czk, stocks_czk, cash_czk, crypto_czk, realestate_czk,
+    fx_usd, fx_eur,
+  } = body
 
   if (!profileId || total_value_czk == null) {
     return NextResponse.json({ error: 'profileId and total_value_czk required' }, { status: 400 })
   }
 
-  const today = new Date().toISOString().slice(0, 10)
+  const num = (v: unknown): number => {
+    const n = Number(v)
+    return Number.isFinite(n) ? n : 0
+  }
+
+  if (!Number.isFinite(Number(total_value_czk))) {
+    return NextResponse.json({ error: 'total_value_czk must be a number' }, { status: 400 })
+  }
+
+  // The client sends its own calendar date: the snapshot belongs to the user's
+  // day, not the server's UTC day (they differ for several hours every night).
+  const date = typeof snapshotDate === 'string' && ISO_DATE.test(snapshotDate)
+    ? snapshotDate
+    : new Date().toISOString().slice(0, 10)
 
   const { error } = await supabase
     .from('portfolio_snapshots')
     .upsert({
       profile_id: profileId,
-      snapshot_date: today,
-      total_value_czk,
-      stocks_czk:    stocks_czk    ?? 0,
-      cash_czk:      cash_czk      ?? 0,
-      crypto_czk:    crypto_czk    ?? 0,
-      realestate_czk: realestate_czk ?? 0,
-      fx_usd:        fx_usd        ?? 23.50,
-      fx_eur:        fx_eur        ?? 25.60,
+      snapshot_date: date,
+      total_value_czk: num(total_value_czk),
+      stocks_czk:     num(stocks_czk),
+      cash_czk:       num(cash_czk),
+      crypto_czk:     num(crypto_czk),
+      realestate_czk: num(realestate_czk),
+      // Recorded for auditing what rates a historical value was struck at.
+      // Null beats inventing a rate the snapshot was not actually computed with.
+      fx_usd: Number.isFinite(Number(fx_usd)) ? Number(fx_usd) : null,
+      fx_eur: Number.isFinite(Number(fx_eur)) ? Number(fx_eur) : null,
     }, { onConflict: 'profile_id,snapshot_date' })
 
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 })
   }
 
-  return NextResponse.json({ ok: true, date: today })
+  return NextResponse.json({ ok: true, date })
 }

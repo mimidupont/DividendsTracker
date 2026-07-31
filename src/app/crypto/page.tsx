@@ -1,5 +1,5 @@
 'use client'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { supabase, CryptoHolding } from '@/lib/supabase'
 import { useAppData } from '@/hooks/useAppData'
 import { useProfile } from '@/lib/profile'
@@ -27,9 +27,12 @@ export default function CryptoPage() {
   const [form, setForm]       = useState(emptyForm)
   const [saving, setSaving]   = useState(false)
 
-  if (crypto.length > 0 && prices.state === 'idle') {
-    prices.refresh(crypto.map(c => c.coin_id))
-  }
+  // Fetch from an effect, not during render
+  const coinKey = crypto.map(c => c.coin_id).join(',')
+  useEffect(() => {
+    if (coinKey) prices.refresh(coinKey.split(','))
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [coinKey])
 
   const totalValueCZK = crypto.reduce((s, c) =>
     s + toCZK(prices.getPrice(c.coin_id, c.avg_cost_usd) * c.amount, 'USD', fx), 0)
@@ -98,15 +101,26 @@ export default function CryptoPage() {
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
             <button onClick={refreshFx} style={btnSecondary}>{fxLoading ? '⟳' : '↻'} FX {fxTs && <span style={{ color: 'var(--green)', marginLeft: 4 }}>{fxTs}</span>}</button>
-            <button onClick={() => prices.refresh(crypto.map(c => c.coin_id))} disabled={prices.state === 'loading'} style={btnSecondary}>
+            <button onClick={() => prices.refresh(crypto.map(c => c.coin_id), true)} disabled={prices.state === 'loading'} style={btnSecondary}>
               {prices.state === 'loading' ? '⟳ Fetching…' : '↻ Prices'}
-              {prices.state === 'done' && <span style={{ color: 'var(--purple)', marginLeft: 6 }}>✓</span>}
+              {prices.state === 'done'  && <span style={{ color: 'var(--purple)', marginLeft: 6 }}>✓</span>}
+              {prices.state === 'error' && <span style={{ color: 'var(--red)', marginLeft: 6 }}>⚠</span>}
             </button>
             <button onClick={() => { resetForm(); setShowAdd(true) }} style={btnPrimary('var(--purple)', 'var(--purple-bd)', 'var(--purple-bg)')}>
               + Add holding
             </button>
           </div>
         </div>
+
+        {prices.state === 'error' && (
+          <div style={{
+            background: 'var(--amber-bg)', border: '1px solid var(--amber-bd)',
+            color: 'var(--amber)', borderRadius: 8, padding: '9px 14px',
+            marginBottom: 14, fontSize: 11,
+          }}>
+            ⚠ Live crypto prices unavailable — holdings are valued at cost. {prices.errorMsg}
+          </div>
+        )}
 
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 20 }}>
           {[
@@ -157,6 +171,9 @@ export default function CryptoPage() {
                     <td style={tdR}>
                       <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 12 }}>
                         {prices.state === 'loading' ? '…' : `$${price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+                        {prices.state !== 'loading' && !prices.hasPrice(c.coin_id) && (
+                          <span style={{ fontSize: 9, color: 'var(--text4)', marginLeft: 3 }} title="No live price for this CoinGecko id — showing average cost">at cost</span>
+                        )}
                       </div>
                       {chgPct !== null && (
                         <div style={{ fontSize: 10, color: chgPct >= 0 ? 'var(--green)' : 'var(--red)' }}>

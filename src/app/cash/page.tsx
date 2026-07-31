@@ -45,14 +45,21 @@ export default function CashPage() {
   const { fx, fxLoading, fxTs, refresh: refreshFx } = useFx()
 
   useEffect(() => {
+    if (!activeProfile) return
+    // Scoped to the active profile — without the filter this listed every
+    // profile's interest payments under this profile's accounts.
     supabase.from('bank_interest_received')
-      .select('*').order('payment_date', { ascending: false }).limit(20)
-      .then(({ data }) => { if (data) setInterest(data) })
-  }, [accounts])
+      .select('*')
+      .eq('profile_id', activeProfile.id)
+      .order('payment_date', { ascending: false }).limit(20)
+      .then(({ data }) => { setInterest(data ?? []) })
+  }, [accounts, activeProfile])
 
   const totalCZK           = accounts.reduce((s, a) => s + toCZK(a.balance, a.currency, fx), 0)
   const annualInterestCZK  = accounts.reduce((s, a) => s + toCZK(a.balance * a.interest_rate, a.currency, fx), 0)
-  const avgRate            = accounts.length > 0 ? accounts.reduce((s, a) => s + a.interest_rate, 0) / accounts.length : 0
+  // Balance-weighted, not a plain mean: a 6% rate on Kč 5,000 does not move the
+  // portfolio's blended rate the same way as 6% on Kč 500,000.
+  const avgRate            = totalCZK > 0 ? annualInterestCZK / totalCZK : 0
 
   const resetForm = () => { setForm(emptyForm); setEditId(null) }
 
@@ -72,22 +79,27 @@ export default function CashPage() {
     if (!form.name || !form.institution || !form.balance) return
     if (!activeProfile) return
     setSaving(true)
+    const balance = parseFloat(form.balance)
+    if (!isFinite(balance)) { setSaving(false); alert('Balance must be a number.'); return }
+
+    const ratePct = parseFloat(form.interest_rate)
     const payload = {
       name: form.name,
       institution: form.institution,
       account_type: form.account_type,
-      balance: parseFloat(form.balance),
+      balance,
       currency: form.currency,
-      interest_rate: parseFloat(form.interest_rate) / 100 || 0,
+      // Stored as a decimal fraction (4.5% → 0.045)
+      interest_rate: isFinite(ratePct) ? ratePct / 100 : 0,
       notes: form.notes || null,
       updated_at: new Date().toISOString(),
     }
-    if (editId) {
-      await supabase.from('bank_accounts').update(payload).eq('id', editId)
-    } else {
-      await supabase.from('bank_accounts').insert([{ ...payload, profile_id: activeProfile.id }])
-    }
+    const { error: saveErr } = editId
+      ? await supabase.from('bank_accounts').update(payload).eq('id', editId)
+      : await supabase.from('bank_accounts').insert([{ ...payload, profile_id: activeProfile.id }])
+
     setSaving(false)
+    if (saveErr) { alert(`Could not save account: ${saveErr.message}`); return }
     setShowAdd(false)
     resetForm()
     reload()
@@ -119,7 +131,7 @@ export default function CashPage() {
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 20 }}>
           {[
             { label: 'Total cash',       value: fmtCZK(totalCZK),               accent: 'var(--blue)',  note: `${accounts.length} accounts` },
-            { label: 'Annual interest',  value: fmtCZK(annualInterestCZK),       accent: 'var(--amber)', note: `Avg rate ${(avgRate * 100).toFixed(2)}%` },
+            { label: 'Annual interest',  value: fmtCZK(annualInterestCZK),       accent: 'var(--amber)', note: `Blended rate ${(avgRate * 100).toFixed(2)}%` },
             { label: 'Monthly interest', value: fmtCZK(annualInterestCZK / 12, 0), accent: 'var(--green)', note: 'Est. passive income' },
           ].map((m, i) => (
             <div key={i} style={{ ...cardStyle, borderTop: `2px solid ${m.accent}` }}>
@@ -156,7 +168,7 @@ export default function CashPage() {
                     </td>
                     <td style={tdL}>
                       <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: typeColor + '18', color: typeColor, border: `1px solid ${typeColor}30` }}>
-                        {ACCOUNT_TYPE_LABELS[a.account_type]}
+                        {ACCOUNT_TYPE_LABELS[a.account_type] ?? a.account_type}
                       </span>
                     </td>
                     <td style={tdR}>

@@ -1,16 +1,18 @@
-# Divvy — Dividend Tracker (Redesigned)
+# Divvy — Wealth & Dividend Tracker
 
-Personal dividend portfolio tracker built with Next.js 14, Supabase, and TypeScript.
+Personal multi-asset portfolio tracker built with Next.js 14, Supabase, and TypeScript.
+Tracks stocks & ETFs, cash, crypto and real estate, and reports everything in **CZK**.
 
 ---
 
 ## Stack
 
 - **Frontend**: Next.js 14 (App Router) + TypeScript
-- **Styling**: Inline styles with CSS variables · Instrument Serif + DM Mono + Geist
+- **Styling**: Inline styles with CSS variables · Instrument Serif + DM Mono + Syne
 - **Database**: Supabase (PostgreSQL)
-- **AI features**: Claude API with web search (live yields, DRIP, ex-dates)
 - **Charts**: Recharts
+- **Prices & dividends**: StockAnalysis (primary) with Yahoo Finance fallback
+- **Crypto prices**: CoinGecko
 - **FX rates**: Frankfurter.app (free, no key needed)
 
 ---
@@ -19,13 +21,64 @@ Personal dividend portfolio tracker built with Next.js 14, Supabase, and TypeScr
 
 | Route | Description |
 |-------|-------------|
-| `/` | Dashboard — 5 metric cards, holdings table, dividend log |
-| `/holdings` | Full holdings table with live yields, edit, add lot, delete |
+| `/` | Net worth dashboard — asset mix, income streams, daily P&L chart |
+| `/performance` | Per-position P&L, total return incl. dividends, monthly income |
+| `/allocation` | Currency, sector and concentration (HHI) breakdown |
+| `/holdings` | Full holdings table with live prices, edit, add lot, DRIP |
 | `/received` | Dividend payments log with DRIP tracking |
 | `/projected` | Multi-year income projections by holding |
-| `/calendar` | Ex-dividend calendar — upcoming dates via AI search |
+| `/calendar` | Ex-dividend calendar for the next 90 days |
 | `/currency` | Currency exposure breakdown with visual bars |
-| `/tax` | Czech tax summary — gross/WHT/net for daňové přiznání |
+| `/cash` | Bank accounts and interest income |
+| `/crypto` | Crypto holdings, staking yield |
+| `/realestate` | Properties, mortgages, equity and rental yield |
+| `/fees` | Expense ratios, brokerage costs and long-run fee drag |
+
+---
+
+## How the numbers are computed
+
+Anyone relying on these figures should know what's measured and what's assumed.
+
+**Everything is converted to CZK** through `src/lib/fx.ts`. Rates come from
+Frankfurter (CZK per 1 unit of foreign currency), refreshed hourly. If the live
+fetch fails, the app falls back to the fixed rates in `DEFAULT_FX` **and says so**
+— pages show a "fallback rates" marker rather than presenting stale numbers as
+current. Currencies quoted in minor units (`GBp` pence, `ZAc`, `ILA`) are folded
+into their major unit before conversion. A currency with no known rate is left
+unconverted and flagged, never converted at some other currency's rate.
+
+**Position maths lives in one place** — `src/lib/portfolio.ts`. Market value uses
+the live price converted with *the currency the quote came back in* (which is not
+always the currency the position was booked in); cost basis uses the currency you
+recorded. If a symbol has no live quote, it is valued at average cost and marked
+"at cost".
+
+**Income** is the declared forward annual dividend rate × shares. When no live
+rate is available it falls back to your saved projection for the nearest
+upcoming year. Yield is then income ÷ market value, so the yield and the income
+figure can never disagree.
+
+**Total return** = unrealised P&L + dividends received **net of withholding tax**.
+Reinvested (DRIP) dividends raise the cost basis by the reinvested amount, so
+they are not double-counted.
+
+**Net worth** = stocks + cash + crypto + real-estate *equity*. Real estate applies
+your `ownership_pct` to the property value, purchase price, mortgage and rent
+alike. The "% on invested" figure excludes cash, which has no cost basis.
+
+**Snapshots** are written once per day, only after prices, crypto and live FX
+have all loaded — a snapshot taken mid-load would record assets still valued at
+cost. The P&L windows compare today's value against the newest snapshot on or
+before the window start; with no history yet they report "no data" rather than 0%.
+
+Assumptions you may want to change:
+- `WHT_RATE` in `src/components/DripCheckModal.tsx` — 15% withholding on dividends
+- `ASSUMED_WHT` in `src/app/projected/page.tsx` — 15% for the projected net figure
+- `ASSUMED_TURNOVER` and `IBKR_COMMISSION` in `src/app/fees/page.tsx`
+- `EXPENSE_RATIOS` in `src/app/fees/page.tsx` — tickers not listed count as 0% TER
+  and are flagged in the UI
+- `SECTORS` in `src/app/allocation/page.tsx` — unlisted tickers fall into "Other"
 
 ---
 
@@ -36,26 +89,29 @@ Click the pencil icon on any row in Holdings to edit shares, price, currency, ex
 
 ### + Add lot
 Click the + icon to add a new purchase lot to an existing holding.
-- Recalculates weighted average price automatically
-- Saves lot history to `holding_lots` table
+- Recalculates the weighted average price automatically
+- Saves lot history to `holding_lots`
 
 ### ⟳ Check dividends (DRIP)
-Clicks Claude + web search to find confirmed dividend payments for all your holdings.
-- Shows pending DRIP events with reinvestment details
-- "Apply DRIP" button: logs the dividend + adds fractional shares to your position
-- Uses net-of-WHT amount for reinvestment calculation
+Looks back 90 days for confirmed payments not yet logged.
+- "Apply DRIP" logs the dividend and adds the fractional shares to your position
+- Reinvestment is computed in CZK from the net-of-WHT amount, matching IBKR
+- Cost basis is raised by the reinvested amount, in the holding's own currency
+- Payments already in the log are skipped, so nothing is counted twice
 
 ### Ex-dividend calendar
-Uses Claude + web search to find upcoming ex-dividend dates for all dividend payers.
-Color-coded urgency: red = within 7 days, amber = within 21 days, green = later.
+Ex-dates and pay dates for the next 90 days. Pay dates that the provider does not
+supply are estimated as ex-date + 21 days and labelled `~est.`
 
-### Live dividend yields
-Holdings page fetches current yields via Claude + web search.
-Falls back to projected yield from the database if live fetch fails.
+### Market data
+StockAnalysis is tried first (structured dividend data, no session needed) with
+Yahoo Finance as fallback. Add new tickers to `SA_SYMBOL_MAP` in
+`src/lib/stockanalysis.ts`; anything not listed goes to Yahoo, with
+`YAHOO_SYMBOL_MAP` in `src/lib/yahoo.ts` for exchange suffixes (`SPYW` → `SPYW.DE`).
 
-### FX rates
-Click "↻ FX rates" on the dashboard to fetch live rates from frankfurter.app.
-Falls back to hardcoded defaults (USD 23.50, EUR 25.60) if unavailable.
+Both providers are scraped rather than accessed through a supported API, so
+expect occasional gaps. Every page shows the fetch state, and positions without a
+live quote fall back to cost rather than to zero.
 
 ---
 
@@ -65,7 +121,15 @@ Falls back to hardcoded defaults (USD 23.50, EUR 25.60) if unavailable.
 
 1. Create a new project at supabase.com
 2. SQL Editor → New query → paste `supabase-schema.sql` → Run
-3. Settings → API → copy Project URL and anon key
+3. Settings → API → copy the Project URL and anon key
+
+The schema creates one seed profile. Every table is scoped by `profile_id`, and
+the app needs at least one row in `profiles` — with none, all pages come up empty.
+
+> **Security**: the app uses the anon key with no login, and RLS is not enabled.
+> Anyone with that key (it ships in the browser bundle) can read and write your
+> data. That's fine for a private deployment; add Supabase Auth and RLS policies
+> before exposing it publicly. See the notes at the bottom of the schema file.
 
 ### 2. Environment variables
 
@@ -75,6 +139,9 @@ cp .env.local.example .env.local
 NEXT_PUBLIC_SUPABASE_URL=your-project-url
 NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-key
 ```
+
+If these are missing the app loads but every page shows a configuration error
+banner instead of failing with an opaque network error.
 
 ### 3. Vercel deploy
 
@@ -93,19 +160,21 @@ npm run dev
 
 ---
 
-## Updating prices
-
-Edit `src/lib/prices.ts` — the `PRICES` object maps ticker symbols to last-known prices in native currency.
-
-For live prices, connect a market data API (Yahoo Finance, Polygon.io) and replace `getPrice()` in `src/lib/prices.ts`.
-
----
-
 ## Database tables
 
 | Table | Purpose |
 |-------|---------|
+| `profiles` | Portfolio owners; everything else is scoped by `profile_id` |
 | `holdings` | Current positions with weighted avg price |
 | `holding_lots` | Individual purchase lots (for history) |
 | `dividends_received` | Logged dividend payments with DRIP tracking |
 | `dividend_projections` | Editable annual forecasts per ticker per year |
+| `bank_accounts` | Cash and savings accounts |
+| `bank_interest_received` | Logged interest payments |
+| `crypto_holdings` | Crypto positions keyed by CoinGecko id |
+| `real_estate` | Properties with mortgage and rental data |
+| `portfolio_snapshots` | Daily net worth history, drives the P&L chart |
+
+Rates and percentages are stored as **decimal fractions** (`interest_rate`,
+`staking_apy`, `mortgage_rate`, `projected_yield`, `growth_rate`): 4.5% is `0.045`.
+The one exception is `ownership_pct`, stored as 0–100.

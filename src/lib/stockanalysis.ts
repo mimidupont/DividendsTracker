@@ -16,6 +16,7 @@ const UA =
 export interface SAQuote {
   symbol: string
   price: number | null
+  /** Day change in PERCENT units (1.23 = +1.23%). */
   changePercent: number | null
   dividendYield: number | null          // decimal, e.g. 0.031
   annualDividend: number | null         // $ per year
@@ -80,12 +81,20 @@ export function isSASupported(symbol: string): boolean {
   return symbol.toUpperCase() in SA_SYMBOL_MAP
 }
 
-/** Normalise yield values to a 0–1 decimal fraction. SA uses percent strings. */
+/**
+ * Normalise a StockAnalysis yield to a 0–1 decimal fraction.
+ *
+ * SA quotes yields in percent, so "0.42" means 0.42% — the old `n > 1 ? n/100 : n`
+ * rule read that as 42% and inflated every low-yield holding 100×. Values are
+ * always divided by 100 here; anything that lands outside a plausible range is
+ * discarded rather than displayed.
+ */
 function parseYield(raw: unknown): number | null {
   if (raw === null || raw === undefined || raw === '-' || raw === 'N/A') return null
   const n = parseFloat(String(raw).replace('%', '').trim())
-  if (isNaN(n) || n === 0) return null
-  return n > 1 ? n / 100 : n
+  if (isNaN(n) || n <= 0) return null
+  const fraction = n / 100
+  return fraction < 1 ? fraction : null
 }
 
 function parseNum(raw: unknown): number | null {
@@ -100,7 +109,13 @@ function parseDate(raw: unknown): string | null {
   const s = String(raw).trim()
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s
   const d = new Date(s)
-  return isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10)
+  if (isNaN(d.getTime())) return null
+  // Read back the same calendar day the string named. `new Date("Jun 13, 2025")`
+  // is local midnight, so toISOString() would report the 12th on any host ahead
+  // of UTC.
+  const mm = String(d.getMonth() + 1).padStart(2, '0')
+  const dd = String(d.getDate()).padStart(2, '0')
+  return `${d.getFullYear()}-${mm}-${dd}`
 }
 
 /** Walk multiple possible containers and return the first defined value for key. */
@@ -166,11 +181,19 @@ export async function fetchSAQuote(symbol: string): Promise<SAQuote | null> {
     ].filter(Boolean)
 
     const price        = parseNum(pick([quoteObj, data], 'price') ?? pick([quoteObj, data], 'p'))
-    const changePercent = parseNum(
+    // SA exposes both an absolute day change and a percent one. Prefer deriving
+    // the percent from the absolute change — that is unambiguous, whereas the
+    // percent field's units vary between page types.
+    const absChange    = parseNum(pick([quoteObj, data], 'change') ?? pick([quoteObj, data], 'c'))
+    const rawChangePct = parseNum(
       pick([quoteObj, data], 'change1d') ??
       pick([quoteObj, data], 'changePercent') ??
       pick([quoteObj, data], 'changesPercentage')
     )
+    const changePercent =
+      price != null && absChange != null && price - absChange > 0
+        ? (absChange / (price - absChange)) * 100
+        : rawChangePct
     const dividendYield      = parseYield(pick(containers, 'dividendYield') ?? pick(containers, 'yield'))
     const annualDividend     = parseNum(pick(containers, 'annualDividend') ?? pick(containers, 'dividendRate') ?? pick(containers, 'forwardAnnualDividend'))
     const exDividendDate     = parseDate(pick(containers, 'exDividendDate') ?? pick(containers, 'exDate'))

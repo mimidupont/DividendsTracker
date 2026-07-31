@@ -73,12 +73,19 @@ export default function AddPositionModal({
     }
     if (!activeProfile) { setError('No active profile selected.'); return }
 
+    const shares = parseFloat(form.shares)
+    const price  = parseFloat(form.avg_price)
+    if (!isFinite(shares) || shares <= 0 || !isFinite(price) || price <= 0) {
+      setError('Shares and price must be positive numbers.')
+      return
+    }
+
     setSaving(true)
     const { error: err } = await supabase.from('holdings').insert([{
       symbol: form.symbol.toUpperCase().trim(),
       name: form.name.trim(),
-      shares: parseFloat(form.shares),
-      avg_price: parseFloat(form.avg_price),
+      shares,
+      avg_price: price,
       currency: form.currency,
       exchange: form.exchange.trim() || null,
       purchase_date: form.purchase_date || null,

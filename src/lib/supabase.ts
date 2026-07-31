@@ -1,9 +1,28 @@
 import { createClient } from '@supabase/supabase-js'
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey)
+/**
+ * Set when the environment is not configured. Constructing the client with
+ * `undefined` (as this file used to, via `!`) makes every query fail with an
+ * opaque fetch error that reads like a network blip; the UI surfaces this
+ * message instead. Not thrown at import time — that would break `next build`,
+ * which evaluates this module without the runtime environment.
+ */
+export const supabaseConfigError: string | null =
+  supabaseUrl && supabaseAnonKey
+    ? null
+    : 'Supabase is not configured — set NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY in .env.local (see README).'
+
+if (supabaseConfigError && typeof window !== 'undefined') {
+  console.error(`[supabase] ${supabaseConfigError}`)
+}
+
+export const supabase = createClient(
+  supabaseUrl ?? 'http://localhost:54321',
+  supabaseAnonKey ?? 'missing-anon-key'
+)
 
 export interface Holding {
   id: string

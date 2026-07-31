@@ -2,6 +2,7 @@
 import { useState } from 'react'
 import { supabase, Holding } from '@/lib/supabase'
 import { useProfile } from '@/lib/profile'
+import { todayISO } from '@/lib/date'
 import Modal from './Modal'
 import { Field, FormGrid, FormActions, ErrorBox, inputStyle } from './FormFields'
 
@@ -18,7 +19,7 @@ export default function AddLotModal({
   const [form, setForm] = useState({
     shares: '',
     purchase_price: '',
-    purchase_date: new Date().toISOString().slice(0, 10),
+    purchase_date: todayISO(),
     notes: '',
   })
   const [saving, setSaving] = useState(false)
@@ -54,7 +55,7 @@ export default function AddLotModal({
 
     if (updateErr) { setError(updateErr.message); setSaving(false); return }
 
-    await supabase.from('holding_lots').insert([{
+    const { error: lotErr } = await supabase.from('holding_lots').insert([{
       holding_id: holding.id,
       symbol: holding.symbol,
       shares: newShares,
@@ -65,6 +66,13 @@ export default function AddLotModal({
     }])
 
     setSaving(false)
+    if (lotErr) {
+      // The position itself is already updated and correct; only the lot
+      // history is missing, so say so instead of failing silently.
+      setError(`Position updated, but the lot history could not be saved: ${lotErr.message}`)
+      onSaved()
+      return
+    }
     onSaved(); onClose()
   }
 
@@ -93,10 +101,10 @@ export default function AddLotModal({
 
       <ErrorBox msg={error} />
       <FormGrid>
-        <Field label={`Shares to buy (${holding.currency})`}>
+        <Field label="Shares to buy">
           <input style={inputStyle} type="number" placeholder="10" value={form.shares} onChange={e => set('shares', e.target.value)} />
         </Field>
-        <Field label="Purchase price per share">
+        <Field label={`Purchase price per share (${holding.currency})`}>
           <input style={inputStyle} type="number" placeholder="74.50" value={form.purchase_price} onChange={e => set('purchase_price', e.target.value)} />
         </Field>
         <Field label="Purchase date">

@@ -26,16 +26,23 @@ export default function RealEstatePage() {
     mortgage_rate: '0', monthly_mortgage: '0', ownership_pct: '100', notes: '',
   })
 
-  const totalValueCZK    = properties.reduce((s, p) => s + toCZK(p.current_value    * (p.ownership_pct / 100), p.currency, fx), 0)
-  const totalPurchaseCZK = properties.reduce((s, p) => s + toCZK(p.purchase_price   * (p.ownership_pct / 100), p.currency, fx), 0)
-  const totalMortgageCZK = properties.reduce((s, p) => s + toCZK(p.mortgage_balance, p.currency, fx), 0)
+  // Every figure below is the user's *share*. Applying ownership_pct to the
+  // asset but not to the mortgage (as before) counted the whole loan against a
+  // part-owned property and understated equity.
+  const share = (p: RealEstate) => (isFinite(p.ownership_pct) ? p.ownership_pct : 100) / 100
+
+  const totalValueCZK    = properties.reduce((s, p) => s + toCZK(p.current_value    * share(p), p.currency, fx), 0)
+  const totalPurchaseCZK = properties.reduce((s, p) => s + toCZK(p.purchase_price   * share(p), p.currency, fx), 0)
+  const totalMortgageCZK = properties.reduce((s, p) => s + toCZK(p.mortgage_balance * share(p), p.currency, fx), 0)
   const totalEquityCZK   = totalValueCZK - totalMortgageCZK
-  const totalRentalCZK   = properties.reduce((s, p) => s + toCZK(p.monthly_rent * 12 * (p.ownership_pct / 100), p.currency, fx), 0)
+  const totalRentalCZK   = properties.reduce((s, p) => s + toCZK(p.monthly_rent * 12 * share(p), p.currency, fx), 0)
+  const totalGainCZK     = totalValueCZK - totalPurchaseCZK
 
   const saveProperty = async () => {
     if (!form.name || !form.purchase_price || !form.current_value) return
     if (!activeProfile) return
     setSaving(true)
+    const ownership = parseFloat(form.ownership_pct)
     const payload = {
       name: form.name, property_type: form.property_type,
       address: form.address || null,
@@ -47,16 +54,17 @@ export default function RealEstatePage() {
       mortgage_balance: parseFloat(form.mortgage_balance) || 0,
       mortgage_rate: parseFloat(form.mortgage_rate) / 100 || 0,
       monthly_mortgage: parseFloat(form.monthly_mortgage) || 0,
-      ownership_pct: parseFloat(form.ownership_pct) || 100,
+      // Clamped: an ownership share outside 0–100% silently distorts net worth
+      ownership_pct: isFinite(ownership) ? Math.min(Math.max(ownership, 0), 100) : 100,
       notes: form.notes || null,
       updated_at: new Date().toISOString(),
     }
-    if (editId) {
-      await supabase.from('real_estate').update(payload).eq('id', editId)
-    } else {
-      await supabase.from('real_estate').insert([{ ...payload, profile_id: activeProfile.id }])
-    }
+    const { error: saveErr } = editId
+      ? await supabase.from('real_estate').update(payload).eq('id', editId)
+      : await supabase.from('real_estate').insert([{ ...payload, profile_id: activeProfile.id }])
+
     setSaving(false)
+    if (saveErr) { alert(`Could not save property: ${saveErr.message}`); return }
     setShowAdd(false)
     setEditId(null)
     resetForm()
@@ -108,8 +116,8 @@ export default function RealEstatePage() {
 
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 20 }}>
           {[
-            { label: 'Market value',         value: fmtCZK(totalValueCZK),   accent: 'var(--teal)',  note: `${properties.length} properties` },
-            { label: 'Net equity',            value: fmtCZK(totalEquityCZK),  accent: 'var(--green)', note: `${totalValueCZK > 0 ? ((totalEquityCZK / totalValueCZK) * 100).toFixed(0) : 0}% of value` },
+            { label: 'Market value',         value: fmtCZK(totalValueCZK),   accent: 'var(--teal)',  note: `${properties.length} properties · your share` },
+            { label: 'Net equity',            value: fmtCZK(totalEquityCZK),  accent: 'var(--green)', note: `${totalValueCZK > 0 ? ((totalEquityCZK / totalValueCZK) * 100).toFixed(0) : 0}% of value · ${totalGainCZK >= 0 ? '+' : ''}${fmtCZK(totalGainCZK)} gain` },
             { label: 'Mortgage debt',         value: fmtCZK(totalMortgageCZK), accent: 'var(--red)',  note: 'Outstanding balance' },
             { label: 'Annual rental income',  value: totalRentalCZK > 0 ? fmtCZK(totalRentalCZK) : '—', accent: 'var(--amber)', note: `${properties.filter(p => p.monthly_rent > 0).length} rentals` },
           ].map((m, i) => (
@@ -123,15 +131,18 @@ export default function RealEstatePage() {
 
         <div style={{ display: 'grid', gap: 14, marginBottom: 16 }}>
           {properties.map(p => {
-            const valueCZK      = toCZK(p.current_value    * (p.ownership_pct / 100), p.currency, fx)
-            const purchaseCZK   = toCZK(p.purchase_price   * (p.ownership_pct / 100), p.currency, fx)
-            const mortgageCZK   = toCZK(p.mortgage_balance, p.currency, fx)
+            const pShare        = share(p)
+            const valueCZK      = toCZK(p.current_value    * pShare, p.currency, fx)
+            const purchaseCZK   = toCZK(p.purchase_price   * pShare, p.currency, fx)
+            const mortgageCZK   = toCZK(p.mortgage_balance * pShare, p.currency, fx)
             const equityCZK     = valueCZK - mortgageCZK
             const gainCZK       = valueCZK - purchaseCZK
             const gainPct       = purchaseCZK > 0 ? (gainCZK / purchaseCZK) * 100 : 0
-            const monthlyRentCZK = toCZK(p.monthly_rent, p.currency, fx)
+            const monthlyRentCZK = toCZK(p.monthly_rent * pShare, p.currency, fx)
             const ltvPct        = valueCZK > 0 ? (mortgageCZK / valueCZK) * 100 : 0
-            const yieldPct      = valueCZK > 0 ? (p.monthly_rent * 12 / p.current_value) * 100 : 0
+            // Gross rental yield on the property's own value — a property-level
+            // ratio, so the ownership share cancels out of both sides.
+            const yieldPct      = p.current_value > 0 ? (p.monthly_rent * 12 / p.current_value) * 100 : 0
             const typeColor     = TYPE_COLORS[p.property_type] ?? 'var(--teal)'
             return (
               <div key={p.id} style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 14, padding: '22px 26px' }}>

@@ -2,6 +2,7 @@
 import { useState } from 'react'
 import { supabase } from '@/lib/supabase'
 import { useProfile } from '@/lib/profile'
+import { todayISO } from '@/lib/date'
 import Modal from './Modal'
 import { Field, FormGrid, FormActions, ErrorBox, inputStyle } from './FormFields'
 
@@ -17,7 +18,8 @@ export default function LogDividendModal({
   const { activeProfile } = useProfile()
   const [form, setForm] = useState({
     symbol: prefillSymbol ?? '',
-    payment_date: new Date().toISOString().slice(0, 10),
+    // Local calendar date: toISOString() is UTC and rolls over early evening
+    payment_date: todayISO(),
     ex_date: '',
     amount_per_share: '',
     shares_held: '',

@@ -17,6 +17,7 @@ interface MarketCache {
 
 let cache: MarketCache | null = null
 let inFlight: Promise<MarketDataResponse> | null = null
+let inFlightSymbols: Set<string> | null = null
 // Subscribers so all mounted hook instances re-render when cache updates
 const subscribers = new Set<() => void>()
 
@@ -32,23 +33,31 @@ function isCacheValid(symbols: string[]): boolean {
 }
 
 async function fetchMarketData(symbols: string[]): Promise<void> {
-  // Deduplicate with any in-flight request
-  if (inFlight) {
+  // Deduplicate with an in-flight request, but only when it already covers
+  // every symbol we need — otherwise a page asking for extra tickers would
+  // silently get the other page's narrower result.
+  if (inFlight && inFlightSymbols && symbols.every(s => inFlightSymbols!.has(s))) {
     await inFlight
     return
   }
+  // Serialise behind any request already running so the two responses cannot
+  // interleave and clobber each other's cache write.
+  const previous = inFlight?.catch(() => undefined) ?? Promise.resolve()
 
-  inFlight = fetch('/api/market', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ symbols }),
-  }).then(async res => {
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}))
-      throw new Error(err?.error ?? `HTTP ${res.status}`)
-    }
-    return res.json() as Promise<MarketDataResponse>
-  })
+  inFlightSymbols = new Set(symbols)
+  inFlight = previous.then(() =>
+    fetch('/api/market', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ symbols }),
+    }).then(async res => {
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err?.error ?? `HTTP ${res.status}`)
+      }
+      return res.json() as Promise<MarketDataResponse>
+    })
+  )
 
   try {
     const data = await inFlight
@@ -63,6 +72,7 @@ async function fetchMarketData(symbols: string[]): Promise<void> {
     notify()
   } finally {
     inFlight = null
+    inFlightSymbols = null
   }
 }
 
@@ -77,6 +87,10 @@ export interface UseMarketData {
   getPrice: (symbol: string, fallback: number) => number
   getYield: (symbol: string) => number | null
   getAnnualDiv: (symbol: string) => number | null
+  /** Currency the live quote is priced in, or `fallback` when unknown. */
+  getQuoteCurrency: (symbol: string, fallback: string) => string
+  /** True when this symbol has a live price (not the caller's fallback). */
+  hasPrice: (symbol: string) => boolean
 }
 
 export function useMarketData(): UseMarketData {
@@ -150,11 +164,29 @@ export function useMarketData(): UseMarketData {
     (symbol: string) => {
       const q = quotes[symbol]
       if (!q) return null
+      // Prefer the declared annual rate. Deriving it from yield × price is a
+      // second-order estimate: the yield is usually trailing while the price is
+      // live, so the product drifts from what the company actually pays.
+      const rate = q.forwardAnnualDividendRate ?? q.trailingAnnualDividendRate
+      if (rate != null && isFinite(rate) && rate > 0) return rate
       if (q.dividendYield != null && q.price > 0) return q.dividendYield * q.price
-      return q.forwardAnnualDividendRate ?? q.trailingAnnualDividendRate ?? null
+      return null
     },
     [quotes]
   )
 
-  return { quotes, state, fetchedAt, errorMsg, refresh, getPrice, getYield, getAnnualDiv }
+  const getQuoteCurrency = useCallback(
+    (symbol: string, fallback: string) => quotes[symbol]?.currency || fallback,
+    [quotes]
+  )
+
+  const hasPrice = useCallback(
+    (symbol: string) => (quotes[symbol]?.price ?? 0) > 0,
+    [quotes]
+  )
+
+  return {
+    quotes, state, fetchedAt, errorMsg, refresh,
+    getPrice, getYield, getAnnualDiv, getQuoteCurrency, hasPrice,
+  }
 }
