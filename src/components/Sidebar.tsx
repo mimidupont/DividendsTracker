@@ -5,15 +5,23 @@ import ProfileSwitcher from './ProfileSwitcher'
 
 const nav = [
   { section: 'Overview', items: [
-    { href: '/',             label: 'Net worth',   icon: '◈', color: 'var(--text2)' },
-    { href: '/performance', label: 'Performance', icon: '◉', color: 'var(--text2)' },
-    { href: '/allocation',  label: 'Allocation',  icon: '◎', color: 'var(--text2)' },
+    { href: '/',             label: 'Net worth',    icon: '◈', color: 'var(--text2)' },
+    { href: '/performance',  label: 'Performance',  icon: '◉', color: 'var(--text2)' },
+    { href: '/allocation',   label: 'Allocation',   icon: '◎', color: 'var(--text2)' },
+    { href: '/transactions', label: 'Transactions', icon: '⇄', color: 'var(--text2)' },
+  ]},
+  { section: 'Analysis', accent: 'var(--text2)', items: [
+    { href: '/benchmark',      label: 'Benchmark',      icon: '⚖', color: 'var(--text2)' },
+    { href: '/rebalance',      label: 'Rebalance',      icon: '⇌', color: 'var(--text2)' },
+    { href: '/risk',           label: 'Risk',           icon: '◈', color: 'var(--text2)' },
+    { href: '/fx-attribution', label: 'FX attribution', icon: '⇅', color: 'var(--text2)' },
   ]},
   { section: 'Stocks & ETFs', accent: 'var(--green)', items: [
     { href: '/holdings',    label: 'Holdings',    icon: '◻', color: 'var(--green)' },
     { href: '/received',    label: 'Dividends',   icon: '↓', color: 'var(--green)' },
     { href: '/projected',   label: 'Projected',   icon: '→', color: 'var(--green)' },
     { href: '/calendar',    label: 'Ex-div cal.', icon: '▦', color: 'var(--green)' },
+    { href: '/fees',        label: 'Fees',        icon: '%', color: 'var(--green)' },
   ]},
   { section: 'Cash & Savings', accent: 'var(--blue)', items: [
     { href: '/cash',        label: 'Bank accounts', icon: '⊟', color: 'var(--blue)' },
@@ -23,6 +31,11 @@ const nav = [
   ]},
   { section: 'Real Estate', accent: 'var(--teal)', items: [
     { href: '/realestate',  label: 'Properties',  icon: '⊞', color: 'var(--teal)' },
+  ]},
+  { section: 'Planning', accent: 'var(--amber)', items: [
+    { href: '/fire',       label: 'FIRE',       icon: '◐', color: 'var(--amber)' },
+    { href: '/scenarios',  label: 'Scenarios',  icon: '⚠', color: 'var(--amber)' },
+    { href: '/projection', label: 'Projection', icon: '◠', color: 'var(--amber)' },
   ]},
 ]
 

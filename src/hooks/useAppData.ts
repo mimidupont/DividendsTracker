@@ -7,7 +7,12 @@
  * invalidated and data is re-fetched automatically.
  */
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { supabase, supabaseConfigError, Holding, DividendProjection, DividendReceived, BankAccount, CryptoHolding, RealEstate } from '@/lib/supabase'
+import {
+  supabase, supabaseConfigError,
+  Holding, DividendProjection, DividendReceived, BankAccount, CryptoHolding, RealEstate,
+  Transaction, AssetMetadata, AllocationTarget, FinancialPlan, ExpenseLogRow,
+  ScenarioRow, MarketAssumption,
+} from '@/lib/supabase'
 import { getStoredProfileId } from '@/lib/profile'
 
 const CACHE_TTL = 5 * 60 * 1000
@@ -19,6 +24,14 @@ interface AppData {
   bankAccounts: BankAccount[]
   cryptoHoldings: CryptoHolding[]
   realEstate: RealEstate[]
+  // ── v2 ──
+  transactions: Transaction[]
+  assetMetadata: AssetMetadata[]
+  allocationTargets: AllocationTarget[]
+  financialPlan: FinancialPlan | null
+  expenseLog: ExpenseLogRow[]
+  scenarios: ScenarioRow[]
+  marketAssumptions: MarketAssumption[]
   cachedAt: number
   profileId: string | null
   /** Non-null when one or more queries failed — totals would be understated. */
@@ -46,7 +59,7 @@ async function fetchAll(profileId: string): Promise<AppData> {
   if (supabaseConfigError) {
     return { ...EMPTY, cachedAt: Date.now(), profileId, error: supabaseConfigError }
   }
-  const [h, p, div, b, c, r] = await Promise.all([
+  const [h, p, div, b, c, r, txn, meta, targets, plan, expenses, scen, assumptions] = await Promise.all([
     supabase.from('holdings').select('*').eq('profile_id', profileId).order('symbol'),
     // Every year is fetched — the projections page shows a multi-year table and
     // income estimates need whichever year is currently relevant, not a single
@@ -56,10 +69,21 @@ async function fetchAll(profileId: string): Promise<AppData> {
     supabase.from('bank_accounts').select('*').eq('profile_id', profileId).eq('is_active', true).order('balance', { ascending: false }),
     supabase.from('crypto_holdings').select('*').eq('profile_id', profileId).order('avg_cost_usd', { ascending: false }),
     supabase.from('real_estate').select('*').eq('profile_id', profileId).order('current_value', { ascending: false }),
+    supabase.from('transactions').select('*').eq('profile_id', profileId).order('txn_date', { ascending: false }),
+    supabase.from('asset_metadata').select('*').eq('profile_id', profileId),
+    supabase.from('allocation_targets').select('*').eq('profile_id', profileId),
+    supabase.from('financial_plan').select('*').eq('profile_id', profileId).maybeSingle(),
+    supabase.from('expense_log').select('*').eq('profile_id', profileId).order('month'),
+    supabase.from('scenarios').select('*').eq('profile_id', profileId).order('created_at'),
+    supabase.from('market_assumptions').select('*').eq('profile_id', profileId),
   ])
 
   // A failed query used to be indistinguishable from "you own nothing", which
   // quietly wiped an asset class out of net worth. Surface it instead.
+  //
+  // The v2 tables are excluded from this check on purpose: before their
+  // migration has been run they legitimately 404, and treating that as data
+  // loss would show a scary banner on every page of a working v1 install.
   const failures = [h, p, div, b, c, r]
     .map(res => res.error?.message)
     .filter((m): m is string => !!m)
@@ -71,6 +95,13 @@ async function fetchAll(profileId: string): Promise<AppData> {
     bankAccounts:      b.data   ?? [],
     cryptoHoldings:    c.data   ?? [],
     realEstate:        r.data   ?? [],
+    transactions:      txn.data  ?? [],
+    assetMetadata:     meta.data ?? [],
+    allocationTargets: targets.data ?? [],
+    financialPlan:     (plan.data as FinancialPlan | null) ?? null,
+    expenseLog:        expenses.data ?? [],
+    scenarios:         scen.data ?? [],
+    marketAssumptions: assumptions.data ?? [],
     cachedAt:          Date.now(),
     profileId,
     error:             failures.length ? failures.join(' · ') : null,
@@ -104,6 +135,8 @@ interface UseAppData extends AppData {
 const EMPTY: AppData = {
   holdings: [], projections: [], dividendsReceived: [],
   bankAccounts: [], cryptoHoldings: [], realEstate: [],
+  transactions: [], assetMetadata: [], allocationTargets: [],
+  financialPlan: null, expenseLog: [], scenarios: [], marketAssumptions: [],
   cachedAt: 0, profileId: null, error: null,
 }
 

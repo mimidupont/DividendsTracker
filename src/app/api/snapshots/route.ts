@@ -49,7 +49,7 @@ export async function GET(req: NextRequest) {
 
   const { data, error } = await supabase
     .from('portfolio_snapshots')
-    .select('snapshot_date, total_value_czk, stocks_czk, cash_czk, crypto_czk, realestate_czk')
+    .select('snapshot_date, total_value_czk, stocks_czk, cash_czk, crypto_czk, realestate_czk, exposure_usd_local, exposure_eur_local, exposure_czk_local, exposure_other_czk, fx_usd, fx_eur, fx_gbp')
     .eq('profile_id', profileId)
     .gte('snapshot_date', sinceStr)
     .order('snapshot_date', { ascending: true })
@@ -70,7 +70,8 @@ export async function POST(req: NextRequest) {
   const {
     profileId, snapshotDate,
     total_value_czk, stocks_czk, cash_czk, crypto_czk, realestate_czk,
-    fx_usd, fx_eur,
+    fx_usd, fx_eur, fx_gbp,
+    exposure_usd_local, exposure_eur_local, exposure_czk_local, exposure_other_czk,
   } = body
 
   if (!profileId || total_value_czk == null) {
@@ -106,6 +107,13 @@ export async function POST(req: NextRequest) {
       // Null beats inventing a rate the snapshot was not actually computed with.
       fx_usd: Number.isFinite(Number(fx_usd)) ? Number(fx_usd) : null,
       fx_eur: Number.isFinite(Number(fx_eur)) ? Number(fx_eur) : null,
+      fx_gbp: Number.isFinite(Number(fx_gbp)) ? Number(fx_gbp) : null,
+      // Exposure per currency, in that currency's own units — this is what
+      // makes asset-vs-FX attribution possible after the fact.
+      exposure_usd_local: num(exposure_usd_local),
+      exposure_eur_local: num(exposure_eur_local),
+      exposure_czk_local: num(exposure_czk_local),
+      exposure_other_czk: num(exposure_other_czk),
     }, { onConflict: 'profile_id,snapshot_date' })
 
   if (error) {

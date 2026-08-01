@@ -9,7 +9,11 @@ import { useCryptoPrices } from '@/hooks/useCryptoPrices'
 import { useAppData } from '@/hooks/useAppData'
 import { useProfile } from '@/lib/profile'
 import { usePortfolioSnapshots } from '@/hooks/usePortfolioSnapshots'
-import { positionsMetrics, portfolioTotals } from '@/lib/portfolio'
+import { positionsMetrics, portfolioTotals, buildPositions } from '@/lib/portfolio'
+import { currencyExposure } from '@/lib/exposure'
+import { contributionsVsGrowth, externalFlows } from '@/lib/transactions'
+import RunwayCard from '@/components/RunwayCard'
+import { DEFAULT_PLAN, effectiveAnnualExpenses } from '@/lib/fire'
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, ReferenceLine,
@@ -36,10 +40,11 @@ const PL_WINDOWS: { key: PLWindow; label: string; days: number | 'ytd' }[] = [
 ]
 
 export default function Dashboard() {
+  const appData = useAppData()
   const {
     holdings, projections, dividendsReceived,
-    bankAccounts, cryptoHoldings, realEstate, loading, error,
-  } = useAppData()
+    bankAccounts, cryptoHoldings, realEstate, transactions, loading, error,
+  } = appData
 
   const { activeProfile } = useProfile()
   const { fx, fxLive, fxLoading, fxTs, refresh: refreshFx } = useFx()
@@ -107,6 +112,14 @@ export default function Dashboard() {
   const cryptoReady = cryptoHoldings.length === 0 || cryptoPrices.state === 'done'
   const pricesReady = holdings.length === 0 || market.state === 'done'
 
+  // Every position, normalised — also the basis for the per-currency exposure
+  // recorded on the snapshot, which is what makes FX attribution possible later.
+  const allPositions = useMemo(
+    () => buildPositions(appData, fx, market, cryptoPrices),
+    [appData, fx, market, cryptoPrices]
+  )
+  const exposure = useMemo(() => currencyExposure(allPositions, fx), [allPositions, fx])
+
   useEffect(() => {
     if (!loading && !error && fxLive && pricesReady && cryptoReady && totalNetWorth > 0) {
       saveSnapshot({
@@ -117,10 +130,15 @@ export default function Dashboard() {
         realestate_czk:  realEstateEquityCZK,
         fx_usd: fx['USD'],
         fx_eur: fx['EUR'],
+        fx_gbp: fx['GBP'],
+        exposure_usd_local: exposure.usdLocal,
+        exposure_eur_local: exposure.eurLocal,
+        exposure_czk_local: exposure.czkLocal,
+        exposure_other_czk: exposure.otherCZK,
       })
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading, error, fxLive, pricesReady, cryptoReady, totalNetWorth])
+  }, [loading, error, fxLive, pricesReady, cryptoReady, totalNetWorth, exposure])
 
   // ── Income ─────────────────────────────────────────────────────────────────
   const divIncomeCZK = stockTotals.annualDivCZK
@@ -140,6 +158,19 @@ export default function Dashboard() {
     { label: 'Crypto',         value: cryptoValueCZK,       color: 'var(--purple)', href: '/crypto' },
     { label: 'Real Estate',    value: realEstateEquityCZK,  color: 'var(--teal)',   href: '/realestate' },
   ]
+
+  // Splits the net-worth curve into money added and money earned. Needs a
+  // transaction ledger — without one it stays empty rather than guessing.
+  const growthSplit = useMemo(
+    () => contributionsVsGrowth(transactions, snapshots),
+    [transactions, snapshots]
+  )
+  const latestSplit = growthSplit.length > 0
+    ? growthSplit[growthSplit.length - 1]
+    : { contributed: 0, growth: 0, date: '', value: 0 }
+
+  const dashboardExpenses = effectiveAnnualExpenses(
+    { ...DEFAULT_PLAN, ...(appData.financialPlan ?? {}) }, appData.expenseLog)
 
   const today = todayISO()
   const CURRENT_YEAR = yearOf(today)
@@ -506,6 +537,42 @@ export default function Dashboard() {
           })}
         </div>
 
+        {/* Contributions vs growth — answers "did I earn this, or did I pay it in?" */}
+        {growthSplit.length >= 2 && (
+          <div style={{
+            background: 'var(--bg2)', border: '1px solid var(--border)',
+            borderRadius: 12, padding: '20px 22px', marginBottom: 20,
+          }}>
+            <div style={{ fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--text3)', fontWeight: 600, marginBottom: 14 }}>
+              Since {fmtISODateShort(growthSplit[0].date)}
+            </div>
+            <div style={{ display: 'flex', gap: 32, flexWrap: 'wrap', marginBottom: 14 }}>
+              <div>
+                <div style={{ fontSize: 10, color: 'var(--text4)', marginBottom: 4 }}>Total change</div>
+                <div style={{ fontFamily: "'Syne', sans-serif", fontSize: 22, fontWeight: 700, color: latestSplit.contributed + latestSplit.growth >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                  {fmtCZK(latestSplit.contributed + latestSplit.growth)}
+                </div>
+              </div>
+              <div>
+                <div style={{ fontSize: 10, color: 'var(--text4)', marginBottom: 4 }}>You contributed</div>
+                <div style={{ fontFamily: "'Syne', sans-serif", fontSize: 22, fontWeight: 700, color: 'var(--blue)' }}>
+                  {fmtCZK(latestSplit.contributed)}
+                </div>
+              </div>
+              <div>
+                <div style={{ fontSize: 10, color: 'var(--text4)', marginBottom: 4 }}>The market earned</div>
+                <div style={{ fontFamily: "'Syne', sans-serif", fontSize: 22, fontWeight: 700, color: latestSplit.growth >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                  {fmtCZK(latestSplit.growth)}
+                </div>
+              </div>
+            </div>
+            <div style={{ display: 'flex', height: 8, borderRadius: 4, overflow: 'hidden', background: 'var(--bg4)' }}>
+              <div style={{ flex: Math.max(0, latestSplit.contributed), background: 'var(--blue)', opacity: 0.8 }} />
+              <div style={{ flex: Math.max(0, latestSplit.growth), background: 'var(--green)', opacity: 0.8 }} />
+            </div>
+          </div>
+        )}
+
         {/* Bottom row */}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
           {/* Income breakdown */}
@@ -536,6 +603,16 @@ export default function Dashboard() {
               <span style={{ fontSize: 11, color: 'var(--text3)' }}>Total annual</span>
               <span style={{ fontFamily: "'Syne', sans-serif", fontSize: 16, fontWeight: 700, color: 'var(--amber)' }}>{fmtCZK(totalAnnualIncome)}</span>
             </div>
+          </div>
+
+          {/* Emergency runway tile */}
+          <div style={{ display: 'grid', gap: 14 }}>
+            <RunwayCard
+              positions={allPositions}
+              monthlyExpenses={dashboardExpenses.annualCZK / 12}
+              accounts={bankAccounts}
+              compact
+            />
           </div>
 
           {/* Quick stats */}

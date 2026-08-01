@@ -273,3 +273,196 @@ insert into dividend_projections (profile_id, symbol, year, projected_div_per_sh
   ('11111111-1111-1111-1111-111111111111', 'ERBAG', 2027, 82.00,  0.032, 0.10,  902.00, 'CZK'),
   ('11111111-1111-1111-1111-111111111111', 'MONET', 2027, 16.00,  0.080, 0.03,  320.00, 'CZK')
 on conflict (profile_id, symbol, year) do nothing;
+
+-- ============================================================
+-- v2 tables (see supabase/migrations/ for the incremental versions)
+-- ============================================================
+
+-- ── supabase/migrations/001_transactions.sql ──
+-- 001_transactions.sql — F1 transactions ledger
+-- Idempotent: safe to re-run.
+
+create table if not exists transactions (
+  id            uuid primary key default gen_random_uuid(),
+  profile_id    uuid not null references profiles(id) on delete cascade,
+  txn_date      date not null,
+  type          text not null check (type in (
+                  'buy','sell','deposit','withdrawal',
+                  'dividend','interest','rent','fee','tax','transfer','adjustment')),
+  asset_class   text not null check (asset_class in ('stock','cash','crypto','realestate','none')),
+
+  -- what was traded
+  symbol        text,           -- ticker or coin_id
+  asset_id      uuid,           -- holdings.id / bank_accounts.id / crypto_holdings.id / real_estate.id
+  quantity      numeric,        -- shares / coins; null for pure cash movements
+  price         numeric,        -- per unit, native currency
+  amount        numeric not null,  -- signed gross, native currency (+ in, - out)
+  fee           numeric default 0,
+  tax           numeric default 0,
+  currency      text not null default 'CZK',
+
+  -- CZK conversion frozen at transaction time. Re-deriving this from today's
+  -- rate would silently rewrite every historical figure.
+  fx_rate_czk   numeric not null,
+  amount_czk    numeric generated always as (amount * fx_rate_czk) stored,
+
+  -- return maths: external = money crossing the boundary of your wealth
+  is_external   boolean not null default false,
+  counterparty_account_id uuid,
+
+  notes         text,
+  created_at    timestamptz default now()
+);
+
+create index if not exists idx_txn_profile_date on transactions(profile_id, txn_date);
+create index if not exists idx_txn_symbol on transactions(profile_id, symbol);
+
+-- ── supabase/migrations/002_asset_metadata.sql ──
+-- 002_asset_metadata.sql — F4 risk & concentration metadata
+-- Idempotent: safe to re-run.
+
+create table if not exists asset_metadata (
+  id             uuid primary key default gen_random_uuid(),
+  profile_id     uuid not null references profiles(id) on delete cascade,
+  symbol         text not null,
+  sector         text,
+  industry       text,
+  region         text,            -- 'US','EU','CZ','UK','Global','EM','Other'
+  country        text,
+  liquidity_tier text default 'week',
+  is_hedged      boolean default false,
+  notes          text,
+  unique(profile_id, symbol)
+);
+
+create index if not exists idx_asset_metadata_profile on asset_metadata(profile_id);
+
+-- Liquidity tiers on the other asset classes
+alter table bank_accounts   add column if not exists liquidity_tier text default 'instant';
+alter table crypto_holdings add column if not exists liquidity_tier text default 'week';
+alter table real_estate     add column if not exists liquidity_tier text default 'year';
+
+-- ── supabase/migrations/003_allocation_targets.sql ──
+-- 003_allocation_targets.sql — F3 rebalancing targets
+-- Idempotent: safe to re-run.
+
+create table if not exists allocation_targets (
+  id           uuid primary key default gen_random_uuid(),
+  profile_id   uuid not null references profiles(id) on delete cascade,
+  scope        text not null check (scope in ('asset_class','sector','region','symbol')),
+  bucket       text not null,     -- 'stock' | 'Technology' | 'US' | 'SPY5'
+  target_pct   numeric not null,  -- 0-1
+  band_pct     numeric default 0.05,
+  min_pct      numeric,
+  max_pct      numeric,
+  notes        text,
+  updated_at   timestamptz default now(),
+  unique(profile_id, scope, bucket)
+);
+
+create index if not exists idx_alloc_targets_profile on allocation_targets(profile_id, scope);
+
+-- ── supabase/migrations/004_benchmarks.sql ──
+-- 004_benchmarks.sql — F2 benchmark comparison
+-- Idempotent: safe to re-run.
+-- Benchmark prices are deliberately NOT profile-scoped: they are shared market data.
+
+create table if not exists benchmark_prices (
+  id         uuid primary key default gen_random_uuid(),
+  symbol     text not null,        -- 'SPY','IWDA','URTH','CZK_SAVINGS'
+  price_date date not null,
+  close      numeric not null,
+  currency   text not null default 'USD',
+  unique(symbol, price_date)
+);
+
+create index if not exists idx_benchmark_symbol_date on benchmark_prices(symbol, price_date);
+
+create table if not exists benchmark_config (
+  profile_id          uuid primary key references profiles(id) on delete cascade,
+  primary_benchmark   text default 'SPY',
+  secondary_benchmark text default 'IWDA',
+  updated_at          timestamptz default now()
+);
+
+-- ── supabase/migrations/005_snapshot_exposure.sql ──
+-- 005_snapshot_exposure.sql — F5 FX attribution
+-- Idempotent: safe to re-run.
+--
+-- Snapshots stored CZK totals only, which cannot separate "the asset moved"
+-- from "the koruna moved". These columns record exposure per currency in its
+-- own units, so the two effects can be attributed separately.
+-- Historical rows keep zeros; the UI reports attribution as available only
+-- from the first date that carries exposure data.
+
+alter table portfolio_snapshots add column if not exists exposure_usd_local numeric default 0;
+alter table portfolio_snapshots add column if not exists exposure_eur_local numeric default 0;
+alter table portfolio_snapshots add column if not exists exposure_czk_local numeric default 0;
+alter table portfolio_snapshots add column if not exists exposure_other_czk numeric default 0;
+alter table portfolio_snapshots add column if not exists fx_gbp numeric;
+
+-- ── supabase/migrations/006_financial_plan.sql ──
+-- 006_financial_plan.sql — F6 FIRE dashboard
+-- Idempotent: safe to re-run.
+
+create table if not exists financial_plan (
+  profile_id                uuid primary key references profiles(id) on delete cascade,
+  annual_expenses_czk       numeric not null default 600000,
+  annual_income_czk         numeric,
+  monthly_contribution_czk  numeric default 0,
+  -- Decimal fractions: 4% SWR is stored as 0.04
+  swr_pct                   numeric default 0.04,
+  expected_real_return      numeric default 0.05,
+  inflation_pct             numeric default 0.025,
+  birth_year                int,
+  target_retirement_age     int,
+  include_property_in_fi    boolean default false,
+  include_primary_residence boolean default false,
+  updated_at                timestamptz default now()
+);
+
+create table if not exists expense_log (
+  id          uuid primary key default gen_random_uuid(),
+  profile_id  uuid not null references profiles(id) on delete cascade,
+  month       date not null,        -- first day of month
+  amount_czk  numeric not null,
+  category    text,
+  notes       text,
+  unique(profile_id, month, category)
+);
+
+create index if not exists idx_expense_log_profile_month on expense_log(profile_id, month);
+
+-- ── supabase/migrations/007_scenarios.sql ──
+-- 007_scenarios.sql — F8 scenario stress tests
+-- Idempotent: safe to re-run.
+
+create table if not exists scenarios (
+  id          uuid primary key default gen_random_uuid(),
+  profile_id  uuid not null references profiles(id) on delete cascade,
+  name        text not null,
+  description text,
+  shocks      jsonb not null,
+  is_preset   boolean default false,
+  created_at  timestamptz default now()
+);
+
+create index if not exists idx_scenarios_profile on scenarios(profile_id);
+
+-- ── supabase/migrations/008_market_assumptions.sql ──
+-- 008_market_assumptions.sql — F9 Monte Carlo projection
+-- Idempotent: safe to re-run.
+
+create table if not exists market_assumptions (
+  id                   uuid primary key default gen_random_uuid(),
+  profile_id           uuid not null references profiles(id) on delete cascade,
+  asset_class          text not null,
+  -- Real (after-inflation) expected return and annualised volatility,
+  -- both as decimal fractions: 5.5% is stored as 0.055
+  expected_real_return numeric not null,
+  volatility           numeric not null,
+  unique(profile_id, asset_class)
+);
+
+create index if not exists idx_market_assumptions_profile on market_assumptions(profile_id);
+

@@ -33,6 +33,14 @@ Tracks stocks & ETFs, cash, crypto and real estate, and reports everything in **
 | `/crypto` | Crypto holdings, staking yield |
 | `/realestate` | Properties, mortgages, equity and rental yield |
 | `/fees` | Expense ratios, brokerage costs and long-run fee drag |
+| `/transactions` | Cash-flow ledger: realized P&L, contributions vs growth |
+| `/benchmark` | Your cash flows replayed into an index (shadow portfolio) |
+| `/rebalance` | Drift against targets + no-sell contribution allocator |
+| `/risk` | Concentration, sector/region/currency exposure, liquidity ladder |
+| `/fx-attribution` | Splits returns into asset effect vs currency effect |
+| `/fire` | FI number, years to FI, coast FIRE, milestones, runway |
+| `/scenarios` | Stress tests (2008 replay, crypto winter, job loss…) |
+| `/projection` | Monte Carlo fan chart with seeded, reproducible runs |
 
 ---
 
@@ -123,6 +131,11 @@ live quote fall back to cost rather than to zero.
 2. SQL Editor → New query → paste `supabase-schema.sql` → Run
 3. Settings → API → copy the Project URL and anon key
 
+`supabase-schema.sql` is the complete, current schema. An existing install can
+instead run just the new files in `supabase/migrations/` — every one is
+idempotent (`create table if not exists`, `add column if not exists`) and none
+drops or rewrites an existing column.
+
 The schema creates one seed profile. Every table is scoped by `profile_id`, and
 the app needs at least one row in `profiles` — with none, all pages come up empty.
 
@@ -173,7 +186,14 @@ npm run dev
 | `bank_interest_received` | Logged interest payments |
 | `crypto_holdings` | Crypto positions keyed by CoinGecko id |
 | `real_estate` | Properties with mortgage and rental data |
-| `portfolio_snapshots` | Daily net worth history, drives the P&L chart |
+| `portfolio_snapshots` | Daily net worth history + per-currency exposure |
+| `transactions` | Every money movement; FX frozen per row |
+| `asset_metadata` | Sector, region and liquidity tier per symbol |
+| `allocation_targets` | Target weights per scope for rebalancing |
+| `benchmark_prices` | Shared index price history (not profile-scoped) |
+| `financial_plan` / `expense_log` | FIRE assumptions and observed spending |
+| `scenarios` | Saved stress-test shock sets |
+| `market_assumptions` | Per-class return and volatility for Monte Carlo |
 
 Rates and percentages are stored as **decimal fractions** (`interest_rate`,
 `staking_apy`, `mortgage_rate`, `projected_yield`, `growth_rate`): 4.5% is `0.045`.

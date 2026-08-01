@@ -10,6 +10,30 @@ export interface PortfolioSnapshot {
   cash_czk: number
   crypto_czk: number
   realestate_czk: number
+  // Per-currency exposure, in each currency's own units, plus the rates the
+  // snapshot was struck at. Needed to separate asset moves from FX moves.
+  exposure_usd_local?: number | null
+  exposure_eur_local?: number | null
+  exposure_czk_local?: number | null
+  exposure_other_czk?: number | null
+  fx_usd?: number | null
+  fx_eur?: number | null
+  fx_gbp?: number | null
+}
+
+export interface SnapshotPayload {
+  total_value_czk: number
+  stocks_czk: number
+  cash_czk: number
+  crypto_czk: number
+  realestate_czk: number
+  fx_usd: number
+  fx_eur: number
+  fx_gbp?: number
+  exposure_usd_local?: number
+  exposure_eur_local?: number
+  exposure_czk_local?: number
+  exposure_other_czk?: number
 }
 
 interface PLSummary {
@@ -66,15 +90,7 @@ export function usePortfolioSnapshots() {
     return () => window.removeEventListener('divvy:profile-change', onProfileChange)
   }, [load])
 
-  const saveSnapshot = useCallback(async (payload: {
-    total_value_czk: number
-    stocks_czk: number
-    cash_czk: number
-    crypto_czk: number
-    realestate_czk: number
-    fx_usd: number
-    fx_eur: number
-  }) => {
+  const saveSnapshot = useCallback(async (payload: SnapshotPayload) => {
     const profileId = getStoredProfileId()
     if (!profileId) return
     if (!Number.isFinite(payload.total_value_czk) || payload.total_value_czk <= 0) return
