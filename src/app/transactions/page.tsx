@@ -3,6 +3,7 @@ import { useMemo, useState } from 'react'
 import Badge from '@/components/Badge'
 import TransactionModal from '@/components/TransactionModal'
 import { PageShell, PageHeader, LoadingShell, EmptyState, MetricCards, Panel, orDash } from '@/components/PageShell'
+import SetupNotice from '@/components/SetupNotice'
 import { useAppData } from '@/hooks/useAppData'
 import { useFx } from '@/hooks/useFx'
 import { useProfile } from '@/lib/profile'
@@ -23,7 +24,7 @@ const TYPE_COLORS: Record<TransactionType, string> = {
 const ALL_TYPES = Object.keys(TYPE_COLORS) as TransactionType[]
 
 export default function TransactionsPage() {
-  const { transactions, holdings, dividendsReceived, loading, reload } = useAppData()
+  const { transactions, holdings, dividendsReceived, loading, reload, missingTables } = useAppData()
   const { activeProfile } = useProfile()
   const { fx } = useFx()
 
@@ -141,6 +142,8 @@ export default function TransactionsPage() {
           </>
         }
       />
+
+      <SetupNotice tables={missingTables.filter(t => t === 'transactions')} />
 
       <MetricCards
         columns={5}

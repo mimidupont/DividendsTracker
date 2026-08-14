@@ -6,9 +6,12 @@ import { useAppData } from '@/hooks/useAppData'
 import { usePortfolioSnapshots } from '@/hooks/usePortfolioSnapshots'
 import { supabase, type BenchmarkPrice } from '@/lib/supabase'
 import {
-  shadowPortfolio, fxByDateFromSnapshots, commonWindow, clipSeries,
+  shadowPortfolio, buyAndHold, fxByDateFromSnapshots, commonWindow, clipSeries,
   trackingDifference, windowStart, BENCHMARK_OPTIONS, type BenchmarkWindow,
 } from '@/lib/benchmark'
+import SetupNotice from '@/components/SetupNotice'
+import { useFx } from '@/hooks/useFx'
+import { fxRate } from '@/lib/fx'
 import { indexTo100, twr, xirr, maxDrawdown, type ValuePoint } from '@/lib/returns'
 import { externalFlows } from '@/lib/transactions'
 import { fmtCZK } from '@/lib/fx'
@@ -22,8 +25,9 @@ import {
 const WINDOWS: BenchmarkWindow[] = ['1M', '3M', '6M', 'YTD', '1Y', 'ALL']
 
 export default function BenchmarkPage() {
-  const { transactions, loading } = useAppData()
+  const { transactions, loading, missingTables } = useAppData()
   const { snapshots } = usePortfolioSnapshots()
+  const { fx } = useFx()
 
   const [symbol, setSymbol] = useState('SPY')
   const [window, setWindow] = useState<BenchmarkWindow>('ALL')
@@ -77,20 +81,40 @@ export default function BenchmarkPage() {
   )
 
   const flows = useMemo(() => externalFlows(transactions), [transactions])
+  // Snapshots carry the rate each value was struck at. When none do — an older
+  // install, or one that has only just started recording — fall back to today's
+  // rate so the page still works, and say so below.
+  const liveRate = fxRate(currency, fx)
   const fxByDate = useMemo(
-    () => fxByDateFromSnapshots(snapshots, currency),
-    [snapshots, currency]
+    () => fxByDateFromSnapshots(snapshots, currency, liveRate),
+    [snapshots, currency, liveRate]
   )
+  const usingFallbackFx = snapshots.length > 0 &&
+    !snapshots.some(s => (currency === 'USD' ? s.fx_usd : currency === 'EUR' ? s.fx_eur : 1) != null)
+
+  // Two comparison modes. The shadow portfolio replays your real cash flows and
+  // is the honest answer; buy-and-hold needs no ledger at all and is what makes
+  // this page usable before any transactions have been entered.
+  const hasFlows = flows.length > 0
 
   const shadow = useMemo(
-    () => shadowPortfolio(flows, prices, fxByDate),
-    [flows, prices, fxByDate]
+    () => hasFlows ? shadowPortfolio(flows, prices, fxByDate) : [],
+    [hasFlows, flows, prices, fxByDate]
   )
+
+  const lumpSum = useMemo(() => {
+    if (hasFlows || snapshots.length === 0) return []
+    const first = snapshots[0]
+    return buyAndHold(first.total_value_czk, prices, fxByDate, first.snapshot_date)
+      .map(p => ({ date: p.date, valueCZK: p.valueCZK, units: 0 }))
+  }, [hasFlows, snapshots, prices, fxByDate])
+
+  const benchSeries = hasFlows ? shadow : lumpSum
 
   // Compare only where both series have data, and say so.
   const overlap = useMemo(
-    () => commonWindow(mySeries, shadow.map(s => ({ date: s.date }))),
-    [mySeries, shadow]
+    () => commonWindow(mySeries, benchSeries.map(s => ({ date: s.date }))),
+    [mySeries, benchSeries]
   )
 
   const start = windowStart(window, todayISO())
@@ -99,7 +123,7 @@ export default function BenchmarkPage() {
 
   const clippedMine = from && to ? clipSeries(mySeries, from, to) : []
   const clippedBench = from && to
-    ? clipSeries(shadow.map(s => ({ date: s.date, value: s.valueCZK })), from, to)
+    ? clipSeries(benchSeries.map(s => ({ date: s.date, value: s.valueCZK })), from, to)
     : []
 
   const indexedMine = indexTo100(clippedMine)
@@ -131,14 +155,13 @@ export default function BenchmarkPage() {
     ])
   }, [flows, mySeries])
 
-  const shadowToday = shadow.length > 0 ? shadow[shadow.length - 1].valueCZK : null
+  const shadowToday = benchSeries.length > 0 ? benchSeries[benchSeries.length - 1].valueCZK : null
   const mineToday = mySeries.length > 0 ? mySeries[mySeries.length - 1].value : null
 
   if (loading) return <LoadingShell label="Loading benchmark…" />
 
   const noPrices = prices.length === 0
   const noHistory = mySeries.length < 2
-  const noFlows = flows.length === 0
 
   return (
     <PageShell maxWidth={1100}>
@@ -160,6 +183,22 @@ export default function BenchmarkPage() {
         }
       />
 
+      <SetupNotice tables={missingTables.filter(t => t === 'transactions')} />
+
+      {!noPrices && !noHistory && (
+        <div style={{
+          background: hasFlows ? 'var(--green-bg)' : 'var(--bg3)',
+          border: `1px solid ${hasFlows ? 'var(--green-bd)' : 'var(--border)'}`,
+          borderRadius: 8, padding: '10px 14px', marginBottom: 14,
+          fontSize: 11, color: hasFlows ? 'var(--green)' : 'var(--text3)', lineHeight: 1.7,
+        }}>
+          {hasFlows
+            ? <>Comparing with <strong>your actual cash flows</strong> replayed into {symbol} — {flows.length} external movements from the ledger.</>
+            : <>No external cash flows in the ledger, so this compares <strong>buy-and-hold</strong>: your first snapshot invested in {symbol} on that date. Add deposits and withdrawals on <code>/transactions</code> for a flow-adjusted comparison.</>}
+          {usingFallbackFx && <> · Historical FX rates are missing from your snapshots, so today&rsquo;s rate is used throughout — the currency component of the comparison is approximate.</>}
+        </div>
+      )}
+
       {syncError && (
         <div style={{
           background: 'var(--amber-bg)', border: '1px solid var(--amber-bd)', color: 'var(--amber)',
@@ -171,28 +210,23 @@ export default function BenchmarkPage() {
         </div>
       )}
 
-      {(noPrices || noHistory || noFlows) && !loadingPrices && (
+      {(noPrices || noHistory) && !loadingPrices && (
         <EmptyState
           icon="⚖"
           title="Not enough data to compare yet"
           body={
             <>
-              An honest comparison needs three things:
-              <br /><br />
               <span style={{ color: noPrices ? 'var(--amber)' : 'var(--green)' }}>
                 {noPrices ? '○' : '●'} benchmark price history
-              </span>{noPrices && ' — press “Sync prices”'}
+              </span>{noPrices && ' — press “Sync prices” above'}
               <br />
               <span style={{ color: noHistory ? 'var(--amber)' : 'var(--green)' }}>
                 {noHistory ? '○' : '●'} at least two daily snapshots of your own portfolio
-              </span>{noHistory && ' — these accrue automatically'}
-              <br />
-              <span style={{ color: noFlows ? 'var(--amber)' : 'var(--green)' }}>
-                {noFlows ? '○' : '●'} external cash flows in the ledger
-              </span>{noFlows && ' — add deposits on /transactions'}
+              </span>{noHistory && ' — one is written each day by the scheduled job, or whenever you open the dashboard'}
               <br /><br />
-              Without the flows, the index would be compared on a buy-and-hold basis that you
-              never actually followed.
+              A transaction ledger is <em>not</em> required. With one, your real cash flows are
+              replayed into the index; without one, the comparison falls back to buy-and-hold
+              from your first snapshot.
             </>
           }
         />
@@ -288,7 +322,7 @@ export default function BenchmarkPage() {
               </div>
               <div>
                 <div style={{ fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--text4)', marginBottom: 6 }}>
-                  Same money in {symbol}
+                  {hasFlows ? `Same money in ${symbol}` : `Buy-and-hold ${symbol}`}
                 </div>
                 <div style={{ fontFamily: "'Instrument Serif', serif", fontSize: 24, color: 'var(--blue)' }}>
                   {orDash(shadowToday, fmtCZK)}
@@ -309,9 +343,11 @@ export default function BenchmarkPage() {
               )}
             </div>
             <div style={{ marginTop: 14, fontSize: 11, color: 'var(--text3)', lineHeight: 1.7 }}>
-              Every external contribution you made was bought into {symbol} on the same day, at
-              that day&rsquo;s price and exchange rate. A Czech investor&rsquo;s index return
-              includes the currency move, and it is included here.
+              {hasFlows
+                ? <>Every external contribution you made was bought into {symbol} on the same day, at that day&rsquo;s price and exchange rate.</>
+                : <>Your portfolio&rsquo;s value at the first snapshot, invested in {symbol} on that date and held. This ignores anything you paid in since — add transactions for a flow-adjusted comparison.</>}
+              {' '}A Czech investor&rsquo;s index return includes the currency move, and it is
+              included here.
             </div>
           </Panel>
         </>

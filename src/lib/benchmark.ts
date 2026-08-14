@@ -161,10 +161,14 @@ export function windowStart(window: BenchmarkWindow, today: string): string | nu
  *
  * Rows written before live FX was available carry null and are skipped rather
  * than defaulted — a fabricated rate would silently corrupt the comparison.
+ * `fallbackRate` covers the case where no snapshot carries a rate at all; using
+ * today's rate throughout is wrong in detail but keeps the page usable, and the
+ * UI says so.
  */
 export function fxByDateFromSnapshots(
   snapshots: { snapshot_date: string; fx_usd?: number | null; fx_eur?: number | null }[],
-  currency: string
+  currency: string,
+  fallbackRate?: number | null
 ): FxByDate {
   const out: FxByDate = {}
   for (const s of snapshots) {
@@ -174,6 +178,45 @@ export function fxByDateFromSnapshots(
       : null
     if (rate == null || !isFinite(rate) || rate <= 0) continue
     out[s.snapshot_date] = rate
+  }
+  if (Object.keys(out).length === 0 && fallbackRate && fallbackRate > 0) {
+    // One entry is enough: rateOn() falls back to the earliest known rate for
+    // every date, so the whole series is priced at this one rate.
+    out[snapshots[0]?.snapshot_date ?? '1970-01-01'] = fallbackRate
+  }
+  return out
+}
+
+/**
+ * Buy-and-hold comparison: what a lump sum invested on day one would be worth.
+ *
+ * Used when there is no transaction history to replay. It is a weaker
+ * comparison than the shadow portfolio — it ignores when money actually
+ * arrived — but it answers "did my picks beat the index over this period",
+ * which is most of what people want, and it works on day one.
+ */
+export function buyAndHold(
+  startValueCZK: number,
+  prices: BenchmarkPrice[],
+  fxByDate: FxByDate,
+  from: string
+): { date: string; valueCZK: number }[] {
+  const sorted = [...prices]
+    .filter(p => p.price_date >= from)
+    .sort((a, b) => a.price_date.localeCompare(b.price_date))
+  if (sorted.length === 0 || startValueCZK <= 0) return []
+
+  const startRate = rateOn(fxByDate, sorted[0].price_date)
+  if (startRate == null) return []
+  const unitCostCZK = sorted[0].close * startRate
+  if (unitCostCZK <= 0) return []
+  const units = startValueCZK / unitCostCZK
+
+  const out: { date: string; valueCZK: number }[] = []
+  for (const p of sorted) {
+    const rate = rateOn(fxByDate, p.price_date)
+    if (rate == null) continue
+    out.push({ date: p.price_date, valueCZK: units * p.close * rate })
   }
   return out
 }

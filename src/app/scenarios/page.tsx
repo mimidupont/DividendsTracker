@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import Badge from '@/components/Badge'
 import { PageShell, PageHeader, LoadingShell, EmptyState, MetricCards, Panel, orDash, DASH } from '@/components/PageShell'
+import SetupNotice from '@/components/SetupNotice'
 import { useAppData } from '@/hooks/useAppData'
 import { useFx } from '@/hooks/useFx'
 import { useMarketData } from '@/hooks/useMarketData'
@@ -107,6 +108,8 @@ export default function ScenariosPage() {
         title="Scenarios"
         subtitle="Stress tests against your actual positions — mortgages do not shrink when property falls"
       />
+
+      <SetupNotice tables={data.missingTables.filter(t => t === 'scenarios')} />
 
       {/* Presets */}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 16 }}>
