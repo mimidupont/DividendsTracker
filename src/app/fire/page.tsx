@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from 'react'
 import Badge from '@/components/Badge'
 import RunwayCard from '@/components/RunwayCard'
 import { PageShell, PageHeader, LoadingShell, MetricCards, Panel, orDash, DASH } from '@/components/PageShell'
+import SetupNotice from '@/components/SetupNotice'
 import { useAppData } from '@/hooks/useAppData'
 import { useFx } from '@/hooks/useFx'
 import { useMarketData } from '@/hooks/useMarketData'
@@ -123,6 +124,8 @@ export default function FirePage() {
           </button>
         ) : undefined}
       />
+
+      <SetupNotice tables={data.missingTables.filter(t => t === 'financial_plan' || t === 'expense_log')} />
 
       {/* Hero progress */}
       <div style={{

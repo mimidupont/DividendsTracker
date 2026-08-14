@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import Badge from '@/components/Badge'
 import { PageShell, PageHeader, LoadingShell, EmptyState, Panel } from '@/components/PageShell'
+import SetupNotice from '@/components/SetupNotice'
 import { useAppData } from '@/hooks/useAppData'
 import { useFx } from '@/hooks/useFx'
 import { useMarketData } from '@/hooks/useMarketData'
@@ -24,6 +25,7 @@ const STATUS_COLORS = { ok: 'var(--green)', watch: 'var(--amber)', breach: 'var(
 
 export default function RebalancePage() {
   const data = useAppData()
+  const missingTables = data.missingTables.filter(t => t === 'allocation_targets')
   const { fx } = useFx()
   const market = useMarketData()
   const crypto = useCryptoPrices()
@@ -35,6 +37,7 @@ export default function RebalancePage() {
   const [editTargets, setEditTargets] = useState(false)
   const [draft, setDraft] = useState<Record<string, string>>({})
   const [saving, setSaving] = useState(false)
+  const [newBucket, setNewBucket] = useState('')
 
   const symbolKey = data.holdings.map(h => h.symbol).join(',')
   const coinKey = data.cryptoHoldings.map(c => c.coin_id).join(',')
@@ -63,6 +66,20 @@ export default function RebalancePage() {
   const trades = useMemo(() => fullRebalanceTrades(drift), [drift])
   const sum = targetsSum(data.allocationTargets, scope)
   const hasTargets = data.allocationTargets.some(t => t.scope === scope)
+
+  // Buckets worth offering even when you hold none of them yet — you cannot set
+  // a target for an asset class you are trying to start building otherwise.
+  const suggestedBuckets = useMemo(() => {
+    const present = new Set(drift.map(d => d.bucket))
+    const candidates = scope === 'asset_class'
+      ? ['stock', 'etf', 'cash', 'crypto', 'realestate']
+      : scope === 'region'
+        ? ['US', 'EU', 'CZ', 'UK', 'Global', 'EM']
+        : scope === 'sector'
+          ? Array.from(new Set(data.assetMetadata.map(m => m.sector).filter((x): x is string => !!x)))
+          : data.holdings.map(h => h.symbol)
+    return candidates.filter(c => !present.has(c))
+  }, [scope, drift, data.assetMetadata, data.holdings])
 
   const saveTargets = async () => {
     if (!activeProfile) return
@@ -104,6 +121,28 @@ export default function RebalancePage() {
     setEditTargets(true)
   }
 
+  // Rows to render: everything you hold, plus any bucket added by hand during
+  // this edit that has no position behind it yet.
+  const editableRows = editTargets
+    ? [
+        ...drift,
+        ...Object.keys(draft)
+          .filter(b => !drift.some(d => d.bucket === b))
+          .map(bucket => ({
+            bucket, currentCZK: 0, currentPct: 0, targetPct: 0,
+            driftPct: 0, bandPct: 0.05, status: 'ok' as const, deltaCZK: 0,
+          })),
+      ]
+    : drift
+
+  const addBucket = (bucket: string) => {
+    const clean = bucket.trim()
+    if (!clean) return
+    setDraft(d => ({ ...d, [clean]: d[clean] ?? '0' }))
+    setNewBucket('')
+    setEditTargets(true)
+  }
+
   return (
     <PageShell maxWidth={1100}>
       <PageHeader
@@ -116,6 +155,8 @@ export default function RebalancePage() {
           </button>
         }
       />
+
+      <SetupNotice tables={missingTables} />
 
       {/* Scope tabs */}
       <div style={{ display: 'flex', border: '1px solid var(--border2)', borderRadius: 6, overflow: 'hidden', marginBottom: 16, width: 'fit-content' }}>
@@ -238,7 +279,7 @@ export default function RebalancePage() {
                 </tr>
               </thead>
               <tbody>
-                {drift.map(row => (
+                {editableRows.map(row => (
                   <tr key={row.bucket}>
                     <td style={tdL}>
                       <span style={{ fontWeight: 500, textTransform: 'capitalize' }}>{row.bucket}</span>
@@ -285,6 +326,27 @@ export default function RebalancePage() {
                 ))}
               </tbody>
             </table>
+            {editTargets && (
+              <div style={{
+                padding: '12px 18px', borderTop: '1px solid var(--border)',
+                display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap',
+              }}>
+                <span style={{ fontSize: 11, color: 'var(--text3)' }}>Add a bucket you don&rsquo;t hold yet:</span>
+                {suggestedBuckets.slice(0, 8).map(b => (
+                  <button key={b} onClick={() => addBucket(b)} style={{
+                    padding: '3px 10px', borderRadius: 4, fontSize: 10, cursor: 'pointer',
+                    background: 'var(--bg3)', border: '1px solid var(--border2)',
+                    color: 'var(--text2)', textTransform: 'capitalize',
+                  }}>+ {b}</button>
+                ))}
+                <input
+                  placeholder="or type one" value={newBucket}
+                  onChange={e => setNewBucket(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter') addBucket(newBucket) }}
+                  style={{ ...inputStyle, width: 140, padding: '4px 8px', fontSize: 11 }}
+                />
+              </div>
+            )}
           </Panel>
 
           {/* Full rebalance behind a toggle */}

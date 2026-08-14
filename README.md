@@ -163,7 +163,22 @@ banner instead of failing with an opaque network error.
 3. Add the two env vars above
 4. Deploy — Next.js is auto-detected
 
-### 4. Local development
+### 4. Daily snapshots without logging in
+
+The P&L chart, benchmark comparison and FX attribution are all built from daily
+snapshots. Originally these were written only by the browser when you opened the
+dashboard, so days you didn't visit left holes in the history.
+
+`/api/cron/snapshot` now does the same work server-side. `vercel.json` schedules
+it twice daily; any external scheduler hitting that URL works too. Set
+`CRON_SECRET` in your environment and Vercel will send it as a bearer token —
+without it the endpoint is open, which is acceptable only for a private deployment.
+
+The route skips writing entirely if live FX is unavailable, rather than
+recording a value struck at stale rates that would show up in the history as a
+step change that never happened.
+
+### 5. Local development
 
 ```bash
 npm install

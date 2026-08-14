@@ -3,6 +3,8 @@ import { useMemo } from 'react'
 import Badge from '@/components/Badge'
 import { PageShell, PageHeader, LoadingShell, EmptyState, MetricCards, Panel, orDash, DASH } from '@/components/PageShell'
 import { usePortfolioSnapshots } from '@/hooks/usePortfolioSnapshots'
+import { btnStyle } from '@/lib/ui'
+import { useState } from 'react'
 import {
   attributeSeries, attributeByMonth, attributionTotals,
   attributionAvailableFrom, constantFxSeries, hasExposureData,
@@ -17,6 +19,27 @@ import {
 
 export default function FxAttributionPage() {
   const { snapshots, loading } = usePortfolioSnapshots()
+  const [running, setRunning] = useState(false)
+  const [runResult, setRunResult] = useState<string | null>(null)
+
+  // Lets the user write today's snapshot on demand rather than waiting for the
+  // scheduled job — useful right after running the migration, when the series
+  // is empty and there is otherwise nothing to look at for two days.
+  const snapshotNow = async () => {
+    setRunning(true)
+    setRunResult(null)
+    try {
+      const res = await fetch('/api/cron/snapshot')
+      const json = await res.json()
+      setRunResult(res.ok
+        ? 'Snapshot written. A second day of data is needed before attribution can be computed.'
+        : `Failed: ${json?.error ?? res.status}`)
+    } catch (e) {
+      setRunResult(`Failed: ${e}`)
+    } finally {
+      setRunning(false)
+    }
+  }
 
   const withExposure = useMemo(
     () => (snapshots as any[]).filter(hasExposureData),
@@ -33,7 +56,21 @@ export default function FxAttributionPage() {
   if (withExposure.length < 2) {
     return (
       <PageShell>
-        <PageHeader title="FX attribution" subtitle="Was it the market, or was it the koruna?" />
+        <PageHeader
+          title="FX attribution"
+          subtitle="Was it the market, or was it the koruna?"
+          actions={
+            <button onClick={snapshotNow} disabled={running} style={btnStyle('secondary')}>
+              {running ? 'Writing…' : '↻ Snapshot now'}
+            </button>
+          }
+        />
+        {runResult && (
+          <div style={{
+            background: 'var(--bg3)', border: '1px solid var(--border)', borderRadius: 8,
+            padding: '10px 14px', marginBottom: 14, fontSize: 11, color: 'var(--text2)',
+          }}>{runResult}</div>
+        )}
         <EmptyState
           icon="⇅"
           title="Not enough exposure history yet"
@@ -44,8 +81,9 @@ export default function FxAttributionPage() {
               columns are new, so the series starts from the first snapshot written after the
               migration ran.
               <br /><br />
-              Snapshots are saved automatically when you open the dashboard, once prices, crypto
-              and live FX have all loaded. Come back in a couple of days.
+              A snapshot is written once a day by the scheduled job — see <code>vercel.json</code>
+              — and also whenever you open the dashboard. Neither requires you to be logged in
+              daily any more. Press &ldquo;Snapshot now&rdquo; to write today&rsquo;s immediately.
               {withExposure.length === 1 && (
                 <><br /><br />One snapshot recorded so far — two are needed for a first comparison.</>
               )}

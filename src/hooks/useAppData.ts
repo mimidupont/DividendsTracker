@@ -36,6 +36,8 @@ interface AppData {
   profileId: string | null
   /** Non-null when one or more queries failed — totals would be understated. */
   error: string | null
+  /** v2 tables that do not exist yet, i.e. migrations that have not been run. */
+  missingTables: string[]
 }
 
 // Cache is keyed by profile ID so switching profiles gets fresh data
@@ -59,6 +61,7 @@ async function fetchAll(profileId: string): Promise<AppData> {
   if (supabaseConfigError) {
     return { ...EMPTY, cachedAt: Date.now(), profileId, error: supabaseConfigError }
   }
+
   const [h, p, div, b, c, r, txn, meta, targets, plan, expenses, scen, assumptions] = await Promise.all([
     supabase.from('holdings').select('*').eq('profile_id', profileId).order('symbol'),
     // Every year is fetched — the projections page shows a multi-year table and
@@ -80,13 +83,25 @@ async function fetchAll(profileId: string): Promise<AppData> {
 
   // A failed query used to be indistinguishable from "you own nothing", which
   // quietly wiped an asset class out of net worth. Surface it instead.
-  //
-  // The v2 tables are excluded from this check on purpose: before their
-  // migration has been run they legitimately 404, and treating that as data
-  // loss would show a scary banner on every page of a working v1 install.
   const failures = [h, p, div, b, c, r]
     .map(res => res.error?.message)
     .filter((m): m is string => !!m)
+
+  // A v2 table that does not exist yet is not an error — it means the migration
+  // has not been run. Reported separately so the pages that need it can say
+  // exactly which file to run, instead of rendering an empty state that looks
+  // identical to "you have no data" and leaves the user guessing.
+  const v2 = [
+    ['transactions', txn], ['asset_metadata', meta], ['allocation_targets', targets],
+    ['financial_plan', plan], ['expense_log', expenses], ['scenarios', scen],
+    ['market_assumptions', assumptions],
+  ] as const
+  const missingTables = v2
+    .filter(([, res]) => isMissingTable(res.error))
+    .map(([name]) => name)
+  const v2Failures = v2
+    .filter(([, res]) => res.error && !isMissingTable(res.error))
+    .map(([name, res]) => `${name}: ${res.error!.message}`)
 
   return {
     holdings:          h.data   ?? [],
@@ -104,8 +119,21 @@ async function fetchAll(profileId: string): Promise<AppData> {
     marketAssumptions: assumptions.data ?? [],
     cachedAt:          Date.now(),
     profileId,
-    error:             failures.length ? failures.join(' · ') : null,
+    error:             [...failures, ...v2Failures].join(' · ') || null,
+    missingTables,
   }
+}
+
+/**
+ * Postgres 42P01 / PostgREST PGRST205 both mean "that table isn't there".
+ * Distinguishing this from a real failure is what lets the UI say "run
+ * migration 003" rather than showing a blank page.
+ */
+function isMissingTable(error: { code?: string; message?: string } | null): boolean {
+  if (!error) return false
+  if (error.code === '42P01' || error.code === 'PGRST205') return true
+  const msg = (error.message ?? '').toLowerCase()
+  return msg.includes('does not exist') || msg.includes('could not find the table')
 }
 
 async function getOrFetch(profileId: string, force = false): Promise<AppData> {
@@ -137,7 +165,7 @@ const EMPTY: AppData = {
   bankAccounts: [], cryptoHoldings: [], realEstate: [],
   transactions: [], assetMetadata: [], allocationTargets: [],
   financialPlan: null, expenseLog: [], scenarios: [], marketAssumptions: [],
-  cachedAt: 0, profileId: null, error: null,
+  cachedAt: 0, profileId: null, error: null, missingTables: [],
 }
 
 export function useAppData(): UseAppData {

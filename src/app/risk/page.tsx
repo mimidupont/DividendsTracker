@@ -2,6 +2,7 @@
 import { useEffect, useMemo } from 'react'
 import Badge from '@/components/Badge'
 import { PageShell, PageHeader, LoadingShell, EmptyState, MetricCards, Panel, orDash, DASH } from '@/components/PageShell'
+import SetupNotice from '@/components/SetupNotice'
 import { useAppData } from '@/hooks/useAppData'
 import { useFx } from '@/hooks/useFx'
 import { useMarketData } from '@/hooks/useMarketData'
@@ -153,6 +154,8 @@ export default function RiskPage() {
           </button>
         ) : undefined}
       />
+
+      <SetupNotice tables={data.missingTables.filter(t => t === 'asset_metadata')} />
 
       {unclassified.length > 0 && (
         <div style={{
