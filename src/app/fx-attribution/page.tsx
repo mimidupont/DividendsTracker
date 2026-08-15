@@ -3,6 +3,8 @@ import { useMemo } from 'react'
 import Badge from '@/components/Badge'
 import { PageShell, PageHeader, LoadingShell, EmptyState, MetricCards, Panel, orDash, DASH } from '@/components/PageShell'
 import { usePortfolioSnapshots } from '@/hooks/usePortfolioSnapshots'
+import SetupNotice from '@/components/SetupNotice'
+import Link from 'next/link'
 import { btnStyle } from '@/lib/ui'
 import { useState } from 'react'
 import {
@@ -18,29 +20,7 @@ import {
 } from 'recharts'
 
 export default function FxAttributionPage() {
-  const { snapshots, loading } = usePortfolioSnapshots()
-  const [running, setRunning] = useState(false)
-  const [runResult, setRunResult] = useState<string | null>(null)
-
-  // Lets the user write today's snapshot on demand rather than waiting for the
-  // scheduled job — useful right after running the migration, when the series
-  // is empty and there is otherwise nothing to look at for two days.
-  const snapshotNow = async () => {
-    setRunning(true)
-    setRunResult(null)
-    try {
-      const res = await fetch('/api/cron/snapshot')
-      const json = await res.json()
-      setRunResult(res.ok
-        ? 'Snapshot written. A second day of data is needed before attribution can be computed.'
-        : `Failed: ${json?.error ?? res.status}`)
-    } catch (e) {
-      setRunResult(`Failed: ${e}`)
-    } finally {
-      setRunning(false)
-    }
-  }
-
+  const { snapshots, loading, error, exposureAvailable } = usePortfolioSnapshots()
   const withExposure = useMemo(
     () => (snapshots as any[]).filter(hasExposureData),
     [snapshots]
@@ -60,17 +40,20 @@ export default function FxAttributionPage() {
           title="FX attribution"
           subtitle="Was it the market, or was it the koruna?"
           actions={
-            <button onClick={snapshotNow} disabled={running} style={btnStyle('secondary')}>
-              {running ? 'Writing…' : '↻ Snapshot now'}
-            </button>
+            // The cron route needs CRON_SECRET, which the browser cannot hold,
+            // so today's snapshot is written by opening the dashboard instead.
+            <Link href="/" style={{ ...btnStyle('secondary'), textDecoration: 'none' }}>
+              ↻ Write today&rsquo;s snapshot
+            </Link>
           }
         />
-        {runResult && (
+        {error && (
           <div style={{
-            background: 'var(--bg3)', border: '1px solid var(--border)', borderRadius: 8,
-            padding: '10px 14px', marginBottom: 14, fontSize: 11, color: 'var(--text2)',
-          }}>{runResult}</div>
+            background: 'var(--amber-bg)', border: '1px solid var(--amber-bd)', color: 'var(--amber)',
+            borderRadius: 8, padding: '10px 14px', marginBottom: 14, fontSize: 11, lineHeight: 1.6,
+          }}>⚠ Snapshot history could not be loaded: {error}</div>
         )}
+        {!exposureAvailable && <SetupNotice tables={['portfolio_snapshots_exposure']} />}
         <EmptyState
           icon="⇅"
           title="Not enough exposure history yet"
@@ -81,9 +64,9 @@ export default function FxAttributionPage() {
               columns are new, so the series starts from the first snapshot written after the
               migration ran.
               <br /><br />
-              A snapshot is written once a day by the scheduled job — see <code>vercel.json</code>
-              — and also whenever you open the dashboard. Neither requires you to be logged in
-              daily any more. Press &ldquo;Snapshot now&rdquo; to write today&rsquo;s immediately.
+              A snapshot is written once a day by the scheduled job — see <code>vercel.json</code>,
+              which needs <code>CRON_SECRET</code> set — and also whenever you open the dashboard.
+              Opening the dashboard now writes today&rsquo;s immediately.
               {withExposure.length === 1 && (
                 <><br /><br />One snapshot recorded so far — two are needed for a first comparison.</>
               )}

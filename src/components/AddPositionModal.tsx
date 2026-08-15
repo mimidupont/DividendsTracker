@@ -22,17 +22,25 @@ export default function AddPositionModal({
   const [lookingUp, setLookingUp]       = useState(false)
   const [lookupStatus, setLookupStatus] = useState<'idle' | 'found' | 'notfound'>('idle')
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // The last symbol actually looked up, so backspacing to it and typing it out
+  // again doesn't re-run a scrape that already answered.
+  const lastLookedUpRef = useRef<string | null>(null)
 
   const set = (k: string, v: string | boolean) => setForm(f => ({ ...f, [k]: v }))
 
   useEffect(() => {
     const symbol = form.symbol.trim().toUpperCase()
-    if (symbol.length < 1) { setLookupStatus('idle'); return }
+    // Two characters minimum: every keystroke of "KO" used to fire its own
+    // lookup, and each one costs a live StockAnalysis fetch plus a Yahoo
+    // session handshake server-side.
+    if (symbol.length < 2) { setLookupStatus('idle'); return }
+    if (symbol === lastLookedUpRef.current) return
 
     if (debounceRef.current) clearTimeout(debounceRef.current)
     debounceRef.current = setTimeout(async () => {
       setLookingUp(true)
       setLookupStatus('idle')
+      lastLookedUpRef.current = symbol
       try {
         const res = await fetch('/api/market', {
           method: 'POST',
@@ -56,6 +64,8 @@ export default function AddPositionModal({
           setLookupStatus('notfound')
         }
       } catch {
+        // A failed lookup should be retryable, so don't remember it.
+        lastLookedUpRef.current = null
         setLookupStatus('notfound')
       } finally {
         setLookingUp(false)

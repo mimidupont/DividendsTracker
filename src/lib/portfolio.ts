@@ -405,6 +405,26 @@ export function investableNetWorthCZK(
 export const annualIncomeCZK = (positions: Position[]): number =>
   positions.reduce((s, p) => s + p.annualIncomeCZK, 0)
 
+/**
+ * Currencies present in the portfolio that have no CZK rate, in any asset class.
+ *
+ * `toCZK` deliberately leaves an unknown currency unconverted rather than
+ * converting it at some other currency's rate — but that means a bank account,
+ * coin or property in such a currency is added to net worth at 1:1 with nothing
+ * on screen to say so. Callers use this to render that warning.
+ */
+export const unconvertibleCurrencies = (
+  positions: Position[],
+  fx: Record<string, number>
+): string[] => {
+  const seen: string[] = []
+  for (const p of positions) {
+    if (hasFxRate(p.currency, fx)) continue
+    if (seen.indexOf(p.currency) < 0) seen.push(p.currency)
+  }
+  return seen.sort()
+}
+
 /** Assets only — liabilities excluded. Used for weights, where debt would distort shares. */
 export const assetPositions = (positions: Position[]): Position[] =>
   positions.filter(p => !p.isLiability && p.valueCZK > 0)

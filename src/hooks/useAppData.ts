@@ -6,7 +6,7 @@
  * When the profile changes (divvy:profile-change event), the cache is
  * invalidated and data is re-fetched automatically.
  */
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import {
   supabase, supabaseConfigError,
   Holding, DividendProjection, DividendReceived, BankAccount, CryptoHolding, RealEstate,
@@ -129,7 +129,7 @@ async function fetchAll(profileId: string): Promise<AppData> {
  * Distinguishing this from a real failure is what lets the UI say "run
  * migration 003" rather than showing a blank page.
  */
-function isMissingTable(error: { code?: string; message?: string } | null): boolean {
+export function isMissingTable(error: { code?: string; message?: string } | null | undefined): boolean {
   if (!error) return false
   if (error.code === '42P01' || error.code === 'PGRST205') return true
   const msg = (error.message ?? '').toLowerCase()
@@ -233,5 +233,8 @@ export function useAppData(): UseAppData {
     await loadForProfile(pid, true)
   }, [loadForProfile])
 
-  return { ...data, loading, reload }
+  // Memoised: spreading `data` into a fresh object every render gave the hook a
+  // new identity each time, so every downstream useMemo keyed on it recomputed
+  // and the dashboard's snapshot effect fired on every render.
+  return useMemo(() => ({ ...data, loading, reload }), [data, loading, reload])
 }

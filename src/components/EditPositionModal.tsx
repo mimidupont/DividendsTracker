@@ -29,7 +29,7 @@ export default function EditPositionModal({
   const set = (k: string, v: string | boolean) => setForm(f => ({ ...f, [k]: v }))
 
   const handleSubmit = async () => {
-    if (!form.symbol || !form.name || !form.shares || !form.avg_price) {
+    if (!form.name || !form.shares || !form.avg_price) {
       setError('All required fields must be filled.')
       return
     }
@@ -41,8 +41,11 @@ export default function EditPositionModal({
     }
 
     setSaving(true)
+    // `symbol` is deliberately not updated. holding_lots, dividends_received,
+    // dividend_projections, asset_metadata and transactions all key on the
+    // ticker *text*, so a rename here would silently detach every one of them:
+    // realized P&L would lose its cost basis and the dividend log would orphan.
     const { error: err } = await supabase.from('holdings').update({
-      symbol: form.symbol.toUpperCase().trim(),
       name: form.name.trim(),
       shares,
       avg_price: price,
@@ -69,7 +72,13 @@ export default function EditPositionModal({
       <ErrorBox msg={error} />
       <FormGrid>
         <Field label="Ticker symbol">
-          <input style={inputStyle} value={form.symbol} onChange={e => set('symbol', e.target.value)} />
+          <input
+            style={{ ...inputStyle, opacity: 0.6, cursor: 'not-allowed' }}
+            value={form.symbol}
+            readOnly
+            disabled
+            title="The ticker keys this position's lots, dividends, projections and transactions. Delete and re-add the position to change it."
+          />
         </Field>
         <Field label="Currency">
           <select style={inputStyle} value={form.currency} onChange={e => set('currency', e.target.value)}>

@@ -126,16 +126,32 @@ export function twr(points: ValuePoint[], flows: { date: string; amountCZK: numb
   for (let i = 1; i < series.length; i++) {
     const prev = series[i - 1]
     const curr = series[i]
+    if (prev.value <= 0) continue
 
-    // Flows landing inside (prev, curr] are treated as arriving at the end of
-    // the sub-period, which is exact when snapshots are daily.
+    // Modified Dietz within the sub-period: each flow is weighted by the share
+    // of the period it was actually invested for.
+    //
+    // Treating every flow as arriving at the close is exact for daily
+    // snapshots, but before the cron has been running a while the gaps are
+    // weeks long — and a deposit made on day 2 of a 30-day gap earned nearly
+    // the whole period's return, which the end-of-period assumption credited
+    // to the market instead.
+    const spanDays = Math.max(1, daysBetweenISO(prev.date, curr.date))
+
     let flow = 0
+    let weighted = 0
     for (const f of flowsByDate) {
-      if (f.date > prev.date && f.date <= curr.date) flow += f.amount
+      if (f.date <= prev.date || f.date > curr.date) continue
+      flow += f.amount
+      const elapsed = daysBetweenISO(prev.date, f.date)
+      // Fraction of the period remaining after the money arrived.
+      const weight = Math.min(1, Math.max(0, (spanDays - elapsed) / spanDays))
+      weighted += f.amount * weight
     }
 
-    if (prev.value <= 0) continue
-    const periodReturn = (curr.value - flow - prev.value) / prev.value
+    const denominator = prev.value + weighted
+    if (denominator <= 0) continue
+    const periodReturn = (curr.value - prev.value - flow) / denominator
     if (!isFinite(periodReturn)) continue
     compounded *= 1 + periodReturn
     sawPeriod = true
@@ -144,6 +160,9 @@ export function twr(points: ValuePoint[], flows: { date: string; amountCZK: numb
   if (!sawPeriod || !isFinite(compounded)) return null
   return compounded - 1
 }
+
+const daysBetweenISO = (a: string, b: string): number =>
+  Math.round((Date.parse(b) - Date.parse(a)) / DAY_MS)
 
 /** Annualise a total return achieved over `years`. */
 export function annualise(totalReturn: number, years: number): number | null {
@@ -176,7 +195,9 @@ export function maxDrawdown(series: ValuePoint[]): Drawdown | null {
     if (dd < worst) { worst = dd; worstPeak = peakDate; worstTrough = point.date }
   }
 
-  if (worst === 0) return { pct: 0, peakDate: sorted[0].date, troughDate: sorted[0].date }
+  // A series that only ever rose has no measured drawdown. Reporting 0.0% would
+  // read as a measurement; null lets the UI show an em dash instead.
+  if (worst === 0) return null
   return { pct: worst, peakDate: worstPeak, troughDate: worstTrough }
 }
 

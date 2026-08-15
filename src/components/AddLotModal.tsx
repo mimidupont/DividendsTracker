@@ -6,6 +6,13 @@ import { todayISO } from '@/lib/date'
 import Modal from './Modal'
 import { Field, FormGrid, FormActions, ErrorBox, inputStyle } from './FormFields'
 
+/** PostgREST's code for "no such function", i.e. migration 009 not run yet. */
+function isMissingFunction(error: { code?: string; message?: string }): boolean {
+  if (error.code === 'PGRST202' || error.code === '42883') return true
+  const msg = (error.message ?? '').toLowerCase()
+  return msg.includes('could not find the function') || msg.includes('does not exist')
+}
+
 export default function AddLotModal({
   holding,
   onClose,
@@ -42,6 +49,33 @@ export default function AddLotModal({
 
     setSaving(true)
 
+    // One statement, so the position and its lot move together. Doing this as
+    // two requests meant a failure on the second left the shares updated with
+    // no lot to explain them.
+    const { error: rpcErr } = await supabase.rpc('add_holding_lot', {
+      p_holding_id: holding.id,
+      p_profile_id: activeProfile.id,
+      p_shares: newShares,
+      p_price: newPrice,
+      p_purchase_date: form.purchase_date || null,
+      p_notes: form.notes || null,
+    })
+
+    if (!rpcErr) {
+      setSaving(false)
+      onSaved(); onClose()
+      return
+    }
+
+    // Migration 009 has not been run: fall back to the two-write path rather
+    // than blocking the user, and say so if the second write is the one that
+    // fails.
+    if (!isMissingFunction(rpcErr)) {
+      setError(rpcErr.message)
+      setSaving(false)
+      return
+    }
+
     const totalOldCost  = holding.shares * holding.avg_price
     const totalNewCost  = newShares * newPrice
     const totalShares   = holding.shares + newShares
@@ -69,7 +103,10 @@ export default function AddLotModal({
     if (lotErr) {
       // The position itself is already updated and correct; only the lot
       // history is missing, so say so instead of failing silently.
-      setError(`Position updated, but the lot history could not be saved: ${lotErr.message}`)
+      setError(
+        `Position updated, but the lot history could not be saved: ${lotErr.message}. ` +
+        'Run supabase/migrations/009_add_holding_lot.sql to make this atomic.'
+      )
       onSaved()
       return
     }
@@ -104,8 +141,22 @@ export default function AddLotModal({
         <Field label="Shares to buy">
           <input style={inputStyle} type="number" placeholder="10" value={form.shares} onChange={e => set('shares', e.target.value)} />
         </Field>
-        <Field label={`Purchase price per share (${holding.currency})`}>
-          <input style={inputStyle} type="number" placeholder="74.50" value={form.purchase_price} onChange={e => set('purchase_price', e.target.value)} />
+        {/* The currency is fixed to the holding's, not a choice: the new lot is
+            blended straight into the weighted average, so a price entered in
+            another currency would permanently corrupt the cost basis. */}
+        <Field label="Purchase price per share">
+          <div style={{ position: 'relative' }}>
+            <input
+              style={{ ...inputStyle, paddingRight: 52 }}
+              type="number" placeholder="74.50" value={form.purchase_price}
+              onChange={e => set('purchase_price', e.target.value)}
+            />
+            <span style={{
+              position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)',
+              fontSize: 11, color: 'var(--text3)', pointerEvents: 'none',
+              fontFamily: "'DM Mono', monospace",
+            }}>{holding.currency}</span>
+          </div>
         </Field>
         <Field label="Purchase date">
           <input style={inputStyle} type="date" value={form.purchase_date} onChange={e => set('purchase_date', e.target.value)} />

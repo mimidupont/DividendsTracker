@@ -9,7 +9,7 @@ import { useCryptoPrices } from '@/hooks/useCryptoPrices'
 import { useAppData } from '@/hooks/useAppData'
 import { useProfile } from '@/lib/profile'
 import { usePortfolioSnapshots } from '@/hooks/usePortfolioSnapshots'
-import { positionsMetrics, portfolioTotals, buildPositions } from '@/lib/portfolio'
+import { positionsMetrics, portfolioTotals, buildPositions, unconvertibleCurrencies } from '@/lib/portfolio'
 import { currencyExposure } from '@/lib/exposure'
 import { contributionsVsGrowth, externalFlows } from '@/lib/transactions'
 import RunwayCard from '@/components/RunwayCard'
@@ -50,7 +50,7 @@ export default function Dashboard() {
   const { fx, fxLive, fxLoading, fxTs, refresh: refreshFx } = useFx()
   const market = useMarketData()
   const cryptoPrices = useCryptoPrices()
-  const { snapshots, saveSnapshot, getPLSummary } = usePortfolioSnapshots()
+  const { snapshots, saveSnapshot, getPLSummary, error: snapshotError } = usePortfolioSnapshots()
 
   const [plWindow, setPlWindow] = useState<PLWindow>('30d')
 
@@ -119,6 +119,14 @@ export default function Dashboard() {
     [appData, fx, market, cryptoPrices]
   )
   const exposure = useMemo(() => currencyExposure(allPositions, fx), [allPositions, fx])
+
+  // Cash, crypto and property go through bare toCZK calls, which leave an
+  // unknown currency unconverted. Collect them across every class so the banner
+  // above can say the total is wrong rather than showing it as if it were fine.
+  const fxProblems = useMemo(
+    () => unconvertibleCurrencies(allPositions, fx),
+    [allPositions, fx]
+  )
 
   useEffect(() => {
     if (!loading && !error && fxLive && pricesReady && cryptoReady && totalNetWorth > 0) {
@@ -277,15 +285,24 @@ export default function Dashboard() {
         </div>
 
         {/* Anything that would make the totals below wrong is stated, not hidden */}
-        {(error || !fxLive || market.state === 'error') && (
+        {(error || !fxLive || market.state === 'error' || fxProblems.length > 0 || snapshotError) && (
           <div style={{
             background: 'var(--amber-bg)', border: '1px solid var(--amber-bd)',
             color: 'var(--amber)', borderRadius: 10, padding: '10px 14px',
             marginBottom: 16, fontSize: 11, lineHeight: 1.6,
           }}>
             {error && <div>⚠ Some data could not be loaded — totals are incomplete: {error}</div>}
+            {snapshotError && <div>⚠ Snapshot history unavailable, so the P&amp;L windows below have nothing to compare against: {snapshotError}</div>}
             {!fxLive && <div>⚠ Live FX unavailable — CZK values use fallback rates and are approximate.</div>}
             {market.state === 'error' && <div>⚠ Live prices unavailable — positions are valued at cost. {market.errorMsg}</div>}
+            {fxProblems.length > 0 && (
+              <div>
+                ⚠ No CZK rate for {fxProblems.join(', ')} — holdings in{' '}
+                {fxProblems.length === 1 ? 'that currency is' : 'those currencies are'} counted
+                into net worth <strong>unconverted</strong>, so the total below is wrong by
+                whatever the real rate is.
+              </div>
+            )}
           </div>
         )}
 

@@ -35,8 +35,14 @@ export interface RealizedLot {
   currency: string
   /** Days held — matters for the Czech 3-year time test. */
   holdingDays: number
-  /** True when the lot was held ≥ 3 years (Czech time-test exemption). */
+  /** True when the lot was held ≥ 3 calendar years (Czech time-test exemption). */
   passesTimeTest: boolean
+  /**
+   * True when no buy lot could be matched to these shares, so `costLocal` is 0
+   * and the gain is really just proceeds. Happens when the ledger starts after
+   * the original purchase; the UI flags it rather than quietly understating.
+   */
+  basisIncomplete?: boolean
 }
 
 export interface CostBasis {
@@ -46,9 +52,26 @@ export interface CostBasis {
   currency: string
 }
 
-const THREE_YEARS_DAYS = 365 * 3
 const daysBetween = (a: string, b: string) =>
   Math.round((Date.parse(b) - Date.parse(a)) / 86_400_000)
+
+/**
+ * The Czech time test is a *calendar* span, not a day count.
+ *
+ * 365 × 3 = 1095 days, but any three-year span containing a leap day is 1096,
+ * so a day count reports a lot as exempt when it is a day short. Being wrong in
+ * the permissive direction on a tax figure is the bad direction.
+ *
+ * 29 February + 3 years has no counterpart date; JavaScript rolls it to 1 March,
+ * which is the conservative reading and the one used here.
+ */
+function passesThreeYearTest(buyDate: string, sellDate: string): boolean {
+  const buy = new Date(`${buyDate}T00:00:00Z`)
+  if (isNaN(buy.getTime())) return false
+  const eligible = new Date(buy)
+  eligible.setUTCFullYear(eligible.getUTCFullYear() + 3)
+  return sellDate >= eligible.toISOString().slice(0, 10)
+}
 
 const byDate = (a: Transaction, b: Transaction) =>
   a.txn_date.localeCompare(b.txn_date) ||
@@ -61,6 +84,21 @@ const byDate = (a: Transaction, b: Transaction) =>
  */
 const fxOf = (t: Transaction): number =>
   isFinite(t.fx_rate_czk) && t.fx_rate_czk > 0 ? t.fx_rate_czk : 1
+
+/**
+ * A transaction's CZK value — the single definition, used by realized P&L, the
+ * ledger table, external flows and the summary alike.
+ *
+ * The stored `amount_czk` is authoritative when it is a real number; otherwise
+ * the amount is converted with the row's own rate, falling back through `fxOf`.
+ * Two different fallbacks in one file meant the same row counted as 0 in one
+ * panel and its full value in another.
+ */
+export const czkOf = (t: Transaction): number => {
+  if (isFinite(t.amount_czk) && t.amount_czk !== 0) return t.amount_czk
+  const converted = t.amount * fxOf(t)
+  return isFinite(converted) ? converted : 0
+}
 
 /** Cost-weighted average buy rate across lots. */
 function weightedFx(lots: Lot[]): number {
@@ -174,7 +212,7 @@ export function realizedPL(txns: Transaction[], method: 'fifo' | 'avg' = 'fifo')
       // is reported alongside rather than folded away.
       const record = (
         shares: number, costLocal: number, proceedsLocal: number,
-        buyFx: number, held: number
+        buyFx: number, buyDate: string | null
       ) => {
         const gainCZK = proceedsLocal * sellFx - costLocal * buyFx
         out.push({
@@ -182,8 +220,12 @@ export function realizedPL(txns: Transaction[], method: 'fifo' | 'avg' = 'fifo')
           proceedsLocal, costLocal, gainLocal: proceedsLocal - costLocal,
           gainCZK,
           fxGainCZK: gainCZK - (proceedsLocal - costLocal) * sellFx,
-          currency: t.currency, holdingDays: held,
-          passesTimeTest: held >= THREE_YEARS_DAYS,
+          currency: t.currency,
+          holdingDays: buyDate ? daysBetween(buyDate, t.txn_date) : 0,
+          // Unmatched shares have no purchase date, so no exemption can be
+          // claimed for them until the missing buy is backfilled.
+          passesTimeTest: buyDate ? passesThreeYearTest(buyDate, t.txn_date) : false,
+          ...(buyDate ? {} : { basisIncomplete: true }),
         })
       }
 
@@ -193,11 +235,15 @@ export function realizedPL(txns: Transaction[], method: 'fifo' | 'avg' = 'fifo')
         const avg = totalShares > 0 ? totalCost / totalShares : 0
         const avgFx = weightedFx(lots)
         const matched = Math.min(remaining, totalShares)
-        const oldest = lots[0]?.date ?? t.txn_date
-        const held = daysBetween(oldest, t.txn_date)
-        record(matched, avg * matched, proceedsPerShare * matched, avgFx, held)
+        const oldest = lots[0]?.date ?? null
+        if (matched > 0) {
+          record(matched, avg * matched, proceedsPerShare * matched, avgFx, oldest)
+        }
+        if (remaining - matched > 1e-9) {
+          record(remaining - matched, 0, proceedsPerShare * (remaining - matched), sellFx, null)
+        }
         const left = Math.max(0, totalShares - matched)
-        lots = left > 0
+        lots = left > 0 && oldest
           ? [{ date: oldest, shares: left, price: avg, currency: t.currency, fxRateCZK: avgFx }]
           : []
         continue
@@ -206,13 +252,17 @@ export function realizedPL(txns: Transaction[], method: 'fifo' | 'avg' = 'fifo')
       while (remaining > 0 && lots.length > 0) {
         const lot = lots[0]
         const take = Math.min(lot.shares, remaining)
-        record(
-          take, take * lot.price, take * proceedsPerShare,
-          lot.fxRateCZK, daysBetween(lot.date, t.txn_date)
-        )
+        record(take, take * lot.price, take * proceedsPerShare, lot.fxRateCZK, lot.date)
         lot.shares -= take
         remaining -= take
         if (lot.shares <= 1e-9) lots.shift()
+      }
+
+      // Shares sold with no buy behind them. Reporting the sale with a zero
+      // basis and a flag beats dropping it: the money did move, and silently
+      // understating realized P&L is exactly what a ledger is meant to prevent.
+      if (remaining > 1e-9) {
+        record(remaining, 0, remaining * proceedsPerShare, sellFx, null)
       }
     }
   }
@@ -235,9 +285,7 @@ export function externalFlows(txns: Transaction[]): ExternalFlow[] {
   const byDay = new Map<string, number>()
   for (const t of txns) {
     if (!t.is_external) continue
-    const czk = isFinite(t.amount_czk) ? t.amount_czk : t.amount * t.fx_rate_czk
-    if (!isFinite(czk)) continue
-    byDay.set(t.txn_date, (byDay.get(t.txn_date) ?? 0) + czk)
+    byDay.set(t.txn_date, (byDay.get(t.txn_date) ?? 0) + czkOf(t))
   }
   return Array.from(byDay, ([date, amountCZK]) => ({ date, amountCZK }))
     .sort((a, b) => a.date.localeCompare(b.date))
@@ -267,10 +315,17 @@ export function contributionsVsGrowth(
   const startValue = sorted[0].total_value_czk
   const startDate = sorted[0].snapshot_date
 
+  // Single ascending pass with a running total. Re-filtering the whole flow
+  // list per snapshot was O(n·m), and this runs on every dashboard render.
+  let flowIdx = 0
+  let contributed = 0
+  while (flowIdx < flows.length && flows[flowIdx].date <= startDate) flowIdx++
+
   return sorted.map(s => {
-    const contributed = flows
-      .filter(f => f.date > startDate && f.date <= s.snapshot_date)
-      .reduce((sum, f) => sum + f.amountCZK, 0)
+    while (flowIdx < flows.length && flows[flowIdx].date <= s.snapshot_date) {
+      contributed += flows[flowIdx].amountCZK
+      flowIdx++
+    }
     return {
       date: s.snapshot_date,
       contributed,
@@ -306,8 +361,7 @@ export function summarise(txns: Transaction[], year?: number): LedgerSummary {
     .filter(l => inYear(l.sellDate))
     .reduce((s, l) => s + l.gainCZK, 0)
 
-  const czk = (t: Transaction) =>
-    isFinite(t.amount_czk) ? t.amount_czk : t.amount * t.fx_rate_czk
+  const czk = czkOf
 
   const contributed = rows
     .filter(t => t.is_external && czk(t) > 0)
@@ -346,7 +400,7 @@ export function runningBalance(txns: Transaction[]): Map<string, number> {
   const out = new Map<string, number>()
   let balance = 0
   for (const t of sorted) {
-    balance += isFinite(t.amount_czk) ? t.amount_czk : t.amount * t.fx_rate_czk
+    balance += czkOf(t)
     out.set(t.id, balance)
   }
   return out
