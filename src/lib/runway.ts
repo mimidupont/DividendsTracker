@@ -6,6 +6,7 @@
  */
 import type { Position, LiquidityTier } from './portfolio'
 import { assetPositions, LIQUIDITY_TIERS } from './portfolio'
+import { todayISO } from './date'
 
 /**
  * Haircuts applied when treating an asset as emergency money.
@@ -125,7 +126,10 @@ export function runwaySummary(
 export function lockedCashWarning(
   accounts: { name: string; balance: number; currency: string; maturity_date: string | null; account_type: string }[]
 ): { name: string; maturityDate: string }[] {
-  const today = new Date().toISOString().slice(0, 10)
+  // Local calendar date, not UTC: east of Greenwich, toISOString() reports
+  // yesterday for the first hours of the day and would un-flag a deposit
+  // maturing today.
+  const today = todayISO()
   return accounts
     .filter(a =>
       a.account_type === 'fixed_deposit' &&

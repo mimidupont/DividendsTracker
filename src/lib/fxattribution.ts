@@ -36,12 +36,20 @@ const CURRENCIES = [
 const num = (v: number | null | undefined): number | null =>
   v == null || !isFinite(v) ? null : v
 
-/** True when a snapshot carries usable exposure data (old rows are all zeros). */
+/**
+ * True when a snapshot carries usable exposure data (rows written before the
+ * exposure columns existed are all zero or null).
+ *
+ * `exposure_other_czk` counts: a portfolio held entirely in, say, GBP has zero
+ * in all three of the tracked buckets, and dropping those snapshots left the
+ * whole page empty for anyone not holding USD, EUR or CZK.
+ */
 export function hasExposureData(s: ExposureSnapshot): boolean {
   return (
     (num(s.exposure_usd_local) ?? 0) !== 0 ||
     (num(s.exposure_eur_local) ?? 0) !== 0 ||
-    (num(s.exposure_czk_local) ?? 0) !== 0
+    (num(s.exposure_czk_local) ?? 0) !== 0 ||
+    (num(s.exposure_other_czk) ?? 0) !== 0
   )
 }
 

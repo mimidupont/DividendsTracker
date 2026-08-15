@@ -23,7 +23,43 @@ const BENCHMARK_YAHOO: Record<string, { symbol: string; currency: string }> = {
   URTH: { symbol: 'URTH',     currency: 'USD' },
 }
 
+/**
+ * Assumed rate for the "CZK savings account" benchmark, as a decimal fraction.
+ *
+ * There is no market series for a savings account, so it is generated: a
+ * koruna deposited on day one compounding at this rate. Change it here if your
+ * bank pays something else — the UI states the rate so the number is never
+ * mistaken for an observed one.
+ */
+const CZK_SAVINGS_APY = 0.04
+
+/** Years of synthetic savings history to generate. */
+const CZK_SAVINGS_YEARS = 5
+
 interface Close { price_date: string; close: number }
+
+/**
+ * Synthetic daily series for a CZK savings account, indexed to 100 on day one
+ * and compounding at CZK_SAVINGS_APY. Written to the same table as real prices
+ * so the shadow-portfolio maths needs no special case.
+ */
+function czkSavingsHistory(years = CZK_SAVINGS_YEARS): Close[] {
+  const daily = Math.pow(1 + CZK_SAVINGS_APY, 1 / 365)
+  const out: Close[] = []
+  const start = new Date()
+  start.setUTCHours(0, 0, 0, 0)
+  start.setUTCDate(start.getUTCDate() - Math.round(years * 365))
+
+  const days = Math.round(years * 365)
+  for (let i = 0; i <= days; i++) {
+    const d = new Date(start.getTime() + i * 86_400_000)
+    out.push({
+      price_date: d.toISOString().slice(0, 10),
+      close: 100 * Math.pow(daily, i),
+    })
+  }
+  return out
+}
 
 /**
  * Daily closes from Yahoo's chart endpoint.
@@ -32,7 +68,10 @@ interface Close { price_date: string; close: number }
  * time to time. Callers degrade to whatever history is already stored rather
  * than showing an empty comparison.
  */
-async function fetchHistory(yahooSymbol: string, range = '5y'): Promise<Close[]> {
+async function fetchHistory(
+  yahooSymbol: string,
+  range = '5y'
+): Promise<{ closes: Close[]; currency: string | null }> {
   const url =
     `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSymbol)}` +
     `?range=${range}&interval=1d`
@@ -58,7 +97,13 @@ async function fetchHistory(yahooSymbol: string, range = '5y'): Promise<Close[]>
       close,
     })
   }
-  return out
+  // Yahoo reports the listing's own currency. Trusting it beats the hardcoded
+  // guess when a fund is cross-listed, but only for the currencies the CZK
+  // conversion actually knows how to price a history in.
+  const reported = String(result?.meta?.currency ?? '').toUpperCase()
+  const currency = ['USD', 'EUR', 'CZK'].indexOf(reported) >= 0 ? reported : null
+
+  return { closes: out, currency }
 }
 
 // POST /api/benchmark/sync  { symbol?: string }
@@ -69,16 +114,25 @@ export async function POST(req: NextRequest) {
     const body = await req.json().catch(() => ({}))
     const requested: string[] = body?.symbol
       ? [String(body.symbol).toUpperCase()]
-      : Object.keys(BENCHMARK_YAHOO)
+      : [...Object.keys(BENCHMARK_YAHOO), 'CZK_SAVINGS']
 
     const results: Record<string, { rows: number; error?: string }> = {}
 
     for (const symbol of requested) {
       const entry = BENCHMARK_YAHOO[symbol]
-      if (!entry) { results[symbol] = { rows: 0, error: 'unsupported benchmark' }; continue }
+      if (!entry && symbol !== 'CZK_SAVINGS') {
+        results[symbol] = { rows: 0, error: 'unsupported benchmark' }
+        continue
+      }
 
       try {
-        const history = await fetchHistory(entry.symbol)
+        // The savings benchmark is generated, not fetched — there is no market
+        // series for "money in the bank".
+        const fetched = entry
+          ? await fetchHistory(entry.symbol)
+          : { closes: czkSavingsHistory(), currency: 'CZK' }
+        const history = fetched.closes
+        const currency = fetched.currency ?? entry?.currency ?? 'USD'
         if (history.length === 0) { results[symbol] = { rows: 0, error: 'no data' }; continue }
 
         // Upsert in chunks — a single 1200-row insert is rejected by some
@@ -86,7 +140,7 @@ export async function POST(req: NextRequest) {
         let written = 0
         for (let i = 0; i < history.length; i += 400) {
           const chunk = history.slice(i, i + 400).map(h => ({
-            symbol, price_date: h.price_date, close: h.close, currency: entry.currency,
+            symbol, price_date: h.price_date, close: h.close, currency,
           }))
           const { error } = await supabase
             .from('benchmark_prices')
