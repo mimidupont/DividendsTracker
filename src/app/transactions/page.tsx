@@ -2,7 +2,7 @@
 import { useMemo, useState } from 'react'
 import Badge from '@/components/Badge'
 import TransactionModal from '@/components/TransactionModal'
-import { PageShell, PageHeader, LoadingShell, EmptyState, MetricCards, Panel, orDash } from '@/components/PageShell'
+import { PageShell, PageHeader, LoadingShell, EmptyState, MetricCards, Panel, orDash, DASH } from '@/components/PageShell'
 import SetupNotice from '@/components/SetupNotice'
 import { useAppData } from '@/hooks/useAppData'
 import { useFx } from '@/hooks/useFx'
@@ -290,7 +290,7 @@ export default function TransactionsPage() {
               <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                 <thead>
                   <tr>
-                    {['Symbol', 'Sold', 'Shares', 'Cost', 'Proceeds', 'Gain', 'Gain (CZK)', 'Held'].map((h, i) => (
+                    {['Symbol', 'Sold', 'Shares', 'Cost', 'Proceeds', 'Gain', 'Gain (CZK)', 'of which FX', 'Held'].map((h, i) => (
                       <th key={h} style={{ ...th, textAlign: i === 0 ? 'left' : 'right' }}>{h}</th>
                     ))}
                   </tr>
@@ -308,6 +308,12 @@ export default function TransactionsPage() {
                       </td>
                       <td style={{ ...tdR, fontFamily: "'DM Mono', monospace", color: l.gainCZK >= 0 ? 'var(--green)' : 'var(--red)' }}>
                         {fmtCZK(l.gainCZK, 0)}
+                      </td>
+                      <td
+                        style={{ ...tdR, fontFamily: "'DM Mono', monospace", color: 'var(--text3)' }}
+                        title="Cost converted at the rate on the buy date, proceeds at the rate on the sell date. This column is the difference the koruna made."
+                      >
+                        {Math.abs(l.fxGainCZK) < 1 ? DASH : fmtCZK(l.fxGainCZK, 0)}
                       </td>
                       <td style={tdR}>
                         {Math.round(l.holdingDays / 30)}mo

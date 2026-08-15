@@ -75,6 +75,16 @@ they are not double-counted.
 your `ownership_pct` to the property value, purchase price, mortgage and rent
 alike. The "% on invested" figure excludes cash, which has no cost basis.
 
+**Investable net worth** (what `/fire` measures progress against) counts a
+property and its mortgage together. Excluding the flat you live in while still
+subtracting its mortgage would report a negative figure for anyone with a
+mortgage, so both sides of the same asset are dropped or kept as a pair.
+
+**Realized gains** convert the cost at the exchange rate on the buy date and the
+proceeds at the rate on the sell date — the Czech return asks for that, and
+converting both legs at today's rate would erase the currency part of the gain
+entirely. `/transactions` reports that currency component in its own column.
+
 **Snapshots** are written once per day, only after prices, crypto and live FX
 have all loaded — a snapshot taken mid-load would record assets still valued at
 cost. The P&L windows compare today's value against the newest snapshot on or
@@ -87,6 +97,10 @@ Assumptions you may want to change:
 - `EXPENSE_RATIOS` in `src/app/fees/page.tsx` — tickers not listed count as 0% TER
   and are flagged in the UI
 - `SECTORS` in `src/app/allocation/page.tsx` — unlisted tickers fall into "Other"
+- `CZK_SAVINGS_APY` in `src/app/api/benchmark/sync/route.ts` — 4% p.a. for the
+  "CZK savings" benchmark, which is generated rather than fetched (there is no
+  market series for money in the bank). The rate is in the option's label so the
+  synthetic series is never mistaken for an observed one.
 
 ---
 

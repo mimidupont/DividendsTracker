@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { getYahooSession, toYahoo, fetchYahooQuoteSummary, batchedMap } from '@/lib/yahoo'
 import { batchFetchSAQuotes } from '@/lib/stockanalysis'
-import { toCZK, normalizeCurrencyCode, DEFAULT_FX } from '@/lib/fx'
+import { toCZK, normalizeMoney, DEFAULT_FX } from '@/lib/fx'
 
 /**
  * Daily portfolio snapshot, written server-side.
@@ -163,12 +163,17 @@ export async function GET(req: NextRequest) {
       let czkLocal = 0
       let otherCZK = 0
 
-      const addExposure = (amount: number, currency: string) => {
-        switch (normalizeCurrencyCode(currency)) {
+      // Exposure is tracked in the quote's own units, with minor units (GBp, ZAc,
+      // ILA) folded into their major currency first. normalizeMoney does that
+      // fold and hands back the major-unit code, so toCZK below is given an
+      // already-normalized pair and never divides by 100 a second time.
+      const addExposure = (rawAmount: number, rawCurrency: string) => {
+        const { amount, ccy } = normalizeMoney(rawAmount, rawCurrency)
+        switch (ccy) {
           case 'USD': usdLocal += amount; break
           case 'EUR': eurLocal += amount; break
           case 'CZK': czkLocal += amount; break
-          default: otherCZK += toCZK(amount, currency, fx); break
+          default: otherCZK += toCZK(amount, ccy, fx); break
         }
       }
 
@@ -178,12 +183,7 @@ export async function GET(req: NextRequest) {
         const currency = quote?.currency || holding.currency
         const local = price * holding.shares
         stocksCZK += toCZK(local, currency, fx)
-        // Exposure is tracked in the quote's own units, after folding pence and
-        // other minor units into their major currency.
-        const normalized = normalizeCurrencyCode(currency) === 'GBP' && /^GB[pX]$/.test(currency)
-          ? local / 100
-          : local
-        addExposure(normalized, currency)
+        addExposure(local, currency)
       }
 
       let cashCZK = 0

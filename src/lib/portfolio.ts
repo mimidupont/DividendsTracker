@@ -10,7 +10,7 @@
 import type {
   DividendProjection, Holding, BankAccount, CryptoHolding, RealEstate, AssetMetadata,
 } from './supabase'
-import { toCZK, normalizeCurrencyCode, hasFxRate } from './fx'
+import { toCZK, normalizeCurrencyCode, normalizeMoney, hasFxRate } from './fx'
 import { computeProjectedTotal, findProjection } from './projections'
 
 /** The slice of useMarketData() this module needs (kept structural to avoid a cycle). */
@@ -241,16 +241,21 @@ export function buildPositions(
   for (const m of positionsMetrics(data.holdings, market, fx, data.projections ?? [])) {
     const h = m.holding
     const meta = metaBySymbol.get(h.symbol.toUpperCase())
+    // `currency` is the major-unit code, so the local amounts must be folded to
+    // match it: a London quote comes back in pence, and leaving 1000 GBp on a
+    // row labelled GBP overstated currency exposure a hundredfold.
+    const value = normalizeMoney(m.price * h.shares, m.priceCurrency)
+    const cost = normalizeMoney(h.avg_price * h.shares, h.currency)
     positions.push({
       id: h.id,
       assetClass: meta?.industry === 'ETF' || meta?.sector === 'ETF' ? 'etf' : 'stock',
       label: h.symbol,
       name: h.name,
-      currency: normalizeCurrencyCode(m.priceCurrency),
+      currency: value.ccy,
       quantity: h.shares,
-      valueLocal: m.price * h.shares,
+      valueLocal: value.amount,
       valueCZK: m.marketCZK,
-      costLocal: h.avg_price * h.shares,
+      costLocal: cost.amount,
       costCZK: m.costCZK,
       sector: meta?.sector ?? null,
       region: meta?.region ?? null,
@@ -262,16 +267,17 @@ export function buildPositions(
 
   // ── Cash ───────────────────────────────────────────────────────────────────
   for (const a of data.bankAccounts) {
+    const bal = normalizeMoney(a.balance, a.currency)
     positions.push({
       id: a.id,
       assetClass: 'cash',
       label: a.name,
       name: `${a.name} · ${a.institution}`,
-      currency: normalizeCurrencyCode(a.currency),
+      currency: bal.ccy,
       quantity: 1,
-      valueLocal: a.balance,
+      valueLocal: bal.amount,
       valueCZK: toCZK(a.balance, a.currency, fx),
-      costLocal: a.balance,
+      costLocal: bal.amount,
       costCZK: toCZK(a.balance, a.currency, fx),
       sector: null,
       region: null,
@@ -306,16 +312,18 @@ export function buildPositions(
   // ── Real estate: asset row + mortgage row ──────────────────────────────────
   for (const p of data.realEstate) {
     const share = ownershipShare(p)
+    const value = normalizeMoney(p.current_value * share, p.currency)
+    const cost = normalizeMoney(p.purchase_price * share, p.currency)
     positions.push({
       id: p.id,
       assetClass: 'realestate',
       label: p.name,
       name: p.address ? `${p.name} · ${p.address}` : p.name,
-      currency: normalizeCurrencyCode(p.currency),
+      currency: value.ccy,
       quantity: share,
-      valueLocal: p.current_value * share,
+      valueLocal: value.amount,
       valueCZK: toCZK(p.current_value * share, p.currency, fx),
-      costLocal: p.purchase_price * share,
+      costLocal: cost.amount,
       costCZK: toCZK(p.purchase_price * share, p.currency, fx),
       sector: null,
       region: 'CZ',
@@ -330,16 +338,17 @@ export function buildPositions(
 
     if (p.mortgage_balance > 0) {
       const debtLocal = p.mortgage_balance * share
+      const debt = normalizeMoney(debtLocal, p.currency)
       positions.push({
         id: `${p.id}:mortgage`,
         assetClass: 'realestate',
         label: `${p.name} — mortgage`,
         name: `Mortgage on ${p.name}`,
-        currency: normalizeCurrencyCode(p.currency),
+        currency: debt.ccy,
         quantity: share,
-        valueLocal: -debtLocal,
+        valueLocal: -debt.amount,
         valueCZK: -toCZK(debtLocal, p.currency, fx),
-        costLocal: -debtLocal,
+        costLocal: -debt.amount,
         costCZK: -toCZK(debtLocal, p.currency, fx),
         sector: null,
         region: 'CZ',
@@ -367,19 +376,26 @@ export const netWorthCZK = (positions: Position[]): number =>
   positions.reduce((s, p) => s + p.valueCZK, 0)
 
 /**
- * Net worth you could actually deploy. Excludes the primary residence by
- * default — you cannot spend the house you live in — while still subtracting
- * its mortgage, since the debt is real either way.
+ * Net worth you could actually deploy. The primary residence is excluded by
+ * default — you cannot spend the house you live in — and investment property
+ * is included unless `includeProperty` is explicitly false.
+ *
+ * A property and its mortgage are always counted or dropped **together**.
+ * Subtracting the debt for an asset that isn't in the total would report an
+ * investable net worth below zero for anyone with a mortgaged home.
  */
 export function investableNetWorthCZK(
   positions: Position[],
   opts: { includePrimaryResidence?: boolean; includeProperty?: boolean } = {}
 ): number {
+  const includeProperty = opts.includeProperty ?? true
   return positions.reduce((sum, p) => {
-    if (p.isLiability) return sum + p.valueCZK
     if (p.assetClass === 'realestate') {
-      if (!opts.includeProperty) return sum
-      if (p.isPrimaryResidence && !opts.includePrimaryResidence) return sum
+      if (p.isPrimaryResidence) {
+        if (!opts.includePrimaryResidence) return sum
+      } else if (!includeProperty) {
+        return sum
+      }
     }
     return sum + p.valueCZK
   }, 0)

@@ -12,6 +12,8 @@ export interface Lot {
   /** Per-share cost in the transaction's native currency, fees included. */
   price: number
   currency: string
+  /** CZK per unit of `currency` on the day the lot was bought. */
+  fxRateCZK: number
 }
 
 export interface RealizedLot {
@@ -21,7 +23,15 @@ export interface RealizedLot {
   proceedsLocal: number
   costLocal: number
   gainLocal: number
+  /**
+   * Gain in CZK, with proceeds converted at the sell-date rate and cost at the
+   * buy-date rate. That difference *is* the currency part of the gain, and it is
+   * what the Czech return asks for — converting both legs at the sell rate would
+   * silently erase it.
+   */
   gainCZK: number
+  /** The CZK gain the currency move alone contributed. */
+  fxGainCZK: number
   currency: string
   /** Days held — matters for the Czech 3-year time test. */
   holdingDays: number
@@ -41,7 +51,23 @@ const daysBetween = (a: string, b: string) =>
   Math.round((Date.parse(b) - Date.parse(a)) / 86_400_000)
 
 const byDate = (a: Transaction, b: Transaction) =>
-  a.txn_date.localeCompare(b.txn_date) || a.created_at.localeCompare(b.created_at)
+  a.txn_date.localeCompare(b.txn_date) ||
+  (a.created_at ?? '').localeCompare(b.created_at ?? '')
+
+/**
+ * The row's own CZK rate. A missing or nonsensical rate falls back to 1 — that
+ * makes a CZK-denominated row exact and a foreign one obviously wrong, which is
+ * better than an amount multiplied by zero and silently disappearing.
+ */
+const fxOf = (t: Transaction): number =>
+  isFinite(t.fx_rate_czk) && t.fx_rate_czk > 0 ? t.fx_rate_czk : 1
+
+/** Cost-weighted average buy rate across lots. */
+function weightedFx(lots: Lot[]): number {
+  const cost = lots.reduce((s, l) => s + l.shares * l.price, 0)
+  if (cost <= 0) return lots[0]?.fxRateCZK ?? 1
+  return lots.reduce((s, l) => s + l.shares * l.price * l.fxRateCZK, 0) / cost
+}
 
 /**
  * Running cost basis for one symbol.
@@ -68,7 +94,10 @@ export function costBasis(
 
     if (t.type === 'buy') {
       const gross = Math.abs(t.amount) + (t.fee ?? 0)
-      lots.push({ date: t.txn_date, shares: qty, price: gross / qty, currency: t.currency })
+      lots.push({
+        date: t.txn_date, shares: qty, price: gross / qty,
+        currency: t.currency, fxRateCZK: fxOf(t),
+      })
       continue
     }
 
@@ -78,8 +107,13 @@ export function costBasis(
       const totalShares = lots.reduce((s, l) => s + l.shares, 0)
       const totalCost = lots.reduce((s, l) => s + l.shares * l.price, 0)
       const avg = totalShares > 0 ? totalCost / totalShares : 0
+      // Averaging the cost has to average the rate it was struck at too, or the
+      // remaining lot would carry the newest rate for money spent years ago.
+      const avgFx = weightedFx(lots)
       const left = Math.max(0, totalShares - remaining)
-      lots = left > 0 ? [{ date: t.txn_date, shares: left, price: avg, currency: t.currency }] : []
+      lots = left > 0
+        ? [{ date: t.txn_date, shares: left, price: avg, currency: t.currency, fxRateCZK: avgFx }]
+        : []
       continue
     }
     while (remaining > 0 && lots.length > 0) {
@@ -122,49 +156,60 @@ export function realizedPL(txns: Transaction[], method: 'fifo' | 'avg' = 'fifo')
 
       if (t.type === 'buy') {
         const gross = Math.abs(t.amount) + (t.fee ?? 0)
-        lots.push({ date: t.txn_date, shares: qty, price: gross / qty, currency: t.currency })
+        lots.push({
+          date: t.txn_date, shares: qty, price: gross / qty,
+          currency: t.currency, fxRateCZK: fxOf(t),
+        })
         continue
       }
 
       // Sell: proceeds net of fees, matched against consumed lots
       const proceeds = Math.abs(t.amount) - (t.fee ?? 0)
       const proceedsPerShare = qty > 0 ? proceeds / qty : 0
+      const sellFx = fxOf(t)
       let remaining = qty
+
+      // Proceeds at the sell rate, cost at the buy rate. The gap between that
+      // and converting both at the sell rate is the currency component, which
+      // is reported alongside rather than folded away.
+      const record = (
+        shares: number, costLocal: number, proceedsLocal: number,
+        buyFx: number, held: number
+      ) => {
+        const gainCZK = proceedsLocal * sellFx - costLocal * buyFx
+        out.push({
+          symbol, sellDate: t.txn_date, shares,
+          proceedsLocal, costLocal, gainLocal: proceedsLocal - costLocal,
+          gainCZK,
+          fxGainCZK: gainCZK - (proceedsLocal - costLocal) * sellFx,
+          currency: t.currency, holdingDays: held,
+          passesTimeTest: held >= THREE_YEARS_DAYS,
+        })
+      }
 
       if (method === 'avg') {
         const totalShares = lots.reduce((s, l) => s + l.shares, 0)
         const totalCost = lots.reduce((s, l) => s + l.shares * l.price, 0)
         const avg = totalShares > 0 ? totalCost / totalShares : 0
+        const avgFx = weightedFx(lots)
         const matched = Math.min(remaining, totalShares)
         const oldest = lots[0]?.date ?? t.txn_date
         const held = daysBetween(oldest, t.txn_date)
-        const costLocal = avg * matched
-        const proceedsLocal = proceedsPerShare * matched
-        out.push({
-          symbol, sellDate: t.txn_date, shares: matched,
-          proceedsLocal, costLocal, gainLocal: proceedsLocal - costLocal,
-          gainCZK: (proceedsLocal - costLocal) * t.fx_rate_czk,
-          currency: t.currency, holdingDays: held,
-          passesTimeTest: held >= THREE_YEARS_DAYS,
-        })
+        record(matched, avg * matched, proceedsPerShare * matched, avgFx, held)
         const left = Math.max(0, totalShares - matched)
-        lots = left > 0 ? [{ date: oldest, shares: left, price: avg, currency: t.currency }] : []
+        lots = left > 0
+          ? [{ date: oldest, shares: left, price: avg, currency: t.currency, fxRateCZK: avgFx }]
+          : []
         continue
       }
 
       while (remaining > 0 && lots.length > 0) {
         const lot = lots[0]
         const take = Math.min(lot.shares, remaining)
-        const costLocal = take * lot.price
-        const proceedsLocal = take * proceedsPerShare
-        const held = daysBetween(lot.date, t.txn_date)
-        out.push({
-          symbol, sellDate: t.txn_date, shares: take,
-          proceedsLocal, costLocal, gainLocal: proceedsLocal - costLocal,
-          gainCZK: (proceedsLocal - costLocal) * t.fx_rate_czk,
-          currency: t.currency, holdingDays: held,
-          passesTimeTest: held >= THREE_YEARS_DAYS,
-        })
+        record(
+          take, take * lot.price, take * proceedsPerShare,
+          lot.fxRateCZK, daysBetween(lot.date, t.txn_date)
+        )
         lot.shares -= take
         remaining -= take
         if (lot.shares <= 1e-9) lots.shift()

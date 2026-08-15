@@ -95,17 +95,17 @@ export function applyScenario(
       annualIncomeCZKAfter *= 1 + (shocks.equity_pct ?? 0) / 3
     }
 
-    // FX shock applies to the currency the asset is actually denominated in
-    const fxShock = shocks.fx?.[p.currency] ?? 0
+    // FX shock applies to the currency the asset is actually denominated in.
+    // The base currency cannot move against itself, so a stray CZK entry in the
+    // shock set is ignored on value as well as on income.
+    const fxShock = p.currency === 'CZK' ? 0 : (shocks.fx?.[p.currency] ?? 0)
     const shockedRate = 1 + fxShock
-
-    const valueCZK = toCZK(valueLocal, p.currency, fx) * shockedRate
 
     return {
       ...p,
       valueLocal,
-      valueCZK,
-      annualIncomeCZK: annualIncomeCZKAfter * (p.currency === 'CZK' ? 1 : shockedRate),
+      valueCZK: toCZK(valueLocal, p.currency, fx) * shockedRate,
+      annualIncomeCZK: annualIncomeCZKAfter * shockedRate,
     }
   })
 

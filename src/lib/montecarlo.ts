@@ -157,7 +157,10 @@ export function runMonteCarlo(config: McConfig): McResult {
     .filter(c => (config.startValueByClass[c] ?? 0) !== 0)
 
   const sims = Math.max(1, Math.floor(config.simulations || 1000))
-  const months = Math.max(1, Math.round(config.years * 12))
+  // Whole years only: the yearly snapshot array is indexed by m/12, so a
+  // fractional horizon (30.5 years → month 366) indexed past the end of it.
+  const years = Math.max(1, Math.round(config.years || 1))
+  const months = years * 12
   const rand = mulberry32(config.seed ?? 12345)
 
   // Assumptions per class, defaulted when missing
@@ -177,7 +180,7 @@ export function runMonteCarlo(config: McConfig): McResult {
   const L = cholesky(corr)
 
   // Yearly snapshots of every simulation
-  const yearlyValues: number[][] = Array.from({ length: config.years + 1 }, () => [])
+  const yearlyValues: number[][] = Array.from({ length: years + 1 }, () => [])
   const finalValues: number[] = []
   let ruinCount = 0
   const yearReachedTarget: number[] = []

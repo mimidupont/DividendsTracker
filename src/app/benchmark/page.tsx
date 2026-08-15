@@ -232,6 +232,46 @@ export default function BenchmarkPage() {
         />
       )}
 
+      {/* Window selector sits outside the chart block on purpose: when a narrow
+          window empties the comparison, the control that got you there has to
+          stay on screen. */}
+      {!noPrices && !noHistory && (
+        <div style={{ display: 'flex', border: '1px solid var(--border2)', borderRadius: 6, overflow: 'hidden', marginBottom: 14, width: 'fit-content' }}>
+          {WINDOWS.map(w => (
+            <button key={w} onClick={() => setWindow(w)} style={{
+              padding: '5px 14px', border: 'none', cursor: 'pointer', fontSize: 11,
+              background: window === w ? 'var(--green-bg)' : 'var(--bg2)',
+              color: window === w ? 'var(--green)' : 'var(--text3)',
+              borderRight: w !== 'ALL' ? '1px solid var(--border2)' : 'none',
+            }}>{w}</button>
+          ))}
+        </div>
+      )}
+
+      {/* Both series exist but never on the same dates — a stale price sync, or
+          snapshots that all predate the stored history. Without this the page
+          rendered a header and nothing else, with no hint why. */}
+      {!noPrices && !noHistory && chartData.length < 2 && (
+        <EmptyState
+          icon="⚖"
+          title="No overlapping dates to compare"
+          body={
+            <>
+              You have {mySeries.length} portfolio snapshots ({fmtISODate(mySeries[0].date)} –{' '}
+              {fmtISODate(mySeries[mySeries.length - 1].date)}) and {prices.length} price rows for{' '}
+              {symbol}
+              {benchSeries.length > 0
+                ? <> ({fmtISODate(benchSeries[0].date)} – {fmtISODate(benchSeries[benchSeries.length - 1].date)})</>
+                : null}
+              , but the two ranges do not overlap on at least two days.
+              <br /><br />
+              Press “Sync prices” to pull fresh history
+              {window !== 'ALL' && <>, or switch the window back to <strong>ALL</strong></>}.
+            </>
+          }
+        />
+      )}
+
       {!noPrices && !noHistory && chartData.length >= 2 && (
         <>
           <MetricCards
@@ -272,18 +312,6 @@ export default function BenchmarkPage() {
               },
             ]}
           />
-
-          {/* Window selector */}
-          <div style={{ display: 'flex', border: '1px solid var(--border2)', borderRadius: 6, overflow: 'hidden', marginBottom: 14, width: 'fit-content' }}>
-            {WINDOWS.map(w => (
-              <button key={w} onClick={() => setWindow(w)} style={{
-                padding: '5px 14px', border: 'none', cursor: 'pointer', fontSize: 11,
-                background: window === w ? 'var(--green-bg)' : 'var(--bg2)',
-                color: window === w ? 'var(--green)' : 'var(--text3)',
-                borderRight: w !== 'ALL' ? '1px solid var(--border2)' : 'none',
-              }}>{w}</button>
-            ))}
-          </div>
 
           <Panel title={`You vs ${symbol}, indexed to 100`}>
             <ResponsiveContainer width="100%" height={260}>
