@@ -25,6 +25,23 @@ export interface PortfolioSnapshot {
 }
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/** Columns every install has, since the first schema. */
+const CORE_COLUMNS =
+  'snapshot_date, total_value_czk, stocks_czk, cash_czk, crypto_czk, realestate_czk'
+
+/** Added by migration 005 — absent on a database created from an older schema. */
+const EXPOSURE_COLUMNS =
+  'exposure_usd_local, exposure_eur_local, exposure_czk_local, exposure_other_czk, fx_usd, fx_eur, fx_gbp'
+
+/** PostgREST's code for "no such column". */
+const isMissingColumn = (error: { code?: string; message?: string } | null): boolean => {
+  if (!error) return false
+  if (error.code === '42703' || error.code === 'PGRST204') return true
+  const msg = (error.message ?? '').toLowerCase()
+  return msg.includes('column') && msg.includes('does not exist')
+}
 
 // GET /api/snapshots?profileId=xxx&days=365
 export async function GET(req: NextRequest) {
@@ -39,26 +56,39 @@ export async function GET(req: NextRequest) {
     ? Math.min(Math.max(parsedDays, 1), 3650)
     : 365
 
-  if (!profileId) {
-    return NextResponse.json({ error: 'profileId required' }, { status: 400 })
+  if (!profileId || !UUID.test(profileId)) {
+    return NextResponse.json({ error: 'a valid profileId is required' }, { status: 400 })
   }
 
   const since = new Date()
   since.setDate(since.getDate() - days)
   const sinceStr = since.toISOString().slice(0, 10)
 
-  const { data, error } = await supabase
-    .from('portfolio_snapshots')
-    .select('snapshot_date, total_value_czk, stocks_czk, cash_czk, crypto_czk, realestate_czk, exposure_usd_local, exposure_eur_local, exposure_czk_local, exposure_other_czk, fx_usd, fx_eur, fx_gbp')
-    .eq('profile_id', profileId)
-    .gte('snapshot_date', sinceStr)
-    .order('snapshot_date', { ascending: true })
+  const query = (columns: string) =>
+    supabase
+      .from('portfolio_snapshots')
+      .select(columns)
+      .eq('profile_id', profileId)
+      .gte('snapshot_date', sinceStr)
+      .order('snapshot_date', { ascending: true })
+
+  let { data, error } = await query(`${CORE_COLUMNS}, ${EXPOSURE_COLUMNS}`)
+
+  // PostgREST rejects the whole request if any listed column is absent, so on a
+  // database predating migration 005 the entire P&L chart came back empty. Fall
+  // back to the columns every install has and say the extras are missing, so
+  // the FX-attribution page can tell the user which migration to run.
+  let exposureAvailable = true
+  if (isMissingColumn(error)) {
+    exposureAvailable = false
+    ;({ data, error } = await query(CORE_COLUMNS))
+  }
 
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 })
   }
 
-  return NextResponse.json({ snapshots: data ?? [] })
+  return NextResponse.json({ snapshots: data ?? [], exposureAvailable })
 }
 
 // POST /api/snapshots
@@ -74,8 +104,11 @@ export async function POST(req: NextRequest) {
     exposure_usd_local, exposure_eur_local, exposure_czk_local, exposure_other_czk,
   } = body
 
-  if (!profileId || total_value_czk == null) {
-    return NextResponse.json({ error: 'profileId and total_value_czk required' }, { status: 400 })
+  if (!profileId || !UUID.test(String(profileId)) || total_value_czk == null) {
+    return NextResponse.json(
+      { error: 'a valid profileId and total_value_czk are required' },
+      { status: 400 }
+    )
   }
 
   const num = (v: unknown): number => {

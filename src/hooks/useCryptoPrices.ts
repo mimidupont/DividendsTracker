@@ -1,12 +1,9 @@
 'use client'
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useEffect, useRef, useMemo } from 'react'
+import type { CoinPrice, CryptoResponse } from '@/app/api/crypto/route'
 
 export type CryptoState = 'idle' | 'loading' | 'done' | 'error'
-
-interface CoinPrice {
-  usd: number
-  usd_24h_change: number | null
-}
+export type { CoinPrice }
 
 // ─── Module-level cache ───────────────────────────────────────────────────────
 const CACHE_TTL = 5 * 60 * 1000
@@ -29,6 +26,10 @@ function isCacheValid(coinIds: string[]): boolean {
   return coinIds.every(id => id in cache!.prices)
 }
 
+/** True once every requested coin is present in the cache. */
+const cacheCovers = (coinIds: string[]): boolean =>
+  cache != null && coinIds.every(id => id in cache!.prices)
+
 async function fetchPrices(coinIds: string[]): Promise<void> {
   // Reuse an in-flight request only when it covers every coin we need;
   // otherwise the caller would be told "done" for coins nobody fetched.
@@ -39,36 +40,34 @@ async function fetchPrices(coinIds: string[]): Promise<void> {
   const previous = inFlight?.catch(() => undefined) ?? Promise.resolve()
 
   const ids = coinIds.map(encodeURIComponent).join(',')
-  inFlightIds = new Set(coinIds)
-  inFlight = previous.then(() =>
-    fetch(
-      `https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd&include_24hr_change=true`
-    ).then(async res => {
-      if (!res.ok) throw new Error(`CoinGecko ${res.status}`)
-      const data = await res.json()
-      const mapped: Record<string, CoinPrice> = {}
-      for (const [id, val] of Object.entries(data as Record<string, any>)) {
-        const usd = Number(val?.usd)
-        // A coin id CoinGecko doesn't recognise comes back missing or zero.
-        // Caching a 0 price would silently value the holding at nothing.
-        if (!Number.isFinite(usd) || usd <= 0) continue
-        const change = Number(val?.usd_24h_change)
-        mapped[id] = { usd, usd_24h_change: Number.isFinite(change) ? change : null }
-      }
-      return mapped
+  // Own promise held locally — clearing `inFlight` unconditionally below could
+  // wipe a newer call's promise and let a third request start instead of
+  // joining it.
+  const mine = previous.then(() =>
+    // Proxied through our own route: called straight from the browser,
+    // CoinGecko's free tier rate-limits per client and a 429 silently drops
+    // crypto back to average cost.
+    fetch(`/api/crypto?ids=${ids}`).then(async res => {
+      const data = (await res.json().catch(() => ({}))) as Partial<CryptoResponse>
+      if (!res.ok || data.error) throw new Error(data.error ?? `HTTP ${res.status}`)
+      return data.prices ?? {}
     })
   )
+  inFlight = mine
+  inFlightIds = new Set(coinIds)
 
   try {
-    const mapped = await inFlight
+    const mapped = await mine
     cache = {
       prices: { ...(cache?.prices ?? {}), ...mapped },
       cachedAt: Date.now(),
     }
     notify()
   } finally {
-    inFlight = null
-    inFlightIds = null
+    if (inFlight === mine) {
+      inFlight = null
+      inFlightIds = null
+    }
   }
 }
 
@@ -78,10 +77,22 @@ export function useCryptoPrices() {
   const [prices, setPrices] = useState<Record<string, CoinPrice>>(cache?.prices ?? {})
   const [state, setState]   = useState<CryptoState>(cache ? 'done' : 'idle')
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
+  // Coins *this* instance asked for, so another page's success cannot declare
+  // this one done while its own coins are still missing.
+  const wantedRef = useRef<string[]>([])
 
   useEffect(() => {
     const sync = () => {
-      if (cache) { setPrices({ ...cache.prices }); setState('done') }
+      if (!cache) return
+      setPrices({ ...cache.prices })
+      const wanted = wantedRef.current
+      if (wanted.length === 0) {
+        setState(prev => (prev === 'idle' ? 'done' : prev))
+        return
+      }
+      if (!cacheCovers(wanted)) return
+      setErrorMsg(null)
+      setState('done')
     }
     subscribers.add(sync)
     return () => { subscribers.delete(sync) }
@@ -90,6 +101,8 @@ export function useCryptoPrices() {
   const refresh = useCallback(async (coinIds: string[], force = false) => {
     const ids = Array.from(new Set(coinIds.filter(Boolean)))
     if (!ids.length) return
+    wantedRef.current = Array.from(new Set([...wantedRef.current, ...ids]))
+
     if (!force && isCacheValid(ids)) {
       if (cache) { setPrices({ ...cache.prices }); setState('done') }
       return
@@ -107,7 +120,10 @@ export function useCryptoPrices() {
   }, [])
 
   const getPrice = useCallback(
-    (coinId: string, fallback: number) => prices[coinId]?.usd ?? fallback,
+    (coinId: string, fallback: number) => {
+      const usd = prices[coinId]?.usd
+      return usd != null && isFinite(usd) && usd > 0 ? usd : fallback
+    },
     [prices]
   )
 
@@ -122,5 +138,9 @@ export function useCryptoPrices() {
     [prices]
   )
 
-  return { prices, state, errorMsg, refresh, getPrice, getChange, hasPrice }
+  // Memoised so downstream useMemos keyed on this object actually hit.
+  return useMemo(
+    () => ({ prices, state, errorMsg, refresh, getPrice, getChange, hasPrice }),
+    [prices, state, errorMsg, refresh, getPrice, getChange, hasPrice]
+  )
 }

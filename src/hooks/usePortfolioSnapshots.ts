@@ -1,5 +1,5 @@
 'use client'
-import { useState, useCallback, useEffect, useRef } from 'react'
+import { useState, useCallback, useEffect, useRef, useMemo } from 'react'
 import { getStoredProfileId } from '@/lib/profile'
 import { todayISO, addDays, fmtISODate } from '@/lib/date'
 
@@ -52,6 +52,9 @@ const cacheByProfile: Record<string, PortfolioSnapshot[]> = {}
 export function usePortfolioSnapshots() {
   const [snapshots, setSnapshots] = useState<PortfolioSnapshot[]>([])
   const [loading, setLoading]     = useState(false)
+  const [error, setError]         = useState<string | null>(null)
+  /** False when the database predates migration 005 and has no exposure columns. */
+  const [exposureAvailable, setExposureAvailable] = useState(true)
   // Which profile+date pairs this session has already written, so repeated
   // renders can't fire the same upsert several times over.
   const savedRef = useRef<Set<string>>(new Set())
@@ -61,10 +64,18 @@ export function usePortfolioSnapshots() {
     const profileId = getStoredProfileId()
     if (!profileId) return
     setLoading(true)
+    setError(null)
     try {
       const res = await fetch(`/api/snapshots?profileId=${encodeURIComponent(profileId)}&days=400`)
-      if (!res.ok) return
-      const { snapshots: data } = await res.json()
+      const body = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        // Returning silently here left the P&L chart and every derived window
+        // empty with nothing to explain why.
+        setError(body?.error ?? `Snapshots unavailable (HTTP ${res.status})`)
+        return
+      }
+      setExposureAvailable(body?.exposureAvailable !== false)
+      const data = body?.snapshots
       const list: PortfolioSnapshot[] = Array.isArray(data) ? data : []
       // Sort defensively — every consumer below assumes ascending dates.
       list.sort((a, b) => a.snapshot_date.localeCompare(b.snapshot_date))
@@ -156,5 +167,8 @@ export function usePortfolioSnapshots() {
     }
   }, [snapshots])
 
-  return { snapshots, loading, saveSnapshot, getPLSummary }
+  return useMemo(
+    () => ({ snapshots, loading, error, exposureAvailable, saveSnapshot, getPLSummary }),
+    [snapshots, loading, error, exposureAvailable, saveSnapshot, getPLSummary]
+  )
 }

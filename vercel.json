@@ -2,11 +2,7 @@
   "crons": [
     {
       "path": "/api/cron/snapshot",
-      "schedule": "20 17 * * 1-5"
-    },
-    {
-      "path": "/api/cron/snapshot",
-      "schedule": "20 12 * * 0,6"
+      "schedule": "20 17 * * *"
     }
   ]
 }

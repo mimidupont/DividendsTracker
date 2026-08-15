@@ -50,7 +50,7 @@ export default function Dashboard() {
   const { fx, fxLive, fxLoading, fxTs, refresh: refreshFx } = useFx()
   const market = useMarketData()
   const cryptoPrices = useCryptoPrices()
-  const { snapshots, saveSnapshot, getPLSummary } = usePortfolioSnapshots()
+  const { snapshots, saveSnapshot, getPLSummary, error: snapshotError } = usePortfolioSnapshots()
 
   const [plWindow, setPlWindow] = useState<PLWindow>('30d')
 
@@ -285,13 +285,14 @@ export default function Dashboard() {
         </div>
 
         {/* Anything that would make the totals below wrong is stated, not hidden */}
-        {(error || !fxLive || market.state === 'error' || fxProblems.length > 0) && (
+        {(error || !fxLive || market.state === 'error' || fxProblems.length > 0 || snapshotError) && (
           <div style={{
             background: 'var(--amber-bg)', border: '1px solid var(--amber-bd)',
             color: 'var(--amber)', borderRadius: 10, padding: '10px 14px',
             marginBottom: 16, fontSize: 11, lineHeight: 1.6,
           }}>
             {error && <div>⚠ Some data could not be loaded — totals are incomplete: {error}</div>}
+            {snapshotError && <div>⚠ Snapshot history unavailable, so the P&amp;L windows below have nothing to compare against: {snapshotError}</div>}
             {!fxLive && <div>⚠ Live FX unavailable — CZK values use fallback rates and are approximate.</div>}
             {market.state === 'error' && <div>⚠ Live prices unavailable — positions are valued at cost. {market.errorMsg}</div>}
             {fxProblems.length > 0 && (

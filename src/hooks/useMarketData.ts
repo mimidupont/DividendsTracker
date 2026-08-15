@@ -1,5 +1,5 @@
 'use client'
-import { useState, useCallback, useRef, useEffect } from 'react'
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import type { MarketQuote, MarketDataResponse } from '@/app/api/market/route'
 
 export type { MarketQuote }
@@ -44,8 +44,11 @@ async function fetchMarketData(symbols: string[]): Promise<void> {
   // interleave and clobber each other's cache write.
   const previous = inFlight?.catch(() => undefined) ?? Promise.resolve()
 
-  inFlightSymbols = new Set(symbols)
-  inFlight = previous.then(() =>
+  // Hold our own promise locally. Clearing `inFlight` unconditionally in the
+  // finally block could wipe a *newer* call's promise: A and B overlap, B sets
+  // inFlight = PB, then A finishes and nulls it, so a later C sees null and
+  // starts a third request instead of joining B.
+  const mine = previous.then(() =>
     fetch('/api/market', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -58,9 +61,11 @@ async function fetchMarketData(symbols: string[]): Promise<void> {
       return res.json() as Promise<MarketDataResponse>
     })
   )
+  inFlight = mine
+  inFlightSymbols = new Set(symbols)
 
   try {
-    const data = await inFlight
+    const data = await mine
     // Merge into existing cache rather than replacing — preserves previously
     // fetched symbols that aren't in this batch
     cache = {
@@ -71,10 +76,16 @@ async function fetchMarketData(symbols: string[]): Promise<void> {
     }
     notify()
   } finally {
-    inFlight = null
-    inFlightSymbols = null
+    if (inFlight === mine) {
+      inFlight = null
+      inFlightSymbols = null
+    }
   }
 }
+
+/** True once every symbol in `symbols` is present in the cache. */
+const cacheCovers = (symbols: string[]): boolean =>
+  cache != null && symbols.every(s => s in cache!.quotes)
 
 // ─── Hook ─────────────────────────────────────────────────────────────────────
 
@@ -105,16 +116,27 @@ export function useMarketData(): UseMarketData {
     cache?.fetchedAt ?? null
   )
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
-  const loadingRef = useRef(false)
+  // The symbols *this* instance asked for, so a cache update from another page
+  // cannot declare this one finished when its own tickers are still missing.
+  const wantedRef = useRef<string[]>([])
 
   // Subscribe to cache updates (e.g. another page's refresh)
   useEffect(() => {
     const sync = () => {
-      if (cache) {
-        setQuotes({ ...cache.quotes })
-        setFetchedAt(cache.fetchedAt)
-        setState('done')
+      if (!cache) return
+      setQuotes({ ...cache.quotes })
+      setFetchedAt(cache.fetchedAt)
+      // Only claim success when the symbols this instance requested are
+      // actually present. Forcing 'done' on every cache write flipped a page
+      // from 'error' to "✓ Live" while its own quotes were still missing.
+      const wanted = wantedRef.current
+      if (wanted.length === 0) {
+        setState(prev => (prev === 'idle' ? 'done' : prev))
+        return
       }
+      if (!cacheCovers(wanted)) return
+      setErrorMsg(null)
+      setState('done')
     }
     subscribers.add(sync)
     return () => { subscribers.delete(sync) }
@@ -122,6 +144,8 @@ export function useMarketData(): UseMarketData {
 
   const refresh = useCallback(async (symbols: string[], force = false) => {
     if (!symbols.length) return
+    wantedRef.current = Array.from(new Set([...wantedRef.current, ...symbols]))
+
     if (!force && isCacheValid(symbols)) {
       // Already cached — just make sure local state reflects it
       if (cache) {
@@ -131,11 +155,14 @@ export function useMarketData(): UseMarketData {
       }
       return
     }
-    if (loadingRef.current) return
-    loadingRef.current = true
+
     setState('loading')
     setErrorMsg(null)
     try {
+      // No in-flight guard here: fetchMarketData already serialises requests on
+      // a module-level chain. Dropping a second call with a *different* symbol
+      // list meant those tickers went unfetched until the TTL expired, while
+      // the caller's await resolved as though it had succeeded.
       await fetchMarketData(symbols)
       if (cache) {
         setQuotes({ ...cache.quotes })
@@ -145,13 +172,16 @@ export function useMarketData(): UseMarketData {
     } catch (err) {
       setErrorMsg(String(err))
       setState('error')
-    } finally {
-      loadingRef.current = false
     }
   }, [])
 
+  // `??` not `||`: a genuine 0 is not a missing price. hasPrice's `> 0` test
+  // still treats 0 as "no live quote", and the two must not drift apart.
   const getPrice = useCallback(
-    (symbol: string, fallback: number) => quotes[symbol]?.price || fallback,
+    (symbol: string, fallback: number) => {
+      const price = quotes[symbol]?.price
+      return price != null && isFinite(price) && price > 0 ? price : fallback
+    },
     [quotes]
   )
 
@@ -185,8 +215,15 @@ export function useMarketData(): UseMarketData {
     [quotes]
   )
 
-  return {
-    quotes, state, fetchedAt, errorMsg, refresh,
-    getPrice, getYield, getAnnualDiv, getQuoteCurrency, hasPrice,
-  }
+  // Memoised: a fresh object literal every render broke every downstream
+  // useMemo keyed on `market`, which on the dashboard cascaded all the way to
+  // the snapshot-saving effect firing on every single render.
+  return useMemo(
+    () => ({
+      quotes, state, fetchedAt, errorMsg, refresh,
+      getPrice, getYield, getAnnualDiv, getQuoteCurrency, hasPrice,
+    }),
+    [quotes, state, fetchedAt, errorMsg, refresh,
+      getPrice, getYield, getAnnualDiv, getQuoteCurrency, hasPrice]
+  )
 }

@@ -31,6 +31,29 @@ const supabase = createClient(
   supabaseAnonKey ?? 'missing-anon-key'
 )
 
+/**
+ * Calendar date in the portfolio's own timezone.
+ *
+ * The browser writes a snapshot stamped with the *user's* date; this route runs
+ * on a UTC server. Using UTC here means the two writers disagree about which
+ * day it is for several hours every night, and the first time the schedule
+ * moves past midnight UTC they would write two rows for one local day.
+ *
+ * Set SNAPSHOT_TIMEZONE to an IANA name if the portfolio is not kept in Prague.
+ */
+const SNAPSHOT_TZ = process.env.SNAPSHOT_TIMEZONE || 'Europe/Prague'
+
+function todayInZone(tz = SNAPSHOT_TZ): string {
+  try {
+    // en-CA renders as YYYY-MM-DD, which is the format the column wants.
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
+    }).format(new Date())
+  } catch {
+    return new Date().toISOString().slice(0, 10)
+  }
+}
+
 // ─── Market data, server-side ─────────────────────────────────────────────────
 
 interface Quote { price: number; currency: string }
@@ -110,14 +133,23 @@ async function fetchCryptoPrices(coinIds: string[]): Promise<Record<string, numb
 export async function GET(req: NextRequest) {
   if (configError) return NextResponse.json({ error: configError }, { status: 500 })
 
-  // Vercel Cron sends the secret as a bearer token. When CRON_SECRET is unset
-  // the route stays open, which is fine for a private deployment but should be
-  // set before exposing the app.
-  if (cronSecret) {
-    const auth = req.headers.get('authorization')
-    if (auth !== `Bearer ${cronSecret}`) {
-      return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
-    }
+  // Fail closed. This route writes to the database for every profile, so an
+  // unset secret used to leave it open to anyone who knew the deployment URL —
+  // "open unless configured" is the wrong default for a write endpoint.
+  if (!cronSecret) {
+    return NextResponse.json(
+      {
+        error: 'CRON_SECRET is not set. Set it in the environment (Vercel sends it ' +
+          'as a bearer token automatically) — this endpoint writes data and will ' +
+          'not run unauthenticated.',
+      },
+      { status: 503 }
+    )
+  }
+
+  const auth = req.headers.get('authorization')
+  if (auth !== `Bearer ${cronSecret}`) {
+    return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
   }
 
   const fx = await fetchFx()
@@ -131,7 +163,7 @@ export async function GET(req: NextRequest) {
   const { data: profiles, error: profileErr } = await supabase.from('profiles').select('id, name')
   if (profileErr) return NextResponse.json({ error: profileErr.message }, { status: 500 })
 
-  const today = new Date().toISOString().slice(0, 10)
+  const today = todayInZone()
   const results: Record<string, unknown> = {}
 
   for (const profile of profiles ?? []) {

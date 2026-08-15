@@ -2,7 +2,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import Badge from '@/components/Badge'
 import { PageShell, PageHeader, LoadingShell, EmptyState, MetricCards, Panel, orDash, DASH } from '@/components/PageShell'
-import { useAppData } from '@/hooks/useAppData'
+import { useAppData, isMissingTable } from '@/hooks/useAppData'
 import { usePortfolioSnapshots } from '@/hooks/usePortfolioSnapshots'
 import { supabase, type BenchmarkPrice } from '@/lib/supabase'
 import {
@@ -38,13 +38,20 @@ export default function BenchmarkPage() {
   const [syncing, setSyncing] = useState(false)
   const [loadingPrices, setLoadingPrices] = useState(true)
   const [syncError, setSyncError] = useState('')
+  const [priceTableMissing, setPriceTableMissing] = useState(false)
+  const [priceError, setPriceError] = useState('')
 
   useEffect(() => {
     let cancelled = false
     setLoadingPrices(true)
     supabase.from('benchmark_prices').select('*').eq('symbol', symbol).order('price_date')
-      .then(({ data }) => {
+      .then(({ data, error }) => {
         if (cancelled) return
+        // The error used to be destructured away, so a missing table looked
+        // exactly like "no price history yet — click Sync", and Sync then
+        // appeared to do nothing. Route it to the SetupNotice instead.
+        setPriceTableMissing(isMissingTable(error))
+        setPriceError(error && !isMissingTable(error) ? error.message : '')
         setPrices((data ?? []) as BenchmarkPrice[])
         setLoadingPrices(false)
       })
@@ -124,10 +131,16 @@ export default function BenchmarkPage() {
   const from = overlap ? (start && start > overlap.from ? start : overlap.from) : null
   const to = overlap?.to ?? null
 
-  const clippedMine = from && to ? clipSeries(mySeries, from, to) : []
-  const clippedBench = from && to
-    ? clipSeries(benchSeries.map(s => ({ date: s.date, value: s.valueCZK })), from, to)
-    : []
+  const clippedMine = useMemo(
+    () => (from && to ? clipSeries(mySeries, from, to) : []),
+    [mySeries, from, to]
+  )
+  const clippedBench = useMemo(
+    () => (from && to
+      ? clipSeries(benchSeries.map(s => ({ date: s.date, value: s.valueCZK })), from, to)
+      : []),
+    [benchSeries, from, to]
+  )
 
   const indexedMine = indexTo100(clippedMine)
   const indexedBench = indexTo100(clippedBench)
@@ -196,7 +209,21 @@ export default function BenchmarkPage() {
         }
       />
 
-      <SetupNotice tables={missingTables.filter(t => t === 'transactions')} />
+      <SetupNotice
+        tables={[
+          ...missingTables.filter(t => t === 'transactions'),
+          ...(priceTableMissing ? ['benchmark_prices'] : []),
+        ]}
+      />
+
+      {priceError && (
+        <div style={{
+          background: 'var(--amber-bg)', border: '1px solid var(--amber-bd)', color: 'var(--amber)',
+          borderRadius: 8, padding: '10px 14px', marginBottom: 14, fontSize: 11, lineHeight: 1.6,
+        }}>
+          ⚠ Could not read stored benchmark prices: {priceError}
+        </div>
+      )}
 
       {!noPrices && !noHistory && (
         <div style={{
