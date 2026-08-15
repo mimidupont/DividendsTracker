@@ -249,7 +249,7 @@ export default function DripCheckModal({
             Looks back 90 days for confirmed payments not yet logged.
           </div>
           <div style={{ fontSize: 11, color: 'var(--text3)', marginBottom: 20 }}>
-            Reinvestment is calculated in <strong>CZK</strong> using live prices — matching IBKR's behaviour.
+            Reinvestment is calculated in <strong>CZK</strong> using live prices — matching IBKR&rsquo;s behaviour.
           </div>
           {error && (
             <div style={{ fontSize: 12, color: 'var(--red)', marginBottom: 16,

@@ -176,7 +176,9 @@ export function maxDrawdown(series: ValuePoint[]): Drawdown | null {
     if (dd < worst) { worst = dd; worstPeak = peakDate; worstTrough = point.date }
   }
 
-  if (worst === 0) return { pct: 0, peakDate: sorted[0].date, troughDate: sorted[0].date }
+  // A series that only ever rose has no measured drawdown. Reporting 0.0% would
+  // read as a measurement; null lets the UI show an em dash instead.
+  if (worst === 0) return null
   return { pct: worst, peakDate: worstPeak, troughDate: worstTrough }
 }
 

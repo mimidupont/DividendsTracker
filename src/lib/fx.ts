@@ -24,6 +24,11 @@ export const DEFAULT_FX: Record<string, number> = {
   NOK: 2.05,
   CAD: 15.00,
   JPY: 0.14,
+  // Reachable through minor-unit folding (ZAc/ZAX, ILA). Without these a South
+  // African or Israeli holding lands in the unconverted path whenever the live
+  // FX fetch fails. `MINOR_UNITS` and this table are kept in sync by a test.
+  ZAR: 1.15,
+  ILS: 5.65,
 }
 
 /**
@@ -31,7 +36,7 @@ export const DEFAULT_FX: Record<string, number> = {
  * e.g. Yahoo returns `GBp` (pence) for London-listed instruments — a price of
  * 2450 means £24.50, so treating it as GBP overstates the position 100×.
  */
-const MINOR_UNITS: Record<string, { major: string; divisor: number }> = {
+export const MINOR_UNITS: Record<string, { major: string; divisor: number }> = {
   GBP_MINOR: { major: 'GBP', divisor: 100 }, // GBp / GBX
   ZAR_MINOR: { major: 'ZAR', divisor: 100 }, // ZAc / ZAX
   ILS_MINOR: { major: 'ILS', divisor: 100 }, // ILA (agorot)
@@ -104,14 +109,23 @@ export const fmtCZK = (n: number, decimals = 0) =>
 export const fmtNum = (n: number, d = 2) =>
   (isFinite(n) ? n : 0).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d })
 
+/** Em dash for a value that could not be computed — never a fabricated 0.00%. */
+export const DASH = '—'
+
 export const fmtPct = (n: number, d = 2) =>
-  `${isFinite(n) && n >= 0 ? '+' : ''}${(isFinite(n) ? n : 0).toFixed(d)}%`
+  isFinite(n) ? `${n >= 0 ? '+' : ''}${n.toFixed(d)}%` : DASH
 
-export const fmtDate = (d: string) =>
-  new Date(d).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
+export const fmtDate = (d: string) => {
+  const parsed = new Date(d)
+  if (isNaN(parsed.getTime())) return DASH
+  return parsed.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
+}
 
-export const fmtDateShort = (d: string) =>
-  new Date(d).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })
+export const fmtDateShort = (d: string) => {
+  const parsed = new Date(d)
+  if (isNaN(parsed.getTime())) return DASH
+  return parsed.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })
+}
 
 export interface FxResult {
   rates: Record<string, number>

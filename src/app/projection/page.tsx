@@ -27,6 +27,8 @@ export default function ProjectionPage() {
   const [sims, setSims] = useState(2000)
   const [seed, setSeed] = useState(12345)
   const [contribution, setContribution] = useState<number | null>(null)
+  const [contributionGrowth, setContributionGrowth] = useState(2)
+  const [modelWithdrawals, setModelWithdrawals] = useState(false)
   const [assumptions, setAssumptions] = useState<MarketAssumptionInput[]>(DEFAULT_ASSUMPTIONS)
   const [result, setResult] = useState<McResult | null>(null)
   const [running, setRunning] = useState(false)
@@ -72,6 +74,12 @@ export default function ProjectionPage() {
     }))
   }, [data.marketAssumptions])
 
+  // Retirement year from the FIRE plan, so withdrawals start when the plan says
+  // they do rather than at an arbitrary date.
+  const yearsToRetirement = plan.birth_year && plan.target_retirement_age
+    ? Math.max(0, plan.target_retirement_age - (new Date().getFullYear() - plan.birth_year))
+    : null
+
   const run = () => {
     if (startTotal <= 0) return
     setRunning(true)
@@ -83,9 +91,17 @@ export default function ProjectionPage() {
         setResult(runMonteCarlo({
           startValueByClass: startByClass,
           monthlyContributionCZK: monthlyContribution,
-          contributionGrowthPct: 0.02,
+          contributionGrowthPct: contributionGrowth / 100,
           years, simulations: sims, assumptions, seed,
           targetCZK: target ?? undefined,
+          // Drawing down is what makes running out possible at all. Without
+          // this, probabilityOfRuin was structurally zero.
+          ...(modelWithdrawals && yearsToRetirement != null
+            ? {
+                withdrawalStartYear: yearsToRetirement,
+                annualWithdrawalCZK: expenses.annualCZK,
+              }
+            : {}),
         }))
       } finally {
         setRunning(false)
@@ -99,19 +115,7 @@ export default function ProjectionPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [startTotal])
 
-  if (data.loading) return <LoadingShell label="Loading projection…" />
-
-  if (startTotal <= 0) {
-    return (
-      <PageShell>
-        <PageHeader title="Projection" subtitle="Monte Carlo simulation" />
-        <EmptyState icon="◠" title="Nothing to project"
-          body="Add holdings, cash, crypto or property first — the simulation starts from what you actually own." />
-      </PageShell>
-    )
-  }
-
-  const chartData = result?.percentiles.map(p => ({
+  const chartData = useMemo(() => result?.percentiles.map(p => ({
     year: p.year,
     p5: p.p5,
     band25: p.p25 - p.p5,
@@ -119,7 +123,7 @@ export default function ProjectionPage() {
     band75: p.p75 - p.p50,
     band95: p.p95 - p.p75,
     median: p.p50,
-  })) ?? []
+  })) ?? [], [result])
 
   // Histogram of ending values
   const histogram = useMemo(() => {
@@ -141,6 +145,22 @@ export default function ProjectionPage() {
       label: fmtCZK(min + width * (i + 0.5), 0),
     }))
   }, [result])
+
+  // ── Guards go below every hook ────────────────────────────────────────────
+  // These used to sit above the two useMemos, so the first render (loading)
+  // registered fewer hooks than the second and React threw "Rendered more hooks
+  // than during the previous render" on every cold load.
+  if (data.loading) return <LoadingShell label="Loading projection…" />
+
+  if (startTotal <= 0) {
+    return (
+      <PageShell>
+        <PageHeader title="Projection" subtitle="Monte Carlo simulation" />
+        <EmptyState icon="◠" title="Nothing to project"
+          body="Add holdings, cash, crypto or property first — the simulation starts from what you actually own." />
+      </PageShell>
+    )
+  }
 
   return (
     <PageShell maxWidth={1100}>
@@ -167,14 +187,34 @@ export default function ProjectionPage() {
                 accent: 'var(--amber)',
                 note: target != null ? `target ${fmtCZK(target)}` : 'set expenses on /fire',
               },
-              {
-                label: 'Median year reaching it',
-                value: orDash(result.medianYearReachingTarget, n => `${n.toFixed(1)}y`),
-                accent: 'var(--teal)',
-                note: result.medianYearReachingTarget == null ? 'not reached in half of runs' : undefined,
-              },
+              result.probabilityOfRuin != null
+                ? {
+                    label: 'Chance of running out',
+                    value: `${(result.probabilityOfRuin * 100).toFixed(0)}%`,
+                    accent: result.probabilityOfRuin > 0.1 ? 'var(--red)' : 'var(--teal)',
+                    color: result.probabilityOfRuin > 0.1 ? 'var(--red)' : undefined,
+                    note: `drawing ${fmtCZK(expenses.annualCZK, 0)}/yr`,
+                  }
+                : {
+                    label: 'Median year reaching it',
+                    value: orDash(result.medianYearReachingTarget, n => `${n.toFixed(1)}y`),
+                    accent: 'var(--teal)',
+                    note: result.medianYearReachingTarget == null ? 'not reached in half of runs' : undefined,
+                  },
             ]}
           />
+
+          {result.correlationDegraded && (
+            <div style={{
+              background: 'var(--amber-bg)', border: '1px solid var(--amber-bd)',
+              color: 'var(--amber)', borderRadius: 8, padding: '10px 14px',
+              marginBottom: 14, fontSize: 11, lineHeight: 1.6,
+            }}>
+              ⚠ The asset-class correlation matrix could not be decomposed, so each class was
+              drawn independently. Real assets fall together, so the downside band below is
+              narrower than reality.
+            </div>
+          )}
 
           <div style={{
             background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 10,
@@ -266,12 +306,36 @@ export default function ProjectionPage() {
 
       {/* Inputs */}
       <Panel title="Assumptions">
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginBottom: 18 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginBottom: 14 }}>
           <NumInput label="Monthly contribution" value={monthlyContribution} onChange={setContribution} />
+          <NumInput label="Annual raise (%)" value={contributionGrowth}
+            onChange={v => setContributionGrowth(Math.min(20, Math.max(-20, v)))} />
           <NumInput label="Horizon (years)" value={years} onChange={v => setYears(Math.min(50, Math.max(1, v)))} />
           <NumInput label="Simulations" value={sims} onChange={v => setSims(Math.min(20000, Math.max(100, v)))} />
           <NumInput label="Seed" value={seed} onChange={setSeed} />
         </div>
+
+        <label style={{
+          display: 'flex', alignItems: 'center', gap: 8, marginBottom: 18,
+          fontSize: 12, color: 'var(--text2)',
+          cursor: yearsToRetirement == null ? 'not-allowed' : 'pointer',
+          opacity: yearsToRetirement == null ? 0.5 : 1,
+        }}>
+          <input
+            type="checkbox"
+            checked={modelWithdrawals && yearsToRetirement != null}
+            disabled={yearsToRetirement == null}
+            onChange={e => setModelWithdrawals(e.target.checked)}
+          />
+          {yearsToRetirement != null ? (
+            <>
+              Draw down {fmtCZK(expenses.annualCZK)}/year from year {yearsToRetirement}, and report
+              the chance of running out
+            </>
+          ) : (
+            <>Set a birth year and target retirement age on <code>/fire</code> to model withdrawals</>
+          )}
+        </label>
 
         <table style={{ width: '100%', borderCollapse: 'collapse' }}>
           <thead>

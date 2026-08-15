@@ -6,6 +6,7 @@
  * having to inflate it themselves.
  */
 import type { FinancialPlan, ExpenseLogRow } from './supabase'
+import { todayISO } from './date'
 
 export const DEFAULT_PLAN: Omit<FinancialPlan, 'profile_id' | 'updated_at'> = {
   annual_expenses_czk: 600000,
@@ -169,9 +170,11 @@ export function milestones(
     }))
 }
 
+/** Compact milestone label. Trailing zeros are stripped so 5.0M reads as 5M. */
 function fmtShortCZK(v: number): string {
-  if (v >= 1_000_000) return `${v / 1_000_000}M CZK`
-  return `${v / 1000}k CZK`
+  const trim = (n: number) => n.toFixed(1).replace(/\.0$/, '')
+  if (v >= 1_000_000) return `${trim(v / 1_000_000)}M CZK`
+  return `${trim(v / 1000)}k CZK`
 }
 
 /**
@@ -182,23 +185,32 @@ function fmtShortCZK(v: number): string {
  */
 export function effectiveAnnualExpenses(
   plan: Pick<FinancialPlan, 'annual_expenses_czk'>,
-  expenseLog: ExpenseLogRow[]
+  expenseLog: ExpenseLogRow[],
+  today = todayISO()
 ): { annualCZK: number; source: 'logged' | 'plan'; monthsOfData: number } {
   const byMonth: Record<string, number> = {}
   for (const row of expenseLog) {
     byMonth[row.month] = (byMonth[row.month] ?? 0) + row.amount_czk
   }
-  const months = Object.keys(byMonth)
-  if (months.length < 3) {
-    return { annualCZK: plan.annual_expenses_czk, source: 'plan', monthsOfData: months.length }
+
+  // The current month is only partly spent but would count as a whole month in
+  // the divisor, so the FI number dropped every time a month ticked over and
+  // drifted back up across it. Only complete months are averaged.
+  const currentMonth = today.slice(0, 7)
+  const complete = Object.keys(byMonth)
+    .filter(m => m < currentMonth)
+    .sort()
+
+  if (complete.length < 3) {
+    return { annualCZK: plan.annual_expenses_czk, source: 'plan', monthsOfData: complete.length }
   }
 
-  const recent = months.sort().slice(-12)
+  const recent = complete.slice(-12)
   const total = recent.reduce((s, m) => s + byMonth[m], 0)
   return {
     annualCZK: (total / recent.length) * 12,
     source: 'logged',
-    monthsOfData: months.length,
+    monthsOfData: complete.length,
   }
 }
 

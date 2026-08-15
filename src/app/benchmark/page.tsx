@@ -30,7 +30,10 @@ export default function BenchmarkPage() {
   const { fx } = useFx()
 
   const [symbol, setSymbol] = useState('SPY')
-  const [window, setWindow] = useState<BenchmarkWindow>('ALL')
+  // Named `range`, not `window`: a state variable called `window` shadows the
+  // global inside this component, so any future `typeof window` guard here would
+  // silently read React state instead.
+  const [range, setRange] = useState<BenchmarkWindow>('ALL')
   const [prices, setPrices] = useState<BenchmarkPrice[]>([])
   const [syncing, setSyncing] = useState(false)
   const [loadingPrices, setLoadingPrices] = useState(true)
@@ -117,7 +120,7 @@ export default function BenchmarkPage() {
     [mySeries, benchSeries]
   )
 
-  const start = windowStart(window, todayISO())
+  const start = windowStart(range, todayISO())
   const from = overlap ? (start && start > overlap.from ? start : overlap.from) : null
   const to = overlap?.to ?? null
 
@@ -145,15 +148,25 @@ export default function BenchmarkPage() {
   const benchDd = maxDrawdown(clippedBench)
   const diff = trackingDifference(indexedMine, indexedBench)
 
-  // XIRR needs contributions negative and the terminal value positive
+  // XIRR over the *same* window as every neighbouring metric. Reporting an
+  // all-time money-weighted return beside a windowed TWR gave two numbers that
+  // could not be reconciled.
+  //
+  // The opening balance enters as a negative flow on the first day: money
+  // already invested at the window start is capital employed, and omitting it
+  // treats the starting balance as free and inflates the rate.
   const myXirr = useMemo(() => {
-    if (mySeries.length === 0) return null
-    const terminal = mySeries[mySeries.length - 1]
+    if (clippedMine.length < 2) return null
+    const opening = clippedMine[0]
+    const terminal = clippedMine[clippedMine.length - 1]
     return xirr([
-      ...flows.map(f => ({ date: new Date(f.date), amount: -f.amountCZK })),
+      { date: new Date(opening.date), amount: -opening.value },
+      ...flows
+        .filter(f => f.date > opening.date && f.date <= terminal.date)
+        .map(f => ({ date: new Date(f.date), amount: -f.amountCZK })),
       { date: new Date(terminal.date), amount: terminal.value },
     ])
-  }, [flows, mySeries])
+  }, [flows, clippedMine])
 
   const shadowToday = benchSeries.length > 0 ? benchSeries[benchSeries.length - 1].valueCZK : null
   const mineToday = mySeries.length > 0 ? mySeries[mySeries.length - 1].value : null
@@ -238,10 +251,10 @@ export default function BenchmarkPage() {
       {!noPrices && !noHistory && (
         <div style={{ display: 'flex', border: '1px solid var(--border2)', borderRadius: 6, overflow: 'hidden', marginBottom: 14, width: 'fit-content' }}>
           {WINDOWS.map(w => (
-            <button key={w} onClick={() => setWindow(w)} style={{
+            <button key={w} onClick={() => setRange(w)} style={{
               padding: '5px 14px', border: 'none', cursor: 'pointer', fontSize: 11,
-              background: window === w ? 'var(--green-bg)' : 'var(--bg2)',
-              color: window === w ? 'var(--green)' : 'var(--text3)',
+              background: range === w ? 'var(--green-bg)' : 'var(--bg2)',
+              color: range === w ? 'var(--green)' : 'var(--text3)',
               borderRight: w !== 'ALL' ? '1px solid var(--border2)' : 'none',
             }}>{w}</button>
           ))}
@@ -266,7 +279,7 @@ export default function BenchmarkPage() {
               , but the two ranges do not overlap on at least two days.
               <br /><br />
               Press “Sync prices” to pull fresh history
-              {window !== 'ALL' && <>, or switch the window back to <strong>ALL</strong></>}.
+              {range !== 'ALL' && <>, or switch the window back to <strong>ALL</strong></>}.
             </>
           }
         />

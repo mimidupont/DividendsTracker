@@ -47,11 +47,23 @@ export interface McResult {
   finalValues: { p5: number; p25: number; p50: number; p75: number; p95: number; mean: number }
   /** P(ending value ≥ target). Null when no target was supplied. */
   probabilityOfTarget: number | null
-  /** P(hitting zero before the horizon) — only meaningful with withdrawals. */
-  probabilityOfRuin: number
+  /**
+   * P(hitting zero before the horizon). Null when no withdrawals were
+   * simulated — with nothing being drawn down, a structural zero is not a
+   * finding and should not be displayed as one.
+   */
+  probabilityOfRuin: number | null
+  /** True when the correlation matrix could not be decomposed and draws are independent. */
+  correlationDegraded: boolean
   medianYearReachingTarget: number | null
   /** Every simulation's ending value, for the histogram. */
   finalDistribution: number[]
+  /**
+   * Every simulation's value at each year, sorted ascending — index 0 is the
+   * start. Kept so probabilities can be read off the real distribution rather
+   * than interpolated between five percentiles.
+   */
+  yearlyDistribution: number[][]
   simulations: number
 }
 
@@ -98,21 +110,45 @@ export function mulberry32(seed: number): () => number {
   }
 }
 
-/** Box–Muller transform: uniform → standard normal. */
-function gaussian(rand: () => number): number {
-  let u = 0
-  let v = 0
-  while (u === 0) u = rand()
-  while (v === 0) v = rand()
-  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v)
+/**
+ * Box–Muller: uniform → standard normal.
+ *
+ * The transform produces two independent normals per pair of uniforms; the
+ * spare is cached and returned next call rather than thrown away, halving the
+ * RNG calls. The cache lives in the closure, so a seeded run stays reproducible
+ * and two runs never share state.
+ */
+function gaussianSource(rand: () => number): () => number {
+  let spare: number | null = null
+  return () => {
+    if (spare !== null) {
+      const value = spare
+      spare = null
+      return value
+    }
+    let u = 0
+    let v = 0
+    while (u === 0) u = rand()
+    while (v === 0) v = rand()
+    const mag = Math.sqrt(-2 * Math.log(u))
+    spare = mag * Math.sin(2 * Math.PI * v)
+    return mag * Math.cos(2 * Math.PI * v)
+  }
 }
+
+const identity = (n: number): number[][] =>
+  Array.from({ length: n }, (_, r) =>
+    Array.from({ length: n }, (_, c) => (r === c ? 1 : 0)))
 
 /**
  * Cholesky decomposition, used to turn independent normals into correlated ones.
- * Falls back to the identity if the matrix is not positive-definite, which
- * degrades to uncorrelated draws rather than producing NaNs.
+ *
+ * Returns null when the matrix is not positive-definite. It used to return the
+ * identity, which silently degraded every draw to uncorrelated with nothing to
+ * distinguish that from a genuinely diagonal correlation matrix — the caller
+ * decides what to do and whether to say so.
  */
-export function cholesky(matrix: number[][]): number[][] {
+export function cholesky(matrix: number[][]): number[][] | null {
   const n = matrix.length
   const L: number[][] = Array.from({ length: n }, () => new Array(n).fill(0))
 
@@ -122,12 +158,10 @@ export function cholesky(matrix: number[][]): number[][] {
       for (let k = 0; k < j; k++) sum += L[i][k] * L[j][k]
       if (i === j) {
         const d = matrix[i][i] - sum
-        if (d <= 0) return Array.from({ length: n }, (_, r) =>
-          Array.from({ length: n }, (_, c) => (r === c ? 1 : 0)))
+        if (d <= 0) return null
         L[i][j] = Math.sqrt(d)
       } else {
-        if (L[j][j] === 0) return Array.from({ length: n }, (_, r) =>
-          Array.from({ length: n }, (_, c) => (r === c ? 1 : 0)))
+        if (L[j][j] === 0) return null
         L[i][j] = (matrix[i][j] - sum) / L[j][j]
       }
     }
@@ -177,7 +211,12 @@ export function runMonteCarlo(config: McConfig): McResult {
   })
 
   const corr = classes.map(a => classes.map(b => correlationOf(a, b)))
-  const L = cholesky(corr)
+  const decomposed = cholesky(corr)
+  // Uncorrelated draws understate the joint left tail, so the result says when
+  // it had to fall back rather than letting the fan look better than it is.
+  const correlationDegraded = decomposed === null && classes.length > 1
+  const L = decomposed ?? identity(classes.length)
+  const gaussian = gaussianSource(rand)
 
   // Yearly snapshots of every simulation
   const yearlyValues: number[][] = Array.from({ length: years + 1 }, () => [])
@@ -200,7 +239,7 @@ export function runMonteCarlo(config: McConfig): McResult {
 
     for (let m = 1; m <= months; m++) {
       // Correlated standard normals
-      const z = classes.map(() => gaussian(rand))
+      const z = classes.map(() => gaussian())
       const correlated = L.map(row => row.reduce((sum, v, i) => sum + v * z[i], 0))
 
       for (let i = 0; i < classes.length; i++) {
@@ -249,8 +288,8 @@ export function runMonteCarlo(config: McConfig): McResult {
     if (reachedYear != null) yearReachedTarget.push(reachedYear)
   }
 
-  const percentiles: Percentiles[] = yearlyValues.map((vals, year) => {
-    const sorted = [...vals].sort((a, b) => a - b)
+  const yearlyDistribution = yearlyValues.map(vals => [...vals].sort((a, b) => a - b))
+  const percentiles: Percentiles[] = yearlyDistribution.map((sorted, year) => {
     return {
       year,
       p5: percentile(sorted, 0.05),
@@ -277,37 +316,32 @@ export function runMonteCarlo(config: McConfig): McResult {
     probabilityOfTarget: config.targetCZK == null
       ? null
       : sortedFinal.filter(v => v >= config.targetCZK!).length / sims,
-    probabilityOfRuin: ruinCount / sims,
+    probabilityOfRuin: monthlyWithdrawal > 0 ? ruinCount / sims : null,
+    correlationDegraded,
     medianYearReachingTarget: sortedReached.length > 0
       ? percentile(sortedReached, 0.5)
       : null,
     finalDistribution: sortedFinal,
+    yearlyDistribution,
     simulations: sims,
   }
 }
 
-/** Probability of clearing `target` by a given year. */
+/**
+ * Probability of clearing `target` by a given year.
+ *
+ * Read straight off the stored per-year distribution. The previous version
+ * interpolated between the five reported percentiles, which pinned the answer
+ * to [5%, 95%] — reporting 95% for a target cleared in every single run.
+ */
 export function probabilityByYear(
   result: McResult,
   target: number,
   year: number
 ): number | null {
-  const row = result.percentiles.find(p => p.year === year)
-  if (!row) return null
-  // Interpolate across the five reported percentiles — cheaper than keeping
-  // every path, and accurate enough for a headline probability.
-  const points: [number, number][] = [
-    [row.p5, 0.05], [row.p25, 0.25], [row.p50, 0.5], [row.p75, 0.75], [row.p95, 0.95],
-  ]
-  if (target <= points[0][0]) return 0.95
-  if (target >= points[points.length - 1][0]) return 0.05
-  for (let i = 1; i < points.length; i++) {
-    const [v0, q0] = points[i - 1]
-    const [v1, q1] = points[i]
-    if (target >= v0 && target <= v1) {
-      const t = v1 === v0 ? 0 : (target - v0) / (v1 - v0)
-      return 1 - (q0 + t * (q1 - q0))
-    }
-  }
-  return null
+  const sorted = result.yearlyDistribution?.[year]
+  if (!sorted || sorted.length === 0) return null
+  let cleared = 0
+  for (const v of sorted) if (v >= target) cleared++
+  return cleared / sorted.length
 }

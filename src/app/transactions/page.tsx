@@ -287,6 +287,17 @@ export default function TransactionsPage() {
 
           {lots.length > 0 && (
             <Panel title="Realized lots" right={<Badge variant="gray">FIFO</Badge>} padded={false}>
+              {lots.some(l => l.basisIncomplete) && (
+                <div style={{
+                  background: 'var(--amber-bg)', border: '1px solid var(--amber-bd)',
+                  color: 'var(--amber)', padding: '9px 14px', margin: '0 0 2px',
+                  fontSize: 11, lineHeight: 1.6,
+                }}>
+                  ⚠ Some sales have no matching purchase in the ledger, so their cost basis is
+                  counted as zero and realized P&amp;L is overstated for those rows. Add the original
+                  buy transactions to correct it — the affected rows are marked below.
+                </div>
+              )}
               <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                 <thead>
                   <tr>
@@ -298,7 +309,17 @@ export default function TransactionsPage() {
                 <tbody>
                   {lots.slice(0, 25).map((l, i) => (
                     <tr key={i}>
-                      <td style={tdL}>{l.symbol}</td>
+                      <td style={tdL}>
+                        {l.symbol}
+                        {l.basisIncomplete && (
+                          <span
+                            style={{ marginLeft: 5 }}
+                            title="No purchase on record for these shares, so the cost basis is counted as zero and the gain is overstated. Add the original buy to fix it."
+                          >
+                            <Badge variant="amber">no basis</Badge>
+                          </span>
+                        )}
+                      </td>
                       <td style={tdR}>{fmtISODate(l.sellDate)}</td>
                       <td style={tdR}>{fmtNum(l.shares, 4)}</td>
                       <td style={tdR}>{fmtNum(l.costLocal, 2)}</td>
