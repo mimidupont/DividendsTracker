@@ -16,7 +16,19 @@ import { supabase } from '@/lib/supabase'
 import { fmtCZK } from '@/lib/fx'
 import { tdR, tdL, th, btnStyle, inputStyle } from '@/lib/ui'
 
-const SHOCK_SLIDERS: { key: keyof Shocks; label: string; min: number; max: number; step: number }[] = [
+/**
+ * The shock keys that are percentages, as a union rather than `keyof Shocks`.
+ *
+ * `keyof Shocks` also admits `fx` (a Record) and `income_loss_months` (a count),
+ * and a computed-key spread bypasses type checking — so a future caller could
+ * write a number into `fx` or divide a month count by 100 with the compiler
+ * saying nothing.
+ */
+type PctShockKey =
+  | 'equity_pct' | 'crypto_pct' | 'property_pct'
+  | 'rates_pct' | 'rent_vacancy_pct' | 'expense_shock_pct'
+
+const SHOCK_SLIDERS: { key: PctShockKey; label: string; min: number; max: number; step: number }[] = [
   { key: 'equity_pct', label: 'Equities', min: -70, max: 30, step: 1 },
   { key: 'crypto_pct', label: 'Crypto', min: -90, max: 100, step: 1 },
   { key: 'property_pct', label: 'Property', min: -50, max: 30, step: 1 },
@@ -61,7 +73,7 @@ export default function ScenariosPage() {
     [positions, shocks, fx, expenses.annualCZK]
   )
 
-  const setShock = (key: keyof Shocks, value: number) => {
+  const setShock = (key: PctShockKey, value: number) => {
     setActivePreset(null)
     setShocks(s => ({ ...s, [key]: value / 100 }))
   }
@@ -163,7 +175,7 @@ export default function ScenariosPage() {
       <Panel title="Shock dimensions">
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 18 }}>
           {SHOCK_SLIDERS.map(s => {
-            const raw = (shocks[s.key] as number | undefined) ?? 0
+            const raw = shocks[s.key] ?? 0
             return (
               <div key={String(s.key)}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>

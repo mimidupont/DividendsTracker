@@ -153,10 +153,21 @@ drops or rewrites an existing column.
 The schema creates one seed profile. Every table is scoped by `profile_id`, and
 the app needs at least one row in `profiles` — with none, all pages come up empty.
 
-> **Security**: the app uses the anon key with no login, and RLS is not enabled.
-> Anyone with that key (it ships in the browser bundle) can read and write your
-> data. That's fine for a private deployment; add Supabase Auth and RLS policies
-> before exposing it publicly. See the notes at the bottom of the schema file.
+> **Security — an explicit decision, not an oversight.** As of 2026-08, this
+> deployment is single-user and private, and runs with the Supabase anon key and
+> RLS disabled. Anyone holding that key (it ships in the browser bundle) can read
+> and write the data, and `/api/snapshots` accepts any valid-looking `profileId`
+> from any caller.
+>
+> That is acceptable *only* while the URL is not shared. Before exposing this
+> app to anyone else, in this order:
+> 1. Add Supabase Auth and enable RLS with the policies sketched at the bottom
+>    of `supabase-schema.sql`.
+> 2. Move the server routes onto a service-role key held in a non-`NEXT_PUBLIC_`
+>    variable.
+> 3. Rate-limit `POST /api/snapshots`.
+>
+> `CRON_SECRET` is already required rather than optional — see §4 below.
 
 ### 2. Environment variables
 
@@ -184,9 +195,18 @@ snapshots. Originally these were written only by the browser when you opened the
 dashboard, so days you didn't visit left holes in the history.
 
 `/api/cron/snapshot` now does the same work server-side. `vercel.json` schedules
-it twice daily; any external scheduler hitting that URL works too. Set
-`CRON_SECRET` in your environment and Vercel will send it as a bearer token —
-without it the endpoint is open, which is acceptable only for a private deployment.
+it once daily (the Hobby plan allows one cron invocation per day); any external
+scheduler hitting that URL works too.
+
+**`CRON_SECRET` is required.** The route writes to the database for every
+profile, so it fails closed with a 503 when the variable is unset rather than
+running open to anyone who knows the deployment URL. Vercel sends it as a bearer
+token automatically; an external scheduler needs
+`Authorization: Bearer $CRON_SECRET`.
+
+The snapshot date is computed in `SNAPSHOT_TIMEZONE` (default `Europe/Prague`),
+not UTC — the browser stamps snapshots with *your* calendar date, and the two
+writers must agree about which day it is.
 
 The route skips writing entirely if live FX is unavailable, rather than
 recording a value struck at stale rates that would show up in the history as a
@@ -196,9 +216,14 @@ step change that never happened.
 
 ```bash
 npm install
-npm run dev
-# Open http://localhost:3000
+npm run dev      # http://localhost:3000
+npm test         # Vitest — the maths in src/lib is covered
+npm run lint     # rules-of-hooks is an error, not a warning
 ```
+
+Requires Node 22 or newer (`@supabase/supabase-js` declares it). The pure
+functions in `src/lib` carry the test suite; anything that changes a reported
+number should arrive with a test that pins it.
 
 ---
 

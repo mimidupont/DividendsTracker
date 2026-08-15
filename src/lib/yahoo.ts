@@ -11,7 +11,40 @@ export const YAHOO_SYMBOL_MAP: Record<string, string> = {
 
 export const toYahoo = (symbol: string) => YAHOO_SYMBOL_MAP[symbol] ?? symbol
 
-export async function getYahooSession(): Promise<{ crumb: string; cookie: string } | null> {
+export interface YahooSession { crumb: string; cookie: string }
+
+/**
+ * Cached session, shared by every request the server handles.
+ *
+ * The cookie+crumb handshake is two extra round trips to Yahoo, and it was
+ * being redone for every single /api/market call — including the one fired on
+ * each keystroke of a ticker lookup. Yahoo's crumb stays valid far longer than
+ * this; the TTL is deliberately conservative.
+ */
+let sessionCache: { session: YahooSession; at: number } | null = null
+let sessionInFlight: Promise<YahooSession | null> | null = null
+const SESSION_TTL = 15 * 60 * 1000
+
+export async function getYahooSession(force = false): Promise<YahooSession | null> {
+  if (!force && sessionCache && Date.now() - sessionCache.at < SESSION_TTL) {
+    return sessionCache.session
+  }
+  // Concurrent callers share one handshake rather than each starting their own.
+  if (sessionInFlight) return sessionInFlight
+
+  sessionInFlight = createYahooSession()
+    .then(session => {
+      // A failed handshake is not cached: the next call should retry, since
+      // pinning null here would disable the Yahoo fallback for 15 minutes.
+      if (session) sessionCache = { session, at: Date.now() }
+      return session
+    })
+    .finally(() => { sessionInFlight = null })
+
+  return sessionInFlight
+}
+
+async function createYahooSession(): Promise<YahooSession | null> {
   try {
     const homeRes = await fetch('https://finance.yahoo.com/quote/AAPL/', {
       headers: { 'User-Agent': UA, Accept: 'text/html' },

@@ -60,10 +60,13 @@ function changeToPercent(
     if (prev > 0) return (absChange / prev) * 100
   }
   if (providerPercent == null || !isFinite(providerPercent)) return null
-  // |value| below 0.5 came from Yahoo as a fraction (0.0123 = 1.23%); above
-  // that it is already a percent. The two readings only overlap inside the
-  // ±0.5% band, where both round to roughly the same tiny move.
-  return Math.abs(providerPercent) < 0.5 ? providerPercent * 100 : providerPercent
+  // Without the absolute change to derive from, the provider's own number is
+  // genuinely ambiguous: Yahoo sends 0.0123 for 1.23% on some paths and 1.23 on
+  // others, and inside ±0.5 there is no way to tell which. A value that could
+  // be either 0.3% or 0.003% is not a measurement, so report nothing rather
+  // than guessing — the UI already renders null as an em dash.
+  if (Math.abs(providerPercent) < 0.5) return null
+  return providerPercent
 }
 
 // ─── Yahoo fetch ──────────────────────────────────────────────────────────────
@@ -143,18 +146,63 @@ function mergeQuotes(saQuote: SAQuote | null, yahooQuote: MarketQuote): MarketQu
   return { ...EMPTY_QUOTE }
 }
 
+// ─── Server-side quote cache ──────────────────────────────────────────────────
+//
+// This route scrapes two third-party providers, so every call it can avoid is
+// worth avoiding. A POST body cannot be cached by HTTP, so the cache is
+// per-symbol and in-process: several pages (and several visitors of the same
+// deployment) asking for the same ticker within the window share one fetch.
+
+const QUOTE_TTL = 60 * 1000
+/** A single request cannot ask for an unbounded number of scrapes. */
+const MAX_SYMBOLS = 100
+
+const quoteCache = new Map<string, { quote: MarketQuote; at: number }>()
+
+function cachedQuote(symbol: string): MarketQuote | null {
+  const hit = quoteCache.get(symbol)
+  if (!hit) return null
+  if (Date.now() - hit.at > QUOTE_TTL) {
+    quoteCache.delete(symbol)
+    return null
+  }
+  return hit.quote
+}
+
 // ─── Route handler ────────────────────────────────────────────────────────────
 
 export async function POST(req: NextRequest) {
   try {
     const body = (await req.json()) as { symbols?: unknown }
-    const symbols = Array.isArray(body.symbols)
+    const requested = Array.isArray(body.symbols)
       ? Array.from(new Set(
           body.symbols.filter((s): s is string => typeof s === 'string' && s.trim().length > 0)
         ))
       : []
-    if (!symbols.length) {
+    if (!requested.length) {
       return NextResponse.json({ error: 'symbols array required' }, { status: 400 })
+    }
+    if (requested.length > MAX_SYMBOLS) {
+      return NextResponse.json(
+        { error: `at most ${MAX_SYMBOLS} symbols per request` },
+        { status: 400 }
+      )
+    }
+
+    // Serve what is still fresh, and only go out for the rest.
+    const fromCache: Record<string, MarketQuote> = {}
+    const symbols: string[] = []
+    for (const s of requested) {
+      const hit = cachedQuote(s)
+      if (hit) fromCache[s] = hit
+      else symbols.push(s)
+    }
+
+    if (symbols.length === 0) {
+      return NextResponse.json({
+        quotes: fromCache,
+        fetchedAt: new Date().toISOString(),
+      } satisfies MarketDataResponse)
     }
 
     // 1. StockAnalysis for all mapped symbols (null for unmapped ones)
@@ -186,11 +234,15 @@ export async function POST(req: NextRequest) {
     }
 
     // 4. Merge
-    const quotes: Record<string, MarketQuote> = {}
+    const quotes: Record<string, MarketQuote> = { ...fromCache }
     for (const symbol of symbols) {
       const sa    = saResults[symbol] ?? null
       const yahoo = yahooMap[symbol] ?? { ...EMPTY_QUOTE }
-      quotes[symbol] = mergeQuotes(sa, yahoo)
+      const merged = mergeQuotes(sa, yahoo)
+      quotes[symbol] = merged
+      // Only a real quote is cached. Caching an empty one would pin a failed
+      // lookup in place for the whole window.
+      if (merged.price > 0) quoteCache.set(symbol, { quote: merged, at: Date.now() })
     }
 
     return NextResponse.json({

@@ -176,7 +176,10 @@ export function cagr(start: number, end: number, years: number): number
 ```
 
 XIRR: Newton–Raphson, bisection fallback, max 100 iterations, return `null` on
-non-convergence rather than NaN. Final portfolio value is a terminal negative flow.
+non-convergence rather than NaN. Contributions are negative and withdrawals
+positive, so the final portfolio value is a terminal **positive** flow — it is
+the money you would take out. (This line previously said "negative", which
+contradicted both the implementation and its only caller.)
 Needs ≥ 1 positive and ≥ 1 negative flow — otherwise return `null` and the UI shows `—`.
 
 ### Page `/transactions`

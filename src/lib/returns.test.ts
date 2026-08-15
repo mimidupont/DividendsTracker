@@ -54,6 +54,34 @@ describe('twr', () => {
   it('is null with fewer than two points', () => {
     expect(twr([{ date: '2024-01-01', value: 1 }], [])).toBeNull()
   })
+
+  // BUG-25d — with sparse snapshots, when the money arrived matters.
+  it('weights a mid-period flow by the time it was invested', () => {
+    // 100k on 1 Jan, 50k deposited on 2 Jan, 165k on 31 Jan.
+    // The deposit was invested for essentially the whole month, so the return
+    // is measured against ~150k of capital, not 100k.
+    const r = twr(
+      [
+        { date: '2024-01-01', value: 100_000 },
+        { date: '2024-01-31', value: 165_000 },
+      ],
+      [{ date: '2024-01-02', amountCZK: 50_000 }]
+    )!
+    // End-of-period weighting would have reported 15%.
+    expect(r).toBeGreaterThan(0.09)
+    expect(r).toBeLessThan(0.11)
+  })
+
+  it('still treats a flow landing on the closing date as end-of-period', () => {
+    const r = twr(
+      [
+        { date: '2024-01-01', value: 100_000 },
+        { date: '2024-01-31', value: 160_000 },
+      ],
+      [{ date: '2024-01-31', amountCZK: 50_000 }]
+    )!
+    expect(r).toBeCloseTo(0.10, 9)
+  })
 })
 
 describe('cagr / annualise', () => {
