@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   addMonths, couponPeriod, remainingCouponDates, accrualFraction,
   valueBond, bondTotals, solveYTM, durationAt, shockedValue, accruedInterestOn,
+  splitAllInPrice,
   upcomingCoupons, bondNominal, parseISO, toISO,
 } from './bonds'
 import type { Bond } from './supabase'
@@ -383,5 +384,52 @@ describe('accruedInterestOn', () => {
   it('is zero on a coupon date and after maturity', () => {
     expect(accruedInterestOn(OAT, at('2026-05-25'))).toBe(0)
     expect(accruedInterestOn(OAT, at('2054-06-01'))).toBe(0)
+  })
+})
+
+describe('splitAllInPrice', () => {
+  it('splits a broker all-in price without changing what was settled', () => {
+    // The reported contract note: 4,000 nominal at an all-in 102.3, of which
+    // 53.26 was the coupon couru owed to the previous holder.
+    const split = splitAllInPrice(102.3, 4_000, 1, 53.26)!
+    expect(split.totalPaid).toBeCloseTo(4_092.00, 6)
+    expect(split.accruedAtPurchase).toBeCloseTo(53.26, 6)
+    expect(split.cleanPricePct).toBeCloseTo(100.9685, 4)
+    // The split must be cost-neutral, or it invents or destroys money.
+    expect(
+      (split.cleanPricePct / 100) * 4_000 + split.accruedAtPurchase
+    ).toBeCloseTo(split.totalPaid, 6)
+  })
+
+  it('rebuilds the reported position correctly once split', () => {
+    const split = splitAllInPrice(102.3, 4_000, 1, 53.26)!
+    const v = valueBond({
+      ...OAT,
+      quantity: 4_000, face_value: 1,
+      coupon_rate: 0.045, coupons_per_year: 1,
+      maturity_date: '2041-04-25',
+      purchase_date: '2026-08-11',
+      purchase_price_pct: split.cleanPricePct,
+      current_price_pct: 101.12,
+      accrued_at_purchase: split.accruedAtPurchase,
+    }, at('2026-08-20'))
+
+    // Total is unchanged by the split — only the attribution moves.
+    expect(v.plValue).toBeCloseTo(10.50, 2)
+    // and now points the right way on both halves: the clean price rose from
+    // 100.97 to 101.12, and nine days of coupon accrued on top.
+    expect(v.pricePL).toBeCloseTo(6.06, 2)
+    expect(v.incomePL).toBeCloseTo(4.44, 2)
+    expect(v.unrecordedAccruedAtPurchase).toBeNull()
+  })
+
+  it('leaves a clean-quoted price alone when there is no accrued to strip', () => {
+    const split = splitAllInPrice(92.5, 10_000, 1, 0)!
+    expect(split.cleanPricePct).toBeCloseTo(92.5, 9)
+  })
+
+  it('refuses a split where the accrued exceeds the payment', () => {
+    expect(splitAllInPrice(1, 100, 1, 500)).toBeNull()
+    expect(splitAllInPrice(102, 0, 1, 10)).toBeNull()
   })
 })

@@ -461,6 +461,51 @@ export function shockedValue(v: BondValuation, yieldShiftBp: number): number {
   return Math.max(0, v.dirtyValue * (1 - v.modifiedDuration * shift))
 }
 
+// ─── Price basis ──────────────────────────────────────────────────────────────
+
+export interface AllInSplit {
+  /** Clean price as a percentage of par, for storage. */
+  cleanPricePct: number
+  /** Coupon couru contained in the all-in price. */
+  accruedAtPurchase: number
+  /** Total settled — unchanged by the split, and the figure on the contract note. */
+  totalPaid: number
+}
+
+/**
+ * Split an all-in purchase price into its clean and accrued halves.
+ *
+ * Market convention quotes bonds clean, but a retail contract note often shows
+ * one settlement figure with the coupon couru already inside it. Storing that
+ * number as if it were clean overstates the price paid by the accrued amount
+ * and then counts the same accrued interest again as income — the position
+ * looks worse on price and better on income than it is, while the total
+ * happens to come out right, which is what makes it hard to spot.
+ *
+ * Returns null when the accrued exceeds the payment, which means the inputs
+ * disagree rather than that the bond is worth nothing.
+ */
+export function splitAllInPrice(
+  allInPricePct: number,
+  quantity: number,
+  faceValue: number,
+  accruedAtPurchase: number
+): AllInSplit | null {
+  const nominal = quantity * faceValue
+  if (!(nominal > 0) || !isFinite(allInPricePct)) return null
+
+  const totalPaid = (nominal * allInPricePct) / 100
+  const accrued = isFinite(accruedAtPurchase) ? accruedAtPurchase : 0
+  const cleanAmount = totalPaid - accrued
+  if (!(cleanAmount > 0)) return null
+
+  return {
+    cleanPricePct: (cleanAmount / nominal) * 100,
+    accruedAtPurchase: accrued,
+    totalPaid,
+  }
+}
+
 // ─── Aggregates ───────────────────────────────────────────────────────────────
 
 export interface BondTotals {
