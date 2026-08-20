@@ -21,6 +21,15 @@ export interface Shocks {
   fx?: Record<string, number>
   /** Change in deposit rates, as a fraction of current rates. */
   rates_pct?: number
+  /**
+   * Parallel shift in bond yields, in basis points: 200 = yields rise 2pp.
+   *
+   * Distinct from `rates_pct` on purpose. A deposit rate move changes the
+   * interest a cash balance earns and leaves the balance itself alone; a yield
+   * move changes what a bond is *worth*, by roughly its duration, while the
+   * coupon it pays does not move at all.
+   */
+  rates_bps?: number
   rent_vacancy_pct?: number
   expense_shock_pct?: number
   income_loss_months?: number
@@ -53,6 +62,7 @@ export interface ScenarioResult {
 const EMPTY_CLASS: Record<AssetClass, ClassImpact> = {
   stock: { before: 0, after: 0, delta: 0 },
   etf: { before: 0, after: 0, delta: 0 },
+  bond: { before: 0, after: 0, delta: 0 },
   cash: { before: 0, after: 0, delta: 0 },
   crypto: { before: 0, after: 0, delta: 0 },
   realestate: { before: 0, after: 0, delta: 0 },
@@ -80,11 +90,22 @@ export function applyScenario(
         valueLocal *= 1 + (shocks.equity_pct ?? 0)
       } else if (p.assetClass === 'crypto') {
         valueLocal *= 1 + (shocks.crypto_pct ?? 0)
+      } else if (p.assetClass === 'bond') {
+        // Price response is duration x the yield shift. A position with no
+        // solvable duration (a matured line) is left alone rather than shocked
+        // by some stand-in number.
+        const shiftBp = shocks.rates_bps ?? 0
+        if (shiftBp !== 0 && p.modifiedDuration != null) {
+          valueLocal = Math.max(0, valueLocal * (1 - p.modifiedDuration * (shiftBp / 10_000)))
+        }
       } else if (p.assetClass === 'realestate') {
         valueLocal *= 1 + (shocks.property_pct ?? 0)
         annualIncomeCZKAfter *= 1 + (shocks.rent_vacancy_pct ?? 0)
       }
     }
+
+    // A bond's coupon is contractual: the issuer pays the same amount whatever
+    // yields do. Income is deliberately untouched above.
 
     // Income shocks that follow the asset price
     if (p.assetClass === 'cash') {
@@ -181,8 +202,8 @@ export interface ScenarioPreset {
 export const SCENARIO_PRESETS: ScenarioPreset[] = [
   {
     name: '2008 replay',
-    description: 'Global financial crisis: equities halve, property slides, rates collapse.',
-    shocks: { equity_pct: -0.50, property_pct: -0.20, crypto_pct: -0.60, rates_pct: -0.80 },
+    description: 'Global financial crisis: equities halve, property slides, rates collapse — government bonds rally as money runs to safety.',
+    shocks: { equity_pct: -0.50, property_pct: -0.20, crypto_pct: -0.60, rates_pct: -0.80, rates_bps: -150 },
   },
   {
     name: 'COVID crash',
@@ -211,8 +232,18 @@ export const SCENARIO_PRESETS: ScenarioPreset[] = [
   },
   {
     name: 'Stagflation',
-    description: 'Equities fall, living costs rise, deposit rates climb.',
-    shocks: { equity_pct: -0.20, expense_shock_pct: 0.15, rates_pct: 0.50 },
+    description: 'Equities fall, living costs rise, deposit rates climb — and long bonds are repriced hard.',
+    shocks: { equity_pct: -0.20, expense_shock_pct: 0.15, rates_pct: 0.50, rates_bps: 250 },
+  },
+  {
+    name: 'Rates +200bp',
+    description: 'A parallel 2pp rise in yields. Coupons keep paying; long-dated bonds lose the most, by duration.',
+    shocks: { rates_bps: 200, rates_pct: 0.5 },
+  },
+  {
+    name: '2022 replay',
+    description: 'Bonds and equities fall together — the year the classic hedge stopped working.',
+    shocks: { equity_pct: -0.19, rates_bps: 250, crypto_pct: -0.64, expense_shock_pct: 0.08 },
   },
 ]
 
@@ -220,7 +251,7 @@ export const SCENARIO_PRESETS: ScenarioPreset[] = [
 export function waterfall(result: ScenarioResult): { label: string; delta: number }[] {
   const steps: { label: string; delta: number }[] = []
   const classLabels: Record<AssetClass, string> = {
-    stock: 'Stocks', etf: 'ETFs', cash: 'Cash', crypto: 'Crypto', realestate: 'Real estate',
+    stock: 'Stocks', etf: 'ETFs', bond: 'Bonds', cash: 'Cash', crypto: 'Crypto', realestate: 'Real estate',
   }
   for (const k of Object.keys(result.byClass) as AssetClass[]) {
     const delta = result.byClass[k].delta

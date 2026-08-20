@@ -72,7 +72,7 @@ export default function RebalancePage() {
   const suggestedBuckets = useMemo(() => {
     const present = new Set(drift.map(d => d.bucket))
     const candidates = scope === 'asset_class'
-      ? ['stock', 'etf', 'cash', 'crypto', 'realestate']
+      ? ['stock', 'etf', 'bond', 'cash', 'crypto', 'realestate']
       : scope === 'region'
         ? ['US', 'EU', 'CZ', 'UK', 'Global', 'EM']
         : scope === 'sector'

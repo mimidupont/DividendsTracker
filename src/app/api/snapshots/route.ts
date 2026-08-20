@@ -22,6 +22,7 @@ export interface PortfolioSnapshot {
   cash_czk: number
   crypto_czk: number
   realestate_czk: number
+  bonds_czk?: number | null
 }
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
@@ -34,6 +35,9 @@ const CORE_COLUMNS =
 /** Added by migration 005 — absent on a database created from an older schema. */
 const EXPOSURE_COLUMNS =
   'exposure_usd_local, exposure_eur_local, exposure_czk_local, exposure_other_czk, fx_usd, fx_eur, fx_gbp'
+
+/** Added by migration 010. Optional for the same reason as the exposure set. */
+const BOND_COLUMN = 'bonds_czk'
 
 /** PostgREST's code for "no such column". */
 const isMissingColumn = (error: { code?: string; message?: string } | null): boolean => {
@@ -72,16 +76,21 @@ export async function GET(req: NextRequest) {
       .gte('snapshot_date', sinceStr)
       .order('snapshot_date', { ascending: true })
 
-  let { data, error } = await query(`${CORE_COLUMNS}, ${EXPOSURE_COLUMNS}`)
+  let { data, error } = await query(`${CORE_COLUMNS}, ${EXPOSURE_COLUMNS}, ${BOND_COLUMN}`)
 
   // PostgREST rejects the whole request if any listed column is absent, so on a
   // database predating migration 005 the entire P&L chart came back empty. Fall
-  // back to the columns every install has and say the extras are missing, so
-  // the FX-attribution page can tell the user which migration to run.
+  // back through the optional column sets rather than losing the chart, and say
+  // which extras are missing so the FX-attribution page can name the migration.
   let exposureAvailable = true
   if (isMissingColumn(error)) {
-    exposureAvailable = false
-    ;({ data, error } = await query(CORE_COLUMNS))
+    // Try without the newest column first — a database with migration 005 but
+    // not 010 should keep its exposure data rather than being dropped to core.
+    ;({ data, error } = await query(`${CORE_COLUMNS}, ${EXPOSURE_COLUMNS}`))
+    if (isMissingColumn(error)) {
+      exposureAvailable = false
+      ;({ data, error } = await query(CORE_COLUMNS))
+    }
   }
 
   if (error) {
@@ -99,7 +108,7 @@ export async function POST(req: NextRequest) {
   const body = await req.json()
   const {
     profileId, snapshotDate,
-    total_value_czk, stocks_czk, cash_czk, crypto_czk, realestate_czk,
+    total_value_czk, stocks_czk, cash_czk, crypto_czk, realestate_czk, bonds_czk,
     fx_usd, fx_eur, fx_gbp,
     exposure_usd_local, exposure_eur_local, exposure_czk_local, exposure_other_czk,
   } = body
@@ -126,9 +135,7 @@ export async function POST(req: NextRequest) {
     ? snapshotDate
     : new Date().toISOString().slice(0, 10)
 
-  const { error } = await supabase
-    .from('portfolio_snapshots')
-    .upsert({
+  const row = {
       profile_id: profileId,
       snapshot_date: date,
       total_value_czk: num(total_value_czk),
@@ -147,7 +154,23 @@ export async function POST(req: NextRequest) {
       exposure_eur_local: num(exposure_eur_local),
       exposure_czk_local: num(exposure_czk_local),
       exposure_other_czk: num(exposure_other_czk),
-    }, { onConflict: 'profile_id,snapshot_date' })
+      bonds_czk: num(bonds_czk),
+  }
+
+  const write = (payload: Record<string, unknown>) =>
+    supabase
+      .from('portfolio_snapshots')
+      .upsert(payload, { onConflict: 'profile_id,snapshot_date' })
+
+  let { error } = await write(row)
+
+  // A database that has not run migration 010 has no bonds_czk, and PostgREST
+  // fails the whole upsert over it. Retry without that one field rather than
+  // letting an optional breakdown column stop the daily snapshot being written.
+  if (isMissingColumn(error)) {
+    const { bonds_czk: _dropped, ...withoutBonds } = row
+    ;({ error } = await write(withoutBonds))
+  }
 
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 })

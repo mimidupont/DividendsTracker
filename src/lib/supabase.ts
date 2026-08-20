@@ -245,6 +245,61 @@ export interface MarketAssumption {
   volatility: number
 }
 
+export type BondType =
+  | 'government' | 'corporate' | 'municipal' | 'supranational' | 'inflation_linked'
+
+export type DayCount = 'ACT/ACT' | 'ACT/365' | '30/360'
+
+export interface Bond {
+  id: string
+  profile_id: string
+  name: string
+  issuer: string
+  isin: string | null
+  bond_type: BondType
+  country: string | null
+  currency: string
+  /** Nominal of a single unit. An OAT is quoted per 1 EUR of nominal. */
+  face_value: number
+  quantity: number
+  /** Clean prices, as a percentage of par: 92.35 means 92.35%, not 92.35 EUR. */
+  purchase_price_pct: number
+  /** Latest clean market price. Null means "not marked" — valued at cost. */
+  current_price_pct: number | null
+  /** Decimal fraction: 3% is 0.03. */
+  coupon_rate: number
+  coupons_per_year: number
+  day_count: DayCount
+  issue_date: string | null
+  maturity_date: string
+  purchase_date: string | null
+  /** Coupon couru paid to the seller at purchase, in `currency`. */
+  accrued_at_purchase: number
+  /** Decimal fraction. */
+  withholding_tax_pct: number
+  is_inflation_linked: boolean
+  /** OAT€i / OATi indexation coefficient; scales nominal and coupons alike. */
+  index_ratio: number
+  liquidity_tier: string | null
+  notes: string | null
+  is_active: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface BondCouponReceived {
+  id: string
+  profile_id: string
+  bond_id: string
+  payment_date: string
+  gross_amount: number
+  tax_withheld: number
+  net_amount: number
+  currency: string
+  notes: string | null
+  created_at: string
+}
+
 export interface RealEstate {
   id: string
   name: string

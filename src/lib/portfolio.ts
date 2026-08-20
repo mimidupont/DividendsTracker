@@ -8,8 +8,9 @@
  * same number for the same position.
  */
 import type {
-  DividendProjection, Holding, BankAccount, CryptoHolding, RealEstate, AssetMetadata,
+  DividendProjection, Holding, BankAccount, CryptoHolding, RealEstate, AssetMetadata, Bond,
 } from './supabase'
+import { valueBond } from './bonds'
 import { toCZK, normalizeCurrencyCode, normalizeMoney, hasFxRate } from './fx'
 import { computeProjectedTotal, findProjection } from './projections'
 
@@ -155,7 +156,7 @@ export const exposureCurrency = (r: PositionMetrics): string =>
 // re-deriving "what do I hold" from the raw tables.
 // ─────────────────────────────────────────────────────────────────────────────
 
-export type AssetClass = 'stock' | 'etf' | 'cash' | 'crypto' | 'realestate'
+export type AssetClass = 'stock' | 'etf' | 'bond' | 'cash' | 'crypto' | 'realestate'
 export type LiquidityTier = 'instant' | 'week' | 'month' | 'year' | 'illiquid'
 
 export const LIQUIDITY_TIERS: LiquidityTier[] = ['instant', 'week', 'month', 'year', 'illiquid']
@@ -182,6 +183,14 @@ export interface Position {
   isLiability: boolean
   /** Primary residence is excluded from investable net worth by default. */
   isPrimaryResidence?: boolean
+  /**
+   * Modified duration, on bond positions only. Carried on the position so a
+   * rate scenario can shock fixed income by its actual sensitivity instead of
+   * applying one blanket percentage to every bond in the book.
+   */
+  modifiedDuration?: number | null
+  /** Maturity date, on bond positions only. */
+  maturityDate?: string
 }
 
 /** Minimal shape of the crypto price hook this module needs. */
@@ -196,6 +205,7 @@ export interface BuildPositionsInput {
   realEstate: RealEstate[]
   projections?: DividendProjection[]
   assetMetadata?: AssetMetadata[]
+  bonds?: Bond[]
 }
 
 function coerceTier(raw: string | null | undefined, fallback: LiquidityTier): LiquidityTier {
@@ -262,6 +272,43 @@ export function buildPositions(
       liquidityTier: coerceTier(meta?.liquidity_tier, 'week'),
       annualIncomeCZK: m.annualDivCZK ?? 0,
       isLiability: false,
+    })
+  }
+
+  // ── Bonds ──────────────────────────────────────────────────────────────────
+  // Valued dirty (clean + accrued): accrued interest is money already earned
+  // and paid out on the next coupon date, so leaving it out understates the
+  // position every day of the year except the coupon date itself.
+  for (const b of data.bonds ?? []) {
+    const v = valueBond(b)
+    const value = normalizeMoney(v.dirtyValue, b.currency)
+    const cost = normalizeMoney(v.costValue, b.currency)
+    positions.push({
+      id: b.id,
+      assetClass: 'bond',
+      label: b.isin ?? b.name,
+      name: b.name,
+      currency: value.ccy,
+      quantity: v.nominal,
+      valueLocal: value.amount,
+      valueCZK: toCZK(v.dirtyValue, b.currency, fx),
+      costLocal: cost.amount,
+      costCZK: toCZK(v.costValue, b.currency, fx),
+      sector: 'Fixed income',
+      region: b.country,
+      // A listed government bond sells in days; anything else is assumed less
+      // liquid unless the row says otherwise. A matured line is cash awaiting
+      // redemption, so it is treated as reachable.
+      liquidityTier: coerceTier(
+        b.liquidity_tier,
+        v.isMatured ? 'week' : b.bond_type === 'government' ? 'week' : 'month'
+      ),
+      // Net of withholding: the gross coupon is not what lands in the account,
+      // and this figure feeds FIRE and runway.
+      annualIncomeCZK: toCZK(v.annualCouponNet, b.currency, fx),
+      isLiability: false,
+      modifiedDuration: v.modifiedDuration,
+      maturityDate: b.maturity_date,
     })
   }
 
@@ -366,7 +413,7 @@ export function buildPositions(
 
 export function totalsByClass(positions: Position[]): Record<AssetClass, number> {
   const totals: Record<AssetClass, number> = {
-    stock: 0, etf: 0, cash: 0, crypto: 0, realestate: 0,
+    stock: 0, etf: 0, bond: 0, cash: 0, crypto: 0, realestate: 0,
   }
   for (const p of positions) totals[p.assetClass] += p.valueCZK
   return totals
