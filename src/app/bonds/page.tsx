@@ -8,7 +8,7 @@ import { useProfile } from '@/lib/profile'
 import { useFx } from '@/hooks/useFx'
 import { toCZK, fmtCZK, fmtNum, fmtDate, DASH } from '@/lib/fx'
 import {
-  valueBond, bondTotals, upcomingCoupons, parseISO,
+  valueBond, bondTotals, upcomingCoupons, parseISO, accruedInterestOn, splitAllInPrice,
   BOND_TYPE_LABELS, BOND_TYPE_COLORS, COUPON_FREQUENCY_LABELS,
   type BondValuation,
 } from '@/lib/bonds'
@@ -29,6 +29,12 @@ const emptyForm = {
   face_value: '1',
   quantity: '',
   purchase_price_pct: '100',
+  /**
+   * Whether `purchase_price_pct` as typed includes the coupon couru.
+   * Not stored — the database always holds a clean price; this only says how to
+   * read what was entered, and many retail contract notes quote all-in.
+   */
+  price_basis: 'clean' as 'clean' | 'all_in',
   current_price_pct: '',
   coupon_rate: '',
   coupons_per_year: '1',
@@ -83,12 +89,24 @@ export default function BondsPage() {
     valueCZK: toCZK(v.dirtyValue, v.bond.currency, fx),
     costCZK:  toCZK(v.costValue, v.bond.currency, fx),
     couponCZK: toCZK(v.annualCouponNet, v.bond.currency, fx),
+    // Kept apart all the way to the screen. A capital loss and accrued coupon
+    // routinely point in opposite directions, and one netted number reads as
+    // a mystery profit on a bond trading below what you paid for it.
+    pricePLCZK:  toCZK(v.pricePL, v.bond.currency, fx),
+    incomePLCZK: toCZK(v.incomePL, v.bond.currency, fx),
   })), [valuations, fx])
 
   const totalValueCZK  = rows.reduce((s, r) => s + r.valueCZK, 0)
   const totalCostCZK   = rows.reduce((s, r) => s + r.costCZK, 0)
   const totalCouponCZK = rows.reduce((s, r) => s + r.couponCZK, 0)
+  const pricePLCZK     = rows.reduce((s, r) => s + r.pricePLCZK, 0)
+  const incomePLCZK    = rows.reduce((s, r) => s + r.incomePLCZK, 0)
   const plCZK          = totalValueCZK - totalCostCZK
+
+  // Positions whose cost basis is missing the coupon couru paid at purchase,
+  // which overstates their gain by exactly that amount.
+  const unrecordedCouru = rows.filter(r => r.v.unrecordedAccruedAtPurchase != null)
+
 
   // Yield and duration are weighted by each line's own value in its own
   // currency, which is only comparable once everything is in CZK. Re-weight
@@ -132,7 +150,18 @@ export default function BondsPage() {
 
   const startAdd = () => { resetForm(); setShowForm(true) }
 
-  const startEdit = (b: Bond) => {
+  /**
+   * `couru` prefills the form for a position whose coupon couru went
+   * unrecorded. `basis` says how to read the price already stored:
+   *
+   *   'clean'  — the couru was paid on top, so cost rises by it
+   *   'all_in' — the couru was already inside the price, so the price is
+   *              restated downwards and the total paid does not move
+   *
+   * Only the contract note settles which, so both are offered and neither is
+   * applied until saved.
+   */
+  const startEdit = (b: Bond, couru?: { amount: number; basis: 'clean' | 'all_in' }) => {
     setForm({
       name: b.name,
       issuer: b.issuer ?? '',
@@ -143,6 +172,10 @@ export default function BondsPage() {
       face_value: String(b.face_value),
       quantity: String(b.quantity),
       purchase_price_pct: String(b.purchase_price_pct),
+      // What is stored is always clean, whatever was typed to produce it — so
+      // restating a dirty price means re-entering it as all-in and letting the
+      // save path split it.
+      price_basis: couru?.basis === 'all_in' ? 'all_in' : 'clean',
       current_price_pct: b.current_price_pct == null ? '' : String(b.current_price_pct),
       coupon_rate: String(+(b.coupon_rate * 100).toFixed(6)),
       coupons_per_year: String(b.coupons_per_year),
@@ -150,7 +183,9 @@ export default function BondsPage() {
       issue_date: b.issue_date ?? '',
       maturity_date: b.maturity_date,
       purchase_date: b.purchase_date ?? '',
-      accrued_at_purchase: String(b.accrued_at_purchase ?? 0),
+      accrued_at_purchase: couru != null
+        ? couru.amount.toFixed(2)
+        : String(b.accrued_at_purchase ?? 0),
       withholding_tax_pct: String(+((b.withholding_tax_pct ?? 0) * 100).toFixed(4)),
       is_inflation_linked: b.is_inflation_linked,
       index_ratio: String(b.index_ratio ?? 1),
@@ -190,6 +225,25 @@ export default function BondsPage() {
       return
     }
 
+    const accruedPaid = nOr(form.accrued_at_purchase, 0)
+    if (accruedPaid < 0) { setFormError('Accrued at purchase cannot be negative.'); return }
+
+    // An all-in price is converted here, once, so everything downstream reads a
+    // clean price and a separate coupon couru — the only pair the maths accepts.
+    let cleanPricePct = purchasePct
+    if (form.price_basis === 'all_in') {
+      if (accruedPaid <= 0) {
+        setFormError('An all-in price contains a coupon couru — set it (or press “compute”) so it can be separated out.')
+        return
+      }
+      const split = splitAllInPrice(purchasePct, quantity, faceValue, accruedPaid)
+      if (!split) {
+        setFormError('The accrued interest is larger than the total paid — check both figures against the contract note.')
+        return
+      }
+      cleanPricePct = split.cleanPricePct
+    }
+
     setSaving(true)
     setFormError(null)
 
@@ -202,7 +256,7 @@ export default function BondsPage() {
       currency: form.currency,
       face_value: faceValue,
       quantity,
-      purchase_price_pct: purchasePct,
+      purchase_price_pct: cleanPricePct,
       // Empty means "not marked" — stored as null so the valuation falls back to
       // cost and the table can say so, rather than implying a live price of 0.
       current_price_pct: form.current_price_pct.trim() === '' ? null : nOr(form.current_price_pct, 0),
@@ -213,7 +267,7 @@ export default function BondsPage() {
       issue_date: form.issue_date || null,
       maturity_date: form.maturity_date,
       purchase_date: form.purchase_date || null,
-      accrued_at_purchase: nOr(form.accrued_at_purchase, 0),
+      accrued_at_purchase: accruedPaid,
       withholding_tax_pct: nOr(form.withholding_tax_pct, 0) / 100,
       is_inflation_linked: form.is_inflation_linked,
       index_ratio: nOr(form.index_ratio, 1),
@@ -274,13 +328,58 @@ export default function BondsPage() {
 
         <SetupNotice tables={bondsTableMissing ? ['bonds'] : []} />
 
+        {unrecordedCouru.length > 0 && (
+          <div style={{
+            background: 'var(--amber-bg)', border: '1px solid var(--amber-bd)',
+            borderRadius: 10, padding: '12px 16px', marginBottom: 16,
+            fontSize: 11, lineHeight: 1.7, color: 'var(--text2)',
+          }}>
+            <div style={{ fontWeight: 600, color: 'var(--amber)', marginBottom: 4 }}>
+              ⚠ No coupon couru recorded
+            </div>
+            {unrecordedCouru.length === 1 ? 'One position was' : `${unrecordedCouru.length} positions were`}{' '}
+            bought part-way through a coupon period with no accrued interest recorded, so the price
+            and income halves of its P&amp;L are attributed wrongly. Which fix applies depends on how
+            your broker quoted the price — the contract note settles it:
+            <ul style={{ margin: '8px 0 0 18px', padding: 0 }}>
+              {unrecordedCouru.map(r => (
+                <li key={r.v.bond.id} style={{ marginBottom: 6 }}>
+                  <strong style={{ color: 'var(--text2)' }}>{r.v.bond.name}</strong> — about{' '}
+                  {fmtNum(r.v.unrecordedAccruedAtPurchase!, 2)} {r.v.bond.currency} had accrued by{' '}
+                  {fmtDate(r.v.bond.purchase_date!)}
+                  <div style={{ display: 'flex', gap: 6, marginTop: 4 }}>
+                    <button
+                      onClick={() => startEdit(r.v.bond, { amount: r.v.unrecordedAccruedAtPurchase!, basis: 'clean' })}
+                      style={{ ...btnSecondary, padding: '3px 10px', fontSize: 10 }}
+                      title="The quoted price excluded accrued interest, which you paid on top — cost rises"
+                    >
+                      price was clean — add it on top
+                    </button>
+                    <button
+                      onClick={() => startEdit(r.v.bond, { amount: r.v.unrecordedAccruedAtPurchase!, basis: 'all_in' })}
+                      style={{ ...btnSecondary, padding: '3px 10px', fontSize: 10 }}
+                      title="The quoted price already contained the coupon couru — the price is restated, the total paid is unchanged"
+                    >
+                      price was all-in — split it out
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+            <div style={{ marginTop: 8, fontSize: 10, color: 'var(--text4)' }}>
+              Accrued interest is reckoned on the settlement date, not the trade date, so an OAT
+              settling T+2 accrues a little more than the figure above. Replace it with the exact
+              amount from the contract note where you have it.
+            </div>
+          </div>
+        )}
+
         {/* ── Summary ─────────────────────────────────────────────────────── */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12, marginBottom: 18 }}>
-          {[
+          {([
             {
               label: 'Bond value', value: fmtCZK(totalValueCZK), accent: ACCENT,
-              note: `${plCZK >= 0 ? '+' : ''}${fmtCZK(plCZK)} vs cost`,
-              noteColor: plCZK >= 0 ? 'var(--green)' : 'var(--red)',
+              note: `price ${pricePLCZK >= 0 ? '+' : '−'}${fmtCZK(Math.abs(pricePLCZK))} · coupon +${fmtCZK(Math.abs(incomePLCZK))}`,
             },
             {
               label: 'Annual coupons', value: fmtCZK(totalCouponCZK), accent: 'var(--green)',
@@ -302,7 +401,8 @@ export default function BondsPage() {
               value: fmtCZK(rows.reduce((s, r) => s + toCZK(r.v.accruedInterest, r.v.bond.currency, fx), 0)),
               accent: 'var(--teal)', note: 'earned, not yet paid',
             },
-          ].map((m, i) => (
+          ] as { label: string; value: string; accent: string; note: string; noteColor?: string }[])
+            .map((m, i) => (
             <div key={i} style={{ ...cardStyle, borderTop: `2px solid ${m.accent}` }}>
               <div style={cardLabelStyle}>{m.label}</div>
               <div style={{ fontFamily: "'Syne', sans-serif", fontSize: 21, fontWeight: 700, letterSpacing: '-0.02em', marginBottom: 4 }}>{m.value}</div>
@@ -340,7 +440,7 @@ export default function BondsPage() {
                     </td>
                   </tr>
                 )}
-                {rows.map(({ v, valueCZK, costCZK }) => {
+                {rows.map(({ v, valueCZK, costCZK, pricePLCZK: rowPricePL, incomePLCZK: rowIncomePL }) => {
                   const b = v.bond
                   const pl = valueCZK - costCZK
                   const typeColor = BOND_TYPE_COLORS[b.bond_type] ?? 'var(--text3)'
@@ -380,15 +480,37 @@ export default function BondsPage() {
                           {(v.cleanPricePct * 100).toFixed(3)}
                         </div>
                         <div style={{ fontSize: 10, color: v.hasMarketPrice ? 'var(--text4)' : 'var(--amber)' }}>
-                          {v.isMatured ? 'redeemed at par' : v.hasMarketPrice ? `cost ${b.purchase_price_pct}` : 'at cost — unmarked'}
+                          {v.isMatured
+                            ? 'redeemed at par'
+                            : v.hasMarketPrice
+                              ? `clean cost ${Number(b.purchase_price_pct).toFixed(3)}`
+                              : 'at cost — unmarked'}
                         </div>
                       </td>
                       <td style={{ ...tdR, fontFamily: "'DM Mono', monospace", color: 'var(--teal)' }}>
                         {v.accruedInterest > 0 ? fmtNum(v.accruedInterest, 2) : DASH}
                       </td>
                       <td style={{ ...tdR, fontFamily: "'DM Mono', monospace", fontWeight: 500 }}>{fmtCZK(valueCZK)}</td>
-                      <td style={{ ...tdR, fontFamily: "'DM Mono', monospace", color: pl >= 0 ? 'var(--green)' : 'var(--red)' }}>
-                        {pl >= 0 ? '+' : ''}{fmtCZK(pl)}
+                      <td style={tdR}>
+                        <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 13, color: pl >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                          {pl >= 0 ? '+' : ''}{fmtCZK(pl)}
+                        </div>
+                        {/* Which half is which. Without this a bond marked
+                            below its purchase price still reads as a gain. */}
+                        <div style={{ fontSize: 9, color: 'var(--text4)', whiteSpace: 'nowrap' }}>
+                          <span style={{ color: rowPricePL >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                            price {rowPricePL >= 0 ? '+' : '−'}{fmtCZK(Math.abs(rowPricePL))}
+                          </span>
+                          {' · '}
+                          <span style={{ color: 'var(--teal)' }}>
+                            coupon {rowIncomePL >= 0 ? '+' : '−'}{fmtCZK(Math.abs(rowIncomePL))}
+                          </span>
+                        </div>
+                        {v.unrecordedAccruedAtPurchase != null && (
+                          <div style={{ fontSize: 9, color: 'var(--amber)' }} title="No coupon couru recorded at purchase — cost is understated">
+                            ⚠ coupon couru not recorded
+                          </div>
+                        )}
                       </td>
                       <td style={tdR}>
                         <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 12 }}>
@@ -423,8 +545,14 @@ export default function BondsPage() {
                   <tr style={{ background: 'var(--bg3)' }}>
                     <td colSpan={5} style={{ padding: '10px 14px', fontSize: 12, fontWeight: 600, borderTop: '1px solid var(--border)' }}>Total</td>
                     <td style={{ ...tdR, borderTop: '1px solid var(--border)', fontFamily: "'DM Mono', monospace", fontWeight: 600 }}>{fmtCZK(totalValueCZK)}</td>
-                    <td style={{ ...tdR, borderTop: '1px solid var(--border)', fontFamily: "'DM Mono', monospace", fontWeight: 600, color: plCZK >= 0 ? 'var(--green)' : 'var(--red)' }}>
-                      {plCZK >= 0 ? '+' : ''}{fmtCZK(plCZK)}
+                    <td style={{ ...tdR, borderTop: '1px solid var(--border)' }}>
+                      <div style={{ fontFamily: "'DM Mono', monospace", fontWeight: 600, color: plCZK >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                        {plCZK >= 0 ? '+' : ''}{fmtCZK(plCZK)}
+                      </div>
+                      <div style={{ fontSize: 9, color: 'var(--text4)', whiteSpace: 'nowrap' }}>
+                        price {pricePLCZK >= 0 ? '+' : '−'}{fmtCZK(Math.abs(pricePLCZK))}
+                        {' · '}coupon {incomePLCZK >= 0 ? '+' : '−'}{fmtCZK(Math.abs(incomePLCZK))}
+                      </div>
                     </td>
                     <td style={{ ...tdR, borderTop: '1px solid var(--border)', fontFamily: "'DM Mono', monospace", color: 'var(--green)' }}>
                       ~{fmtCZK(totalCouponCZK)}
@@ -495,16 +623,84 @@ export default function BondsPage() {
               <Field label="Quantity (units of nominal)">
                 <input style={inputStyle} type="number" step="any" value={form.quantity} onChange={e => set('quantity', e.target.value)} placeholder="10000" />
               </Field>
-              <Field label="Purchase price (% of par)">
+              <Field
+                label="Purchase price basis"
+                hint="Brokers differ — a contract note often shows one all-in figure"
+              >
+                <select
+                  style={inputStyle}
+                  value={form.price_basis}
+                  onChange={e => set('price_basis', e.target.value as Form['price_basis'])}
+                >
+                  <option value="clean">Clean — excludes accrued interest</option>
+                  <option value="all_in">All-in — includes the coupon couru</option>
+                </select>
+              </Field>
+              <Field
+                label={form.price_basis === 'all_in' ? 'Purchase price (% of par, all-in)' : 'Purchase price (% of par, clean)'}
+                hint={form.price_basis === 'all_in' ? 'Stored as a clean price once the couru below is separated out' : undefined}
+              >
                 <input style={inputStyle} type="number" step="any" value={form.purchase_price_pct} onChange={e => set('purchase_price_pct', e.target.value)} placeholder="92.5" />
               </Field>
               <Field label="Current price (% of par)" hint="Leave blank to hold at cost">
                 <input style={inputStyle} type="number" step="any" value={form.current_price_pct} onChange={e => set('current_price_pct', e.target.value)} placeholder="95.0" />
               </Field>
-              <Field label="Accrued paid at purchase" hint={`Coupon couru, in ${form.currency}`}>
-                <input style={inputStyle} type="number" step="any" value={form.accrued_at_purchase} onChange={e => set('accrued_at_purchase', e.target.value)} placeholder="92.05" />
+              <Field
+                label="Accrued paid at purchase"
+                hint={`Coupon couru, in ${form.currency} — reimbursed to the seller on top of the clean price`}
+              >
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <input style={inputStyle} type="number" step="any" value={form.accrued_at_purchase} onChange={e => set('accrued_at_purchase', e.target.value)} placeholder="0.00" />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const computed = couruForForm(form)
+                      if (computed == null) {
+                        setFormError('Set the purchase date, maturity, coupon rate and quantity first — the coupon couru is derived from them.')
+                        return
+                      }
+                      setFormError(null)
+                      set('accrued_at_purchase', computed.toFixed(2))
+                    }}
+                    style={{ ...btnSecondary, whiteSpace: 'nowrap' }}
+                    title="Work out the accrued interest on the purchase date from the coupon terms"
+                  >
+                    compute
+                  </button>
+                </div>
               </Field>
             </FieldGroup>
+
+            {form.price_basis === 'all_in' && (() => {
+              // Show the arithmetic before it is committed: an all-in price that
+              // silently becomes a different number on save is worse than asking.
+              const quantity = parseFloat(form.quantity)
+              const faceValue = parseFloat(form.face_value)
+              const allIn = parseFloat(form.purchase_price_pct)
+              const accrued = parseFloat(form.accrued_at_purchase)
+              const split = isFinite(quantity) && isFinite(faceValue) && isFinite(allIn) && isFinite(accrued)
+                ? splitAllInPrice(allIn, quantity, faceValue, accrued)
+                : null
+              return (
+                <div style={{
+                  marginTop: -8, marginBottom: 20, padding: '10px 14px',
+                  background: 'var(--bg3)', border: '1px solid var(--border)',
+                  borderRadius: 8, fontSize: 11, lineHeight: 1.7, color: 'var(--text3)',
+                }}>
+                  {split ? (
+                    <>
+                      Settling <strong style={{ color: 'var(--text2)' }}>{fmtNum(split.totalPaid, 2)} {form.currency}</strong>
+                      {' '}in total, recorded as a clean price of{' '}
+                      <strong style={{ color: ACCENT }}>{split.cleanPricePct.toFixed(4)}</strong>
+                      {' '}plus <strong style={{ color: 'var(--teal)' }}>{fmtNum(split.accruedAtPurchase, 2)} {form.currency}</strong>
+                      {' '}coupon couru. The total you paid does not change.
+                    </>
+                  ) : (
+                    <>Enter quantity, face value, the all-in price and the coupon couru to see how they split.</>
+                  )}
+                </div>
+              )
+            })()}
 
             <FieldGroup title="Coupon">
               <Field label="Coupon rate (%)" hint="Annual, on nominal">
@@ -534,8 +730,20 @@ export default function BondsPage() {
               <Field label="Issue date">
                 <input style={inputStyle} type="date" value={form.issue_date} onChange={e => set('issue_date', e.target.value)} />
               </Field>
-              <Field label="Purchase date">
-                <input style={inputStyle} type="date" value={form.purchase_date} onChange={e => set('purchase_date', e.target.value)} />
+              <Field label="Purchase date" hint="Fills in the coupon couru if you have not set one">
+                <input
+                  style={inputStyle} type="date" value={form.purchase_date}
+                  onChange={e => {
+                    const next = { ...form, purchase_date: e.target.value }
+                    // Only ever fills a blank or zero field — never overwrites a
+                    // figure taken off the contract note.
+                    const untouched = next.accrued_at_purchase.trim() === '' || parseFloat(next.accrued_at_purchase) === 0
+                    const computed = untouched ? couruForForm(next) : null
+                    setForm(computed != null
+                      ? { ...next, accrued_at_purchase: computed.toFixed(2) }
+                      : next)
+                  }}
+                />
               </Field>
             </FieldGroup>
 
@@ -638,6 +846,40 @@ export default function BondsPage() {
       </main>
     </div>
   )
+}
+
+/**
+ * Coupon couru implied by the form's own values, or null when the terms it
+ * needs are not filled in yet.
+ *
+ * Deliberately routed through the same `accruedInterestOn` the valuation uses,
+ * rather than a second day-count implementation living in the UI — two copies
+ * of an accrual convention drift, and the one that drifts is always the one
+ * nobody has tests for.
+ */
+function couruForForm(form: Form): number | null {
+  const purchase = parseISO(form.purchase_date)
+  const quantity = parseFloat(form.quantity)
+  const faceValue = parseFloat(form.face_value)
+  const couponPct = parseFloat(form.coupon_rate)
+
+  if (!purchase || !form.maturity_date || !parseISO(form.maturity_date)) return null
+  if (!isFinite(quantity) || !isFinite(faceValue) || !isFinite(couponPct)) return null
+  if (quantity <= 0 || faceValue <= 0 || couponPct <= 0) return null
+
+  const probe = {
+    quantity, face_value: faceValue,
+    coupon_rate: couponPct / 100,
+    coupons_per_year: Math.round(parseFloat(form.coupons_per_year)) || 1,
+    day_count: form.day_count,
+    maturity_date: form.maturity_date,
+    issue_date: form.issue_date || null,
+    is_inflation_linked: form.is_inflation_linked,
+    index_ratio: parseFloat(form.index_ratio) || 1,
+  } as Bond
+
+  const accrued = accruedInterestOn(probe, purchase)
+  return accrued > 0 ? accrued : null
 }
 
 // ─── Form layout helpers ──────────────────────────────────────────────────────

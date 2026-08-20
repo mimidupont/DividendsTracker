@@ -169,6 +169,21 @@ export function accrualFraction(
 const clamp01 = (n: number): number =>
   !isFinite(n) ? 0 : n < 0 ? 0 : n > 1 ? 1 : n
 
+/**
+ * Accrued interest on this bond at an arbitrary date, in its own currency.
+ *
+ * At the purchase date this is the *coupon couru* — the interest the seller had
+ * already earned and which the buyer reimburses on top of the clean price. It
+ * is not a free parameter: given the purchase date and the coupon terms it is
+ * fully determined, which is why the UI can compute it rather than asking.
+ */
+export function accruedInterestOn(b: Bond, asOf: Date): number {
+  const maturity = parseISO(b.maturity_date)
+  if (!maturity || maturity.getTime() <= asOf.getTime()) return 0
+  const couponAmount = (bondNominal(b) * num(b.coupon_rate)) / couponsPerYear(b)
+  return couponAmount * accrualFraction(b, asOf)
+}
+
 // ─── Valuation ────────────────────────────────────────────────────────────────
 
 export interface BondValuation {
@@ -183,10 +198,33 @@ export interface BondValuation {
   accruedInterest: number
   /** Clean + accrued: what the position would actually settle for today. */
   dirtyValue: number
+  /** Clean cost alone — the price paid, excluding any coupon couru. */
+  cleanCostValue: number
+  /** Coupon couru reimbursed to the seller at purchase, as recorded. */
+  accruedAtPurchase: number
   /** Clean cost + accrued paid to the seller at purchase. */
   costValue: number
+  /**
+   * Total P&L: `pricePL + incomePL`. Reported alongside its two halves rather
+   * than alone, because they routinely pull in opposite directions — a bond can
+   * be below the price you paid and still show a gain once the coupon it has
+   * accrued since is counted.
+   */
   plValue: number
+  /** Capital gain or loss: clean value now vs the clean price paid. */
+  pricePL: number
+  /** Interest earned since purchase: accrued now, less the coupon couru paid. */
+  incomePL: number
   plPct: number
+  /**
+   * What the coupon couru actually was on the purchase date.
+   *
+   * Non-null only when it looks unrecorded — a stored zero with a purchase date
+   * that falls mid-period. Leaving it out understates cost and overstates P&L
+   * by exactly this amount, and a silent zero is indistinguishable from a bond
+   * genuinely bought on its coupon date.
+   */
+  unrecordedAccruedAtPurchase: number | null
   /** One coupon payment, gross, in the bond's currency. */
   couponAmount: number
   annualCouponGross: number
@@ -251,10 +289,23 @@ export function valueBond(b: Bond, asOf: Date = new Date()): BondValuation {
   const dirtyValue = cleanValue + accruedInterest
 
   // Cost is the clean price paid plus the coupon couru handed to the seller.
-  const costValue =
-    (num(b.quantity) * num(b.face_value) * num(b.purchase_price_pct)) / 100 +
-    num(b.accrued_at_purchase)
-  const plValue = dirtyValue - costValue
+  const cleanCostValue = (num(b.quantity) * num(b.face_value) * num(b.purchase_price_pct)) / 100
+  const accruedAtPurchase = num(b.accrued_at_purchase)
+  const costValue = cleanCostValue + accruedAtPurchase
+
+  const pricePL = cleanValue - cleanCostValue
+  const incomePL = accruedInterest - accruedAtPurchase
+  const plValue = pricePL + incomePL
+
+  // Flag a cost basis that is missing its coupon couru. Only when a purchase
+  // date exists and lands mid-period: a bond bought on a coupon date really
+  // does accrue nothing, and warning about that would be noise.
+  const purchaseDate = parseISO(b.purchase_date)
+  let unrecordedAccruedAtPurchase: number | null = null
+  if (accruedAtPurchase === 0 && purchaseDate && !isMatured) {
+    const wouldHaveBeen = accruedInterestOn(b, purchaseDate)
+    if (wouldHaveBeen > 0) unrecordedAccruedAtPurchase = wouldHaveBeen
+  }
 
   const msToMaturity = maturity ? maturity.getTime() - day.getTime() : 0
   const yearsToMaturity = Math.max(0, msToMaturity / (MS_PER_DAY * 365.25))
@@ -278,9 +329,14 @@ export function valueBond(b: Bond, asOf: Date = new Date()): BondValuation {
     cleanValue,
     accruedInterest,
     dirtyValue,
+    cleanCostValue,
+    accruedAtPurchase,
     costValue,
     plValue,
+    pricePL,
+    incomePL,
     plPct: costValue > 0 ? plValue / costValue : 0,
+    unrecordedAccruedAtPurchase,
     couponAmount,
     annualCouponGross,
     annualCouponNet,
@@ -405,6 +461,51 @@ export function shockedValue(v: BondValuation, yieldShiftBp: number): number {
   return Math.max(0, v.dirtyValue * (1 - v.modifiedDuration * shift))
 }
 
+// ─── Price basis ──────────────────────────────────────────────────────────────
+
+export interface AllInSplit {
+  /** Clean price as a percentage of par, for storage. */
+  cleanPricePct: number
+  /** Coupon couru contained in the all-in price. */
+  accruedAtPurchase: number
+  /** Total settled — unchanged by the split, and the figure on the contract note. */
+  totalPaid: number
+}
+
+/**
+ * Split an all-in purchase price into its clean and accrued halves.
+ *
+ * Market convention quotes bonds clean, but a retail contract note often shows
+ * one settlement figure with the coupon couru already inside it. Storing that
+ * number as if it were clean overstates the price paid by the accrued amount
+ * and then counts the same accrued interest again as income — the position
+ * looks worse on price and better on income than it is, while the total
+ * happens to come out right, which is what makes it hard to spot.
+ *
+ * Returns null when the accrued exceeds the payment, which means the inputs
+ * disagree rather than that the bond is worth nothing.
+ */
+export function splitAllInPrice(
+  allInPricePct: number,
+  quantity: number,
+  faceValue: number,
+  accruedAtPurchase: number
+): AllInSplit | null {
+  const nominal = quantity * faceValue
+  if (!(nominal > 0) || !isFinite(allInPricePct)) return null
+
+  const totalPaid = (nominal * allInPricePct) / 100
+  const accrued = isFinite(accruedAtPurchase) ? accruedAtPurchase : 0
+  const cleanAmount = totalPaid - accrued
+  if (!(cleanAmount > 0)) return null
+
+  return {
+    cleanPricePct: (cleanAmount / nominal) * 100,
+    accruedAtPurchase: accrued,
+    totalPaid,
+  }
+}
+
 // ─── Aggregates ───────────────────────────────────────────────────────────────
 
 export interface BondTotals {
@@ -414,6 +515,8 @@ export interface BondTotals {
   dirtyValue: number
   costValue: number
   plValue: number
+  pricePL: number
+  incomePL: number
   plPct: number
   annualCouponGross: number
   annualCouponNet: number
@@ -463,6 +566,8 @@ export function bondTotals(valuations: BondValuation[]): BondTotals {
     dirtyValue,
     costValue,
     plValue,
+    pricePL: sum(v => v.pricePL),
+    incomePL: sum(v => v.incomePL),
     plPct: costValue > 0 ? plValue / costValue : 0,
     annualCouponGross: sum(v => v.annualCouponGross),
     annualCouponNet: sum(v => v.annualCouponNet),
