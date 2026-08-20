@@ -71,6 +71,7 @@ export const DEFAULT_ASSUMPTIONS: MarketAssumptionInput[] = [
   { assetClass: 'stock',      expectedRealReturn: 0.055, volatility: 0.16 },
   { assetClass: 'etf',        expectedRealReturn: 0.055, volatility: 0.16 },
   { assetClass: 'crypto',     expectedRealReturn: 0.08,  volatility: 0.70 },
+  { assetClass: 'bond',       expectedRealReturn: 0.015, volatility: 0.06 },
   { assetClass: 'cash',       expectedRealReturn: 0.005, volatility: 0.01 },
   { assetClass: 'realestate', expectedRealReturn: 0.03,  volatility: 0.10 },
 ]
@@ -85,9 +86,17 @@ export const CORRELATIONS: Record<string, number> = {
   'stock|crypto': 0.4,
   'stock|realestate': 0.3,
   'stock|cash': 0.0,
+  // Mildly positive rather than the textbook negative: the 2022 selloff took
+  // bonds and equities down together, and assuming the old hedge holds is
+  // precisely how a drawdown ends up worse than the model promised.
+  'stock|bond': 0.15,
+  'etf|bond': 0.15,
   'etf|crypto': 0.4,
   'etf|realestate': 0.3,
   'etf|cash': 0.0,
+  'bond|crypto': 0.1,
+  'bond|cash': 0.1,
+  'bond|realestate': 0.15,
   'crypto|realestate': 0.15,
   'crypto|cash': 0.0,
   'realestate|cash': 0.0,

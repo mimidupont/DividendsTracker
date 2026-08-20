@@ -11,7 +11,7 @@ import {
   supabase, supabaseConfigError,
   Holding, DividendProjection, DividendReceived, BankAccount, CryptoHolding, RealEstate,
   Transaction, AssetMetadata, AllocationTarget, FinancialPlan, ExpenseLogRow,
-  ScenarioRow, MarketAssumption,
+  ScenarioRow, MarketAssumption, Bond,
 } from '@/lib/supabase'
 import { getStoredProfileId } from '@/lib/profile'
 
@@ -32,6 +32,7 @@ interface AppData {
   expenseLog: ExpenseLogRow[]
   scenarios: ScenarioRow[]
   marketAssumptions: MarketAssumption[]
+  bonds: Bond[]
   cachedAt: number
   profileId: string | null
   /** Non-null when one or more queries failed — totals would be understated. */
@@ -62,7 +63,7 @@ async function fetchAll(profileId: string): Promise<AppData> {
     return { ...EMPTY, cachedAt: Date.now(), profileId, error: supabaseConfigError }
   }
 
-  const [h, p, div, b, c, r, txn, meta, targets, plan, expenses, scen, assumptions] = await Promise.all([
+  const [h, p, div, b, c, r, txn, meta, targets, plan, expenses, scen, assumptions, bonds] = await Promise.all([
     supabase.from('holdings').select('*').eq('profile_id', profileId).order('symbol'),
     // Every year is fetched — the projections page shows a multi-year table and
     // income estimates need whichever year is currently relevant, not a single
@@ -79,6 +80,7 @@ async function fetchAll(profileId: string): Promise<AppData> {
     supabase.from('expense_log').select('*').eq('profile_id', profileId).order('month'),
     supabase.from('scenarios').select('*').eq('profile_id', profileId).order('created_at'),
     supabase.from('market_assumptions').select('*').eq('profile_id', profileId),
+    supabase.from('bonds').select('*').eq('profile_id', profileId).eq('is_active', true).order('maturity_date'),
   ])
 
   // A failed query used to be indistinguishable from "you own nothing", which
@@ -94,7 +96,7 @@ async function fetchAll(profileId: string): Promise<AppData> {
   const v2 = [
     ['transactions', txn], ['asset_metadata', meta], ['allocation_targets', targets],
     ['financial_plan', plan], ['expense_log', expenses], ['scenarios', scen],
-    ['market_assumptions', assumptions],
+    ['market_assumptions', assumptions], ['bonds', bonds],
   ] as const
   const missingTables = v2
     .filter(([, res]) => isMissingTable(res.error))
@@ -117,6 +119,7 @@ async function fetchAll(profileId: string): Promise<AppData> {
     expenseLog:        expenses.data ?? [],
     scenarios:         scen.data ?? [],
     marketAssumptions: assumptions.data ?? [],
+    bonds:             bonds.data ?? [],
     cachedAt:          Date.now(),
     profileId,
     error:             [...failures, ...v2Failures].join(' · ') || null,
@@ -164,7 +167,7 @@ const EMPTY: AppData = {
   holdings: [], projections: [], dividendsReceived: [],
   bankAccounts: [], cryptoHoldings: [], realEstate: [],
   transactions: [], assetMetadata: [], allocationTargets: [],
-  financialPlan: null, expenseLog: [], scenarios: [], marketAssumptions: [],
+  financialPlan: null, expenseLog: [], scenarios: [], marketAssumptions: [], bonds: [],
   cachedAt: 0, profileId: null, error: null, missingTables: [],
 }
 

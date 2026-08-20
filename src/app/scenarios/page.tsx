@@ -193,6 +193,32 @@ export default function ScenariosPage() {
               </div>
             )
           })}
+          {/* Bond yields. Kept out of SHOCK_SLIDERS because it is a shift in
+              basis points, not a percentage change — the shared slider divides
+              its value by 100, which would silently turn 200bp into 2bp. */}
+          <div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+              <span style={{ fontSize: 11, color: 'var(--text3)' }}>Bond yields</span>
+              <span style={{
+                fontSize: 11, fontWeight: 600, fontFamily: "'DM Mono', monospace",
+                // A yield *rise* cuts bond prices, so the colours are inverted
+                // relative to the asset sliders above.
+                color: (shocks.rates_bps ?? 0) > 0 ? 'var(--red)' : (shocks.rates_bps ?? 0) < 0 ? 'var(--green)' : 'var(--text3)',
+              }}>
+                {(shocks.rates_bps ?? 0) > 0 ? '+' : ''}{(shocks.rates_bps ?? 0).toFixed(0)}bp
+              </span>
+            </div>
+            <input
+              type="range" min={-300} max={500} step={25}
+              value={shocks.rates_bps ?? 0}
+              onChange={e => {
+                setActivePreset(null)
+                setShocks(prev => ({ ...prev, rates_bps: parseFloat(e.target.value) }))
+              }}
+              style={{ width: '100%', accentColor: (shocks.rates_bps ?? 0) > 0 ? 'var(--red)' : 'var(--green)' }}
+            />
+          </div>
+
           {/* FX shocks */}
           {['USD', 'EUR'].map(ccy => {
             const raw = shocks.fx?.[ccy] ?? 0

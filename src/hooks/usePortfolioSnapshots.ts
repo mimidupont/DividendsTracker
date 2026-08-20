@@ -7,6 +7,8 @@ export interface PortfolioSnapshot {
   snapshot_date: string
   total_value_czk: number
   stocks_czk: number
+  /** Added by migration 010 — absent on a database created before it. */
+  bonds_czk?: number | null
   cash_czk: number
   crypto_czk: number
   realestate_czk: number
@@ -24,6 +26,7 @@ export interface PortfolioSnapshot {
 export interface SnapshotPayload {
   total_value_czk: number
   stocks_czk: number
+  bonds_czk?: number
   cash_czk: number
   crypto_czk: number
   realestate_czk: number

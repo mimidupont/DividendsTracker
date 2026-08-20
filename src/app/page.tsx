@@ -11,6 +11,7 @@ import { useProfile } from '@/lib/profile'
 import { usePortfolioSnapshots } from '@/hooks/usePortfolioSnapshots'
 import { positionsMetrics, portfolioTotals, buildPositions, unconvertibleCurrencies } from '@/lib/portfolio'
 import { currencyExposure } from '@/lib/exposure'
+import { valueBond } from '@/lib/bonds'
 import { contributionsVsGrowth, externalFlows } from '@/lib/transactions'
 import RunwayCard from '@/components/RunwayCard'
 import { DEFAULT_PLAN, effectiveAnnualExpenses } from '@/lib/fire'
@@ -43,7 +44,7 @@ export default function Dashboard() {
   const appData = useAppData()
   const {
     holdings, projections, dividendsReceived,
-    bankAccounts, cryptoHoldings, realEstate, transactions, loading, error,
+    bankAccounts, cryptoHoldings, realEstate, transactions, bonds, loading, error,
   } = appData
 
   const { activeProfile } = useProfile()
@@ -89,6 +90,14 @@ export default function Dashboard() {
   const cryptoCostCZK = cryptoHoldings.reduce((s, c) =>
     s + toCZK(c.avg_cost_usd * c.amount, 'USD', fx), 0)
 
+  // Bonds are valued dirty — clean price plus accrued interest — because the
+  // accrued portion is money already earned and paid on the next coupon date.
+  const bondValuations = useMemo(() => bonds.map(b => valueBond(b)), [bonds])
+  const bondValueCZK = bondValuations.reduce((s, v) =>
+    s + toCZK(v.dirtyValue, v.bond.currency, fx), 0)
+  const bondCostCZK = bondValuations.reduce((s, v) =>
+    s + toCZK(v.costValue, v.bond.currency, fx), 0)
+
   // Ownership share applies to the debt as well as the asset — counting 100% of
   // a mortgage against a 50%-owned property understated equity by half the loan.
   const realEstateGrossCZK = realEstate.reduce((s, p) =>
@@ -99,11 +108,12 @@ export default function Dashboard() {
   const realEstateCostCZK = realEstate.reduce((s, p) =>
     s + toCZK(p.purchase_price * (p.ownership_pct / 100), p.currency, fx), 0)
 
-  const totalNetWorth = stockValueCZK + cashValueCZK + cryptoValueCZK + realEstateEquityCZK
+  const totalNetWorth =
+    stockValueCZK + bondValueCZK + cashValueCZK + cryptoValueCZK + realEstateEquityCZK
   // Cash is excluded from both sides: it has no cost basis, and including it
   // dilutes the return percentage without contributing any gain.
-  const investedCZK = stockCostCZK + cryptoCostCZK + realEstateCostCZK
-  const investedValueCZK = stockValueCZK + cryptoValueCZK + realEstateGrossCZK
+  const investedCZK = stockCostCZK + bondCostCZK + cryptoCostCZK + realEstateCostCZK
+  const investedValueCZK = stockValueCZK + bondValueCZK + cryptoValueCZK + realEstateGrossCZK
   const totalGainCZK = investedValueCZK - investedCZK
 
   // ── Save today's snapshot once every asset class has priced ───────────────
@@ -133,6 +143,7 @@ export default function Dashboard() {
       saveSnapshot({
         total_value_czk: totalNetWorth,
         stocks_czk:      stockValueCZK,
+        bonds_czk:       bondValueCZK,
         cash_czk:        cashValueCZK,
         crypto_czk:      cryptoValueCZK,
         realestate_czk:  realEstateEquityCZK,
@@ -158,10 +169,16 @@ export default function Dashboard() {
     const priceUSD = cryptoPrices.getPrice(c.coin_id, c.avg_cost_usd)
     return s + toCZK(priceUSD * c.amount * c.staking_apy, 'USD', fx)
   }, 0)
-  const totalAnnualIncome = divIncomeCZK + interestIncomeCZK + rentalIncomeCZK + stakingIncomeCZK
+  // Coupons net of withholding — the gross figure is not what reaches the
+  // account, and this total feeds the FIRE and runway views.
+  const couponIncomeCZK = bondValuations.reduce((s, v) =>
+    s + toCZK(v.annualCouponNet, v.bond.currency, fx), 0)
+  const totalAnnualIncome =
+    divIncomeCZK + couponIncomeCZK + interestIncomeCZK + rentalIncomeCZK + stakingIncomeCZK
 
   const assetBlocks: AssetBlock[] = [
     { label: 'Stocks & ETFs',  value: stockValueCZK,       color: 'var(--green)',  href: '/holdings' },
+    { label: 'Bonds',          value: bondValueCZK,         color: 'var(--blue)',   href: '/bonds' },
     { label: 'Cash & Savings', value: cashValueCZK,         color: 'var(--blue)',   href: '/cash' },
     { label: 'Crypto',         value: cryptoValueCZK,       color: 'var(--purple)', href: '/crypto' },
     { label: 'Real Estate',    value: realEstateEquityCZK,  color: 'var(--teal)',   href: '/realestate' },

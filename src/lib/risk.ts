@@ -219,5 +219,5 @@ export const SEED_SECTORS: Record<string, { sector: string; region: string }> = 
 }
 
 export const ASSET_CLASS_LABELS: Record<AssetClass, string> = {
-  stock: 'Stocks', etf: 'ETFs', cash: 'Cash', crypto: 'Crypto', realestate: 'Real estate',
+  stock: 'Stocks', etf: 'ETFs', bond: 'Bonds', cash: 'Cash', crypto: 'Crypto', realestate: 'Real estate',
 }

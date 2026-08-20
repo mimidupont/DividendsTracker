@@ -14,11 +14,16 @@ import { todayISO } from './date'
  * Stocks count at full market value but may have to be sold at a loss — the UI
  * says so rather than pretending the timing is free. Crypto is discounted for
  * volatility. Property is excluded entirely: a flat is not an emergency fund.
+ *
+ * Bonds are discounted only lightly: selling before maturity means taking
+ * whatever price the market offers, but a government bond is a far steadier
+ * thing to liquidate in a hurry than an equity line.
  */
 export const EMERGENCY_HAIRCUTS: Record<string, number> = {
   cash: 1.0,
   stock: 1.0,
   etf: 1.0,
+  bond: 0.95,
   crypto: 0.7,
   realestate: 0,
 }

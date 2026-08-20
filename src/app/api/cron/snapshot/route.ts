@@ -3,6 +3,7 @@ import { createClient } from '@supabase/supabase-js'
 import { getYahooSession, toYahoo, fetchYahooQuoteSummary, batchedMap } from '@/lib/yahoo'
 import { batchFetchSAQuotes } from '@/lib/stockanalysis'
 import { toCZK, normalizeMoney, DEFAULT_FX } from '@/lib/fx'
+import { valueBond } from '@/lib/bonds'
 
 /**
  * Daily portfolio snapshot, written server-side.
@@ -52,6 +53,14 @@ function todayInZone(tz = SNAPSHOT_TZ): string {
   } catch {
     return new Date().toISOString().slice(0, 10)
   }
+}
+
+/** PostgREST's code for "no such column" — see the snapshots route. */
+const isMissingColumn = (error: { code?: string; message?: string } | null): boolean => {
+  if (!error) return false
+  if (error.code === '42703' || error.code === 'PGRST204') return true
+  const msg = (error.message ?? '').toLowerCase()
+  return msg.includes('column') && msg.includes('does not exist')
 }
 
 // ─── Market data, server-side ─────────────────────────────────────────────────
@@ -168,19 +177,23 @@ export async function GET(req: NextRequest) {
 
   for (const profile of profiles ?? []) {
     try {
-      const [h, b, c, r] = await Promise.all([
+      const [h, b, c, r, bd] = await Promise.all([
         supabase.from('holdings').select('*').eq('profile_id', profile.id),
         supabase.from('bank_accounts').select('*').eq('profile_id', profile.id).eq('is_active', true),
         supabase.from('crypto_holdings').select('*').eq('profile_id', profile.id),
         supabase.from('real_estate').select('*').eq('profile_id', profile.id),
+        supabase.from('bonds').select('*').eq('profile_id', profile.id).eq('is_active', true),
       ])
 
       const holdings = h.data ?? []
       const accounts = b.data ?? []
       const crypto = c.data ?? []
       const property = r.data ?? []
+      // A database that has not run migration 010 returns an error here rather
+      // than rows; that is not a reason to skip the whole snapshot.
+      const bonds = bd.data ?? []
 
-      if (holdings.length + accounts.length + crypto.length + property.length === 0) {
+      if (holdings.length + accounts.length + crypto.length + property.length + bonds.length === 0) {
         results[profile.id] = { skipped: 'no positions' }
         continue
       }
@@ -232,6 +245,15 @@ export async function GET(req: NextRequest) {
         addExposure(local, 'USD')
       }
 
+      // Bonds are valued dirty, exactly as lib/portfolio does, so a snapshot
+      // written by the cron and one written by the browser agree to the koruna.
+      let bondsCZK = 0
+      for (const bond of bonds) {
+        const v = valueBond(bond)
+        bondsCZK += toCZK(v.dirtyValue, bond.currency, fx)
+        addExposure(v.dirtyValue, bond.currency)
+      }
+
       let realestateCZK = 0
       for (const p of property) {
         const share = (isFinite(p.ownership_pct) ? Math.min(Math.max(p.ownership_pct, 0), 100) : 100) / 100
@@ -240,13 +262,13 @@ export async function GET(req: NextRequest) {
         addExposure(equityLocal, p.currency)
       }
 
-      const total = stocksCZK + cashCZK + cryptoCZK + realestateCZK
+      const total = stocksCZK + bondsCZK + cashCZK + cryptoCZK + realestateCZK
       if (!isFinite(total) || total <= 0) {
         results[profile.id] = { skipped: 'non-positive total' }
         continue
       }
 
-      const { error } = await supabase.from('portfolio_snapshots').upsert({
+      const row: Record<string, unknown> = {
         profile_id: profile.id,
         snapshot_date: today,
         total_value_czk: total,
@@ -254,6 +276,7 @@ export async function GET(req: NextRequest) {
         cash_czk: cashCZK,
         crypto_czk: cryptoCZK,
         realestate_czk: realestateCZK,
+        bonds_czk: bondsCZK,
         fx_usd: fx.USD ?? null,
         fx_eur: fx.EUR ?? null,
         fx_gbp: fx.GBP ?? null,
@@ -261,7 +284,19 @@ export async function GET(req: NextRequest) {
         exposure_eur_local: eurLocal,
         exposure_czk_local: czkLocal,
         exposure_other_czk: otherCZK,
-      }, { onConflict: 'profile_id,snapshot_date' })
+      }
+
+      const upsert = (payload: Record<string, unknown>) =>
+        supabase.from('portfolio_snapshots')
+          .upsert(payload, { onConflict: 'profile_id,snapshot_date' })
+
+      let { error } = await upsert(row)
+      // Same fallback as the interactive route: a missing bonds_czk column must
+      // not cost the profile its daily snapshot.
+      if (isMissingColumn(error)) {
+        const { bonds_czk: _dropped, ...withoutBonds } = row
+        ;({ error } = await upsert(withoutBonds))
+      }
 
       results[profile.id] = error
         ? { error: error.message }

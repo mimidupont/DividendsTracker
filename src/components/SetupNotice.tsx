@@ -11,6 +11,8 @@ const MIGRATION_FOR: Record<string, string> = {
   expense_log: '006_financial_plan.sql',
   scenarios: '007_scenarios.sql',
   market_assumptions: '008_market_assumptions.sql',
+  bonds: '010_bonds.sql',
+  bond_coupons_received: '010_bonds.sql',
   // Not a table but a set of columns; named so the notice can point at the file.
   portfolio_snapshots_exposure: '005_snapshot_exposure.sql',
 }

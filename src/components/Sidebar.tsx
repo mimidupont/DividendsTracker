@@ -23,6 +23,9 @@ const nav = [
     { href: '/calendar',    label: 'Ex-div cal.', icon: '▦', color: 'var(--green)' },
     { href: '/fees',        label: 'Fees',        icon: '%', color: 'var(--green)' },
   ]},
+  { section: 'Fixed Income', accent: 'var(--blue)', items: [
+    { href: '/bonds',       label: 'Bonds',       icon: '▤', color: 'var(--blue)' },
+  ]},
   { section: 'Cash & Savings', accent: 'var(--blue)', items: [
     { href: '/cash',        label: 'Bank accounts', icon: '⊟', color: 'var(--blue)' },
   ]},
