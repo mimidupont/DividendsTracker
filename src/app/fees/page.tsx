@@ -148,7 +148,7 @@ export default function FeeScannerPage() {
             borderRadius: 8, padding: '9px 14px', marginBottom: 14, fontSize: 11, lineHeight: 1.6,
           }}>
             ⚠ No expense ratio known for {unknownTer.map(r => r.h.symbol).join(', ')} — they are left out of the TER
-            figures (not counted as free). Classify them as stock or ETF on the Risk page, or add the fund&apos;s TER to
+            figures (not counted as free). Classify them as stock or ETF on the Allocation page, or add the fund&apos;s TER to
             <code> EXPENSE_RATIOS</code> in <code>src/app/fees/page.tsx</code>.
           </div>
         )}
@@ -216,7 +216,7 @@ export default function FeeScannerPage() {
             </li>
             <li>At {(ASSUMED_TURNOVER * 100).toFixed(0)} % turnover, trading friction dominates for individual stocks; buy-and-hold reduces it to near zero.</li>
             <li>Small US trades pay a minimum commission, so positions under ~$200 cost disproportionately more.</li>
-            <li>Dividend withholding (15 % on US stocks, up to 35 % elsewhere — see Received) is usually a larger drag than fund fees;
+            <li>Dividend withholding (15 % on US stocks, up to 35 % elsewhere) is usually a larger drag than fund fees;
               accumulating Irish-domiciled UCITS funds avoid most of it.</li>
           </ul>
         </Panel>

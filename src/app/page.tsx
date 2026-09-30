@@ -19,9 +19,7 @@ import { contributionsVsGrowth, externalFlows } from '@/lib/transactions'
 import { attentionItems } from '@/lib/alerts'
 import { ASSET_CLASS_LABELS, ASSET_CLASS_COLORS } from '@/lib/risk'
 import { signColor, btnSecondary } from '@/lib/ui'
-import RunwayCard from '@/components/RunwayCard'
 import RecordModal from '@/components/RecordModal'
-import { DEFAULT_PLAN, effectiveAnnualExpenses } from '@/lib/fire'
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, ReferenceLine,
@@ -142,18 +140,11 @@ export default function Dashboard() {
   const growthSplit = useMemo(() => contributionsVsGrowth(transactions, snapshots), [transactions, snapshots])
   const latestSplit = growthSplit.length > 0 ? growthSplit[growthSplit.length - 1] : null
 
-  const dashboardExpenses = effectiveAnnualExpenses(
-    { ...DEFAULT_PLAN, ...(appData.financialPlan ?? {}) }, appData.expenseLog)
-
-  const ytdDivCZK = dividendsReceived
-    .filter(d => yearOf(d.payment_date) === yearOf(today))
-    .reduce((s, d) => s + (d.gross_amount - (d.withholding_tax ?? 0)) * (d.fx_rate_czk ?? fx[d.currency.toUpperCase()] ?? 1), 0)
-
   const alerts = useMemo(() => attentionItems({
     positions, accounts: bankAccounts, bonds: bondHoldings, holdings,
-    metadata: appData.assetMetadata, targets: appData.allocationTargets,
+    metadata: appData.assetMetadata,
     costFxUnknown: stockTotals.costFxUnknown, snapshotBlockedBy: hasAnything ? blockers : [], today,
-  }), [positions, bankAccounts, bondHoldings, holdings, appData.assetMetadata, appData.allocationTargets, stockTotals.costFxUnknown, blockers, hasAnything, today])
+  }), [positions, bankAccounts, bondHoldings, holdings, appData.assetMetadata, stockTotals.costFxUnknown, blockers, hasAnything, today])
 
   const cards = CARD_CLASSES.map(c => {
     const ps = positions.filter(p => c.classes.includes(p.assetClass))
@@ -454,7 +445,7 @@ export default function Dashboard() {
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 14 }}>
         <Panel title="Income streams (gross, forward)">
           {([
-            { key: 'equity', label: 'Dividends', value: incomeClass.stock + incomeClass.etf, sub: `YTD received ${fmtCZK(ytdDivCZK)} net`, color: ASSET_CLASS_COLORS.stock },
+            { key: 'equity', label: 'Dividends', value: incomeClass.stock + incomeClass.etf, sub: `${holdings.filter(h => h.is_dividend_payer).length} payers`, color: ASSET_CLASS_COLORS.stock },
             { key: 'bond', label: 'Coupons', value: incomeClass.bond, sub: `${bondHoldings.length} bonds`, color: ASSET_CLASS_COLORS.bond },
             { key: 'cash', label: 'Interest', value: incomeClass.cash, sub: `${bankAccounts.length} accounts · before 15 % tax`, color: ASSET_CLASS_COLORS.cash },
             { key: 'realestate', label: 'Rent', value: incomeClass.realestate, sub: 'before costs', color: ASSET_CLASS_COLORS.realestate },
@@ -478,15 +469,6 @@ export default function Dashboard() {
             <span className="num" style={{ fontSize: 14, fontWeight: 600 }}>{fmtCZK(totalIncome)}</span>
           </div>
         </Panel>
-
-        <div>
-          <RunwayCard
-            positions={positions}
-            monthlyExpenses={dashboardExpenses.annualCZK / 12}
-            accounts={bankAccounts}
-            compact
-          />
-        </div>
 
         <Panel title="At a glance">
           {[

@@ -233,7 +233,7 @@ export default function HoldingsPage() {
           icon="▤"
           title="No stock or ETF positions yet"
           body={<>Record your first purchase — with its real date, so the exchange rate you paid is kept and your
-            P&amp;L includes the currency effect. Bond ETFs can be tagged as fixed income on the Risk page.</>}
+            P&amp;L includes the currency effect. Bond ETFs can be tagged as fixed income on the Allocation page.</>}
           action={<button type="button" onClick={() => setRecord({ kind: 'buy', asset: 'stock' })} style={btnStyle('primary')}>+ Record a purchase</button>}
         />
       ) : <>

@@ -10,7 +10,7 @@ Asset classes in scope:
 
 | Class | Status | Where it lives |
 |---|---|---|
-| Stocks & ETFs (positions, lots, dividends, DRIP) | ✅ built | `holdings`, `holding_lots`, `dividends_received`, `/holdings`, `/received` |
+| Stocks & ETFs (positions, lots, dividends, DRIP) | ✅ built | `holdings`, `holding_lots`, `dividends_received`, `/holdings`, `/performance` |
 | Crypto (holdings, staking yield) | ✅ built | `crypto_holdings`, `/crypto` |
 | Cash — current accounts | ✅ built | `bank_accounts`, `/cash` |
 | Savings accounts & term deposits (interest) | ✅ built (inside cash) | `bank_accounts`, `bank_interest_received` |
@@ -20,8 +20,8 @@ Asset classes in scope:
 Priorities, in order:
 1. **Correct numbers.** A wealth tracker that is wrong is worse than none. Every
    reported figure must be explainable and reproducible from `src/lib/*`.
-2. **Complete picture.** Every asset class above feeds net worth, allocation, risk,
-   FIRE and projections through one normalised model (`buildPositions()`).
+2. **Complete picture.** Every asset class above feeds net worth, allocation,
+   returns and the income forecast through one normalised model (`buildPositions()`).
 3. **Clarity.** Pages should answer "how much do I have, where, and is it on track?"
    at a glance, and say honestly when data is missing, stale or estimated.
 

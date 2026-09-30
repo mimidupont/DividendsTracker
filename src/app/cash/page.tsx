@@ -10,7 +10,6 @@ import { PageShell, PageHeader, LoadingShell, EmptyState, MetricCards, Panel, Ta
 import Badge from '@/components/Badge'
 import Modal from '@/components/Modal'
 import RecordModal, { type RecordPreset } from '@/components/RecordModal'
-import RunwayCard from '@/components/RunwayCard'
 import DataTable, { type Column } from '@/components/DataTable'
 import { Field, FormGrid, FormActions, ErrorBox, NumberInput, inputStyle } from '@/components/FormFields'
 import { useUndoableDelete } from '@/components/UndoToast'
@@ -19,7 +18,6 @@ import { fmtISODate, todayISO, daysBetween } from '@/lib/date'
 import { buildPositions, cashTier, LIQUIDITY_TIERS } from '@/lib/portfolio'
 import { updateScoped, insertScoped } from '@/lib/db'
 import { parseDecimal, parsePercent } from '@/lib/parse'
-import { DEFAULT_PLAN, effectiveAnnualExpenses } from '@/lib/fire'
 import { CZ_INTEREST_TAX } from '@/lib/tax'
 import { btnStyle, actionBtn } from '@/lib/ui'
 
@@ -60,7 +58,6 @@ export default function CashPage() {
   const today = todayISO()
 
   const positions = useMemo(() => buildPositions(app, fx, market, crypto), [app, fx, market, crypto])
-  const expenses = effectiveAnnualExpenses({ ...DEFAULT_PLAN, ...(app.financialPlan ?? {}) }, app.expenseLog)
 
   const archive = (a: BankAccount) =>
     schedule(a.id, a.name, () => updateScoped('bank_accounts', a.id, activeProfile?.id, { is_active: false }), reload)
@@ -164,9 +161,6 @@ export default function CashPage() {
                     ]} />}
               </Panel>
             )}
-          </div>
-          <div style={{ flex: '1 1 280px', minWidth: 0 }}>
-            <RunwayCard positions={positions} monthlyExpenses={expenses.annualCZK / 12} accounts={visible} />
           </div>
         </div>
       </>}

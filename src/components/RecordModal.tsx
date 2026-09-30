@@ -341,7 +341,7 @@ export default function RecordModal({
           </Field>
           <Field label="Tax withheld" hint={
             kind === 'dividend'
-              ? `Default ${(wht.rate * 100).toFixed(wht.rate * 100 % 1 ? 2 : 0)} % (${wht.basis === 'country' ? `issuer country ${meta?.country}` : wht.basis === 'region' ? 'by region' : 'US treaty rate — set the country on Risk to refine'}). Use what your broker actually withheld.`
+              ? `Default ${(wht.rate * 100).toFixed(wht.rate * 100 % 1 ? 2 : 0)} % (${wht.basis === 'country' ? `issuer country ${meta?.country}` : wht.basis === 'region' ? 'by region' : 'US treaty rate — set the issuer country on Allocation to refine'}). Use what your broker actually withheld.`
               : currency === 'CZK' ? 'Czech 15 % final withholding by default.' : 'Enter what was withheld.'
           }>
             <NumberInput value={tax} onChange={v => { setTax(v); setTaxTouched(true) }} suffix={currency} />

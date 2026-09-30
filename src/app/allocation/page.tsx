@@ -10,6 +10,7 @@ import { useAppData } from '@/hooks/useAppData'
 import { buildPositions, assetPositions, type Position } from '@/lib/portfolio'
 import { effectiveN, effectiveNBand, fundShare, unhedgedFxShare, ASSET_CLASS_LABELS, ASSET_CLASS_COLORS } from '@/lib/risk'
 import { btnStyle } from '@/lib/ui'
+import ClassificationPanel from '@/components/ClassificationPanel'
 
 type View = 'value' | 'income'
 
@@ -63,7 +64,7 @@ function BucketBars({ buckets, caption }: { buckets: Bucket[]; caption: string }
 
 /**
  * Where the money is, across every asset class: by class, currency, sector
- * and region. Sector/region come from asset_metadata (edit them on Risk);
+ * and region. Sector/region come from asset_metadata (edited in the Classification panel below);
  * there is no second hard-coded sector list any more.
  */
 export default function AllocationPage() {
@@ -132,7 +133,7 @@ export default function AllocationPage() {
           { label: view === 'value' ? 'Gross assets' : 'Annual income', value: fmtCZK(total), accent: 'var(--border3)',
             note: view === 'value' ? 'before mortgages' : 'gross, forward' },
           { label: 'Effective positions', value: effN > 0 ? effN.toFixed(1) : '—', accent: `var(--${effectiveNBand(effN) === 'red' ? 'red' : effectiveNBand(effN) === 'amber' ? 'amber' : 'green'})`,
-            note: funds > 0.2 ? `${fmtShare(funds * 100, 0)} is in funds, each counted as one position` : '1 / Σ weight² — see Risk' },
+            note: funds > 0.2 ? `${fmtShare(funds * 100, 0)} is in funds, each counted as one position` : '1 / Σ weight²' },
           { label: 'Outside CZK', value: fmtShare(foreign * 100, 0), accent: 'var(--border3)', note: 'share of assets in foreign currencies' },
           { label: 'Asset classes', value: String(byClass.length), accent: 'var(--border3)' },
         ]} />
@@ -140,7 +141,7 @@ export default function AllocationPage() {
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 14 }}>
           <Panel title="Asset class"><BucketBars caption="By asset class" buckets={byClass} /></Panel>
           <Panel title="Currency" id="currency"><BucketBars caption="By currency" buckets={byCurrency} /></Panel>
-          <Panel title="Sector (stocks & ETFs)" right={unclassified > 0 && <Link href="/risk" style={{ fontSize: 11 }}>{unclassified} unclassified — fix on Risk →</Link>}>
+          <Panel title="Sector (stocks & ETFs)" right={unclassified > 0 && <a href="#classification" style={{ fontSize: 11 }}>{unclassified} unclassified — classify below ↓</a>}>
             <BucketBars caption="By sector" buckets={bySector} />
           </Panel>
           <Panel title="Region"><BucketBars caption="By region" buckets={byRegion} /></Panel>
@@ -164,6 +165,7 @@ export default function AllocationPage() {
           </ol>
         </Panel>
       </>}
+      <ClassificationPanel />
     </PageShell>
   )
 }

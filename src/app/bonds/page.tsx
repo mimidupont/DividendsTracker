@@ -163,7 +163,7 @@ export default function BondsPage() {
         accent="var(--c-bond)"
         title="Bonds & fixed income"
         subtitle={<>Valued at clean price plus accrued interest{fxTs && <> · FX {fxTs}</>}.
-          Bond ETFs stay on <Link href="/holdings">Stocks &amp; ETFs</Link> — tag them “bond ETF” on <Link href="/risk">Risk</Link> to count them as fixed income.</>}
+          Bond ETFs stay on <Link href="/holdings">Stocks &amp; ETFs</Link> — tag them “bond ETF” on <Link href="/allocation#classification">Allocation</Link> to count them as fixed income.</>}
         actions={<button type="button" onClick={() => setEditing('new')} style={btnStyle('primary')}>+ Add bond</button>}
       />
 
@@ -172,8 +172,8 @@ export default function BondsPage() {
           icon="▥"
           title="No bonds yet"
           body={<>Add a government, corporate or Czech savings bond (Dluhopisy Republiky) with its ISIN, coupon and maturity.
-            Coupons and maturities then appear on Upcoming, bonds get their own bucket in allocation and rebalancing,
-            and the “Rates +2 pp” stress test moves their price by duration.</>}
+            Bonds then get their own bucket in net worth and allocation, with accrued interest, yield to maturity and a
+            maturity ladder.</>}
           action={<button type="button" onClick={() => setEditing('new')} style={btnStyle('primary')}>+ Add a bond</button>}
         />
       ) : <>

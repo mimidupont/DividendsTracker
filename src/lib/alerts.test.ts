@@ -2,10 +2,9 @@ import { describe, it, expect } from 'vitest'
 import { attentionItems } from './alerts'
 import { buildPositions, positionMetrics, portfolioTotals, type QuoteSource } from './portfolio'
 import { snapshotBlockers } from './snapshot'
-import { targetsStatus, TARGET_SUM_TOLERANCE } from './rebalance'
 import { toYahoo, skipStockAnalysis } from './yahoo'
 import { seedFor } from './risk'
-import type { Holding, AllocationTarget, BankAccount, AssetMetadata } from './supabase'
+import type { Holding, BankAccount, AssetMetadata } from './supabase'
 
 const fx = { CZK: 1, USD: 20, EUR: 25 }
 const TODAY = '2026-09-30'
@@ -21,21 +20,14 @@ const quotes = (q: Record<string, number>): QuoteSource => ({
   quotes: {},
 })
 const noCrypto = { getPrice: (_: string, f: number) => f, hasPrice: () => false }
-const cash = (balance: number): BankAccount => ({
-  id: 'c1', name: 'Fio', institution: 'Fio', account_type: 'checking', balance, currency: 'CZK',
-  interest_rate: 0, interest_type: 'annual', maturity_date: null, notes: null, is_active: true,
-  liquidity_tier: null, created_at: '', updated_at: '',
-})
-const target = (bucket: string, pct: number): AllocationTarget =>
-  ({ id: bucket, profile_id: 'p', scope: 'asset_class', bucket, target_pct: pct, band_pct: 0.05 } as AllocationTarget)
 
-function alertsFor(opts: { holdings: Holding[]; q?: Record<string, number>; targets?: AllocationTarget[]; accounts?: BankAccount[]; metadata?: AssetMetadata[] }) {
+function alertsFor(opts: { holdings: Holding[]; q?: Record<string, number>; accounts?: BankAccount[]; metadata?: AssetMetadata[] }) {
   const market = quotes(opts.q ?? {})
   const positions = buildPositions({ holdings: opts.holdings, bankAccounts: opts.accounts ?? [], cryptoHoldings: [], realEstate: [] }, fx, market, noCrypto, TODAY)
   const totals = portfolioTotals(opts.holdings.map(h => positionMetrics(h, market, fx)))
   return attentionItems({
     positions, accounts: opts.accounts ?? [], bonds: [], holdings: opts.holdings, metadata: opts.metadata ?? [],
-    targets: opts.targets ?? [], costFxUnknown: totals.costFxUnknown, snapshotBlockedBy: snapshotBlockers(positions), today: TODAY,
+    costFxUnknown: totals.costFxUnknown, snapshotBlockedBy: snapshotBlockers(positions), today: TODAY,
   })
 }
 
@@ -89,29 +81,6 @@ describe('unclassified alert', () => {
   it('counts distinct tickers', () => {
     const a = alertsFor({ q: { AMZN: 1 }, holdings: [holding({ id: '1', symbol: 'AMZN' }), holding({ id: '2', symbol: 'AMZN' })] })
     expect(a.find(x => x.id === 'unclassified')!.text).toMatch(/^1 holding has/)
-  })
-})
-
-describe('allocation targets', () => {
-  it('treats all-zero targets as no plan — no drift breach', () => {
-    expect(targetsStatus([target('cash', 0), target('stock', 0)], 'asset_class').status).toBe('none')
-    const a = alertsFor({ q: { AAPL: 100 }, holdings: [holding()], accounts: [cash(60_000)], targets: [target('cash', 0), target('stock', 0), target('crypto', 0)] })
-    expect(a.map(x => x.id)).not.toContain('drift')
-    expect(a.map(x => x.id)).not.toContain('targets-sum')
-  })
-  it('asks to finish targets that do not add up to 100 %', () => {
-    expect(targetsStatus([target('cash', 0.5), target('stock', 0.4)], 'asset_class')).toEqual({ status: 'incomplete', sum: 0.9 })
-    const a = alertsFor({ q: { AAPL: 100 }, holdings: [holding()], accounts: [cash(20_000)], targets: [target('cash', 0.5), target('stock', 0.4)] })
-    expect(a.map(x => x.id)).toEqual(expect.arrayContaining(['targets-sum']))
-    expect(a.map(x => x.id)).not.toContain('drift')
-  })
-  it('reports drift against a complete plan, warnings first', () => {
-    expect(targetsStatus([target('cash', 0.5), target('stock', 0.5 - TARGET_SUM_TOLERANCE / 2)], 'asset_class').status).toBe('ok')
-    // 20k USD stock (=20,000 CZK) + 80k cash → cash 80 % vs target 50 %.
-    const a = alertsFor({ q: { AAPL: 100 }, holdings: [holding()], accounts: [cash(80_000)], targets: [target('cash', 0.5), target('stock', 0.5)] })
-    const drift = a.find(x => x.id === 'drift')!
-    expect(drift.text).toContain('cash +30.0 pp')
-    expect(a[0].level).toBe('warn')
   })
 })
 

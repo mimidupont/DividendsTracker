@@ -58,7 +58,7 @@ export default function RealEstatePage() {
         <EmptyState
           icon="⌂"
           title="No properties yet"
-          body="Add a property with its value, mortgage and your ownership share. Mark your home as the primary residence — it is then left out of investable net worth (with its mortgage) on the FIRE page."
+          body="Add a property with its value, mortgage and your ownership share. Mark your home as the primary residence — it is then left out of investable net worth (with its mortgage)."
           action={<button type="button" onClick={() => setEditing('new')} style={btnStyle('primary')}>+ Add a property</button>}
         />
       ) : <>

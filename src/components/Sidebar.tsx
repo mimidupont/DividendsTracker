@@ -32,20 +32,11 @@ export const NAV: { section: string; accent?: string; items: NavItem[] }[] = [
     { href: '/realestate', label: 'Real estate',     icon: '⌂', color: 'var(--c-realestate)' },
   ]},
   { section: 'Income', items: [
-    { href: '/received',  label: 'Received', icon: '↓', color: 'var(--c-income)' },
-    { href: '/calendar',  label: 'Upcoming', icon: '▦', color: 'var(--c-income)' },
     { href: '/projected', label: 'Forecast', icon: '↗', color: 'var(--c-income)' },
   ]},
   { section: 'Analysis', items: [
-    { href: '/allocation', label: 'Allocation',       icon: '◔', color: 'var(--text)', also: ['/currency'] },
-    { href: '/risk',       label: 'Risk & liquidity', icon: '◬', color: 'var(--text)' },
-    { href: '/benchmark',  label: 'Returns',          icon: '⚖', color: 'var(--text)', also: ['/fx-attribution'] },
-    { href: '/rebalance',  label: 'Rebalance',        icon: '⇌', color: 'var(--text)' },
-  ]},
-  { section: 'Planning', items: [
-    { href: '/fire',       label: 'Financial independence', icon: '◐', color: 'var(--text)' },
-    { href: '/scenarios',  label: 'Stress tests',           icon: '⚠', color: 'var(--text)' },
-    { href: '/projection', label: 'Monte Carlo',            icon: '◠', color: 'var(--text)' },
+    { href: '/allocation', label: 'Allocation', icon: '◔', color: 'var(--text)', also: ['/currency'] },
+    { href: '/benchmark',  label: 'Returns',    icon: '⚖', color: 'var(--text)', also: ['/fx-attribution'] },
   ]},
 ]
 

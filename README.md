@@ -25,22 +25,15 @@ Tracks stocks & ETFs, cash, crypto and real estate, and reports everything in **
 | `/transactions` | **Activity** — every buy, sell, dividend, coupon, split; realised P&L (FIFO or average), Czech tax view, historical-FX backfill |
 | `/holdings` | Stocks & ETFs with live prices, edit, add lot, DRIP check |
 | `/bonds` | Bonds: accrued interest, YTM, duration, maturity ladder |
-| `/cash` | Current, savings and term accounts; interest; runway |
+| `/cash` | Current, savings and term accounts; interest |
 | `/crypto` | Crypto holdings, staking yield |
 | `/realestate` | Properties, mortgages, equity, net rental yield, valuation date |
-| `/received` | All income received — dividends, coupons, interest, rent |
 | `/projected` | Next 12 months of income, gross and net of tax |
-| `/calendar` | Ex-dividend dates, coupons, maturities and deposits coming due |
-| `/allocation` | Cross-asset, currency, sector and region breakdown (`/currency` redirects here) |
+| `/allocation` | Cross-asset, currency, sector and region breakdown; edit each holding's classification (`/currency` redirects here) |
 | `/performance` | Per-position P&L incl. realised gains, net dividends and FX effect |
 | `/fees` | Expense ratios, brokerage costs and long-run fee drag |
 | `/benchmark` | Time-weighted return vs an index; your cash flows replayed into it |
-| `/rebalance` | Drift against targets + no-sell contribution allocator |
-| `/risk` | Concentration, exposure, liquidity ladder; edit each holding's classification |
 | `/fx-attribution` | Splits returns into asset effect vs currency effect |
-| `/fire` | FI number, years to FI, coast FIRE, milestones, runway |
-| `/scenarios` | Stress tests (2008 replay, crypto winter, job loss…) |
-| `/projection` | Monte Carlo fan chart with seeded, reproducible runs |
 
 ---
 
@@ -86,7 +79,7 @@ income is counted net of the property's `annual_costs`. Real estate applies
 your `ownership_pct` to the property value, purchase price, mortgage and rent
 alike. The "% on invested" figure excludes cash, which has no cost basis.
 
-**Investable net worth** (what `/fire` measures progress against) counts a
+**Investable net worth** counts a
 property and its mortgage together. Excluding the flat you live in while still
 subtracting its mortgage would report a negative figure for anyone with a
 mortgage, so both sides of the same asset are dropped or kept as a pair.
@@ -130,15 +123,13 @@ must *exceed* three years), the 100 000 CZK annual proceeds exemption and the
 
 Assumptions you may want to change:
 - `DIVIDEND_WHT_BY_COUNTRY` / `DEFAULT_DIVIDEND_WHT` in `src/lib/tax.ts` — dividend
-  withholding by country of the issuer (overridable per holding on `/risk`)
+  withholding by country of the issuer (overridable per holding on `/allocation`)
 - `CZ_INTEREST_TAX`, `CZ_COUPON_TAX` in `src/lib/tax.ts` — 15%
 - `ASSUMED_TURNOVER` and `DEFAULT_COMMISSION_RATE` in `src/app/fees/page.tsx`
 - `EXPENSE_RATIOS` in `src/app/fees/page.tsx` — tickers not listed are flagged in
   the UI and left out of the TER total
 - `SEED_SECTORS` in `src/lib/risk.ts` — defaults only; set sector, region, type
-  and country per holding on `/risk`
-- `EMERGENCY_HAIRCUTS` in `src/lib/runway.ts`, `DEFAULT_BOND_DURATION` in
-  `src/lib/scenarios.ts`, return/volatility assumptions in `src/lib/montecarlo.ts`
+  and country per holding on `/allocation`
 - `CZK_SAVINGS_APY` in `src/app/api/benchmark/sync/route.ts` — 4% p.a. for the
   "CZK savings" benchmark, which is generated rather than fetched (there is no
   market series for money in the bank). The rate is in the option's label so the
@@ -295,11 +286,11 @@ number should arrive with a test that pins it.
 | `portfolio_snapshots` | Daily net worth history + per-currency exposure |
 | `transactions` | Every money movement; FX frozen per row |
 | `asset_metadata` | Sector, region and liquidity tier per symbol |
-| `allocation_targets` | Target weights per scope for rebalancing |
+| `allocation_targets` | Target weights per scope (unused since the Rebalance page was removed) |
 | `benchmark_prices` | Shared index price history (not profile-scoped) |
-| `financial_plan` / `expense_log` | FIRE assumptions and observed spending |
-| `scenarios` | Saved stress-test shock sets |
-| `market_assumptions` | Per-class return and volatility for Monte Carlo |
+| `financial_plan` / `expense_log` | FIRE assumptions and observed spending (unused since Planning was removed) |
+| `scenarios` | Saved stress-test shock sets (unused) |
+| `market_assumptions` | Per-class return and volatility for Monte Carlo (unused) |
 
 Rates and percentages are stored as **decimal fractions** (`interest_rate`,
 `staking_apy`, `mortgage_rate`, `projected_yield`, `growth_rate`): 4.5% is `0.045`.

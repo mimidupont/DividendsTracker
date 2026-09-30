@@ -11,8 +11,7 @@ import { registerExchanges } from './useMarketData'
 import {
   supabase, supabaseConfigError,
   Holding, DividendProjection, DividendReceived, BankAccount, CryptoHolding, RealEstate,
-  Transaction, AssetMetadata, AllocationTarget, FinancialPlan, ExpenseLogRow,
-  ScenarioRow, MarketAssumption, BondHolding, BankInterestReceived, HoldingLot,
+  Transaction, AssetMetadata, BondHolding, BankInterestReceived, HoldingLot,
 } from '@/lib/supabase'
 import { getStoredProfileId } from '@/lib/profile'
 
@@ -28,11 +27,6 @@ export interface AppData {
   // ── v2 ──
   transactions: Transaction[]
   assetMetadata: AssetMetadata[]
-  allocationTargets: AllocationTarget[]
-  financialPlan: FinancialPlan | null
-  expenseLog: ExpenseLogRow[]
-  scenarios: ScenarioRow[]
-  marketAssumptions: MarketAssumption[]
   // ── v3 ──
   bondHoldings: BondHolding[]
   bankInterest: BankInterestReceived[]
@@ -67,7 +61,7 @@ async function fetchAll(profileId: string): Promise<AppData> {
     return { ...EMPTY, cachedAt: Date.now(), profileId, error: supabaseConfigError }
   }
 
-  const [h, p, div, b, c, r, txn, meta, targets, plan, expenses, scen, assumptions, bonds, interest, lots] = await Promise.all([
+  const [h, p, div, b, c, r, txn, meta, bonds, interest, lots] = await Promise.all([
     // Fully sold positions are kept at zero shares (their lots and history stay
     // attached) but are not holdings any more.
     supabase.from('holdings').select('*').eq('profile_id', profileId).gt('shares', 0).order('symbol'),
@@ -81,11 +75,6 @@ async function fetchAll(profileId: string): Promise<AppData> {
     supabase.from('real_estate').select('*').eq('profile_id', profileId).order('current_value', { ascending: false }),
     supabase.from('transactions').select('*').eq('profile_id', profileId).order('txn_date', { ascending: false }),
     supabase.from('asset_metadata').select('*').eq('profile_id', profileId),
-    supabase.from('allocation_targets').select('*').eq('profile_id', profileId),
-    supabase.from('financial_plan').select('*').eq('profile_id', profileId).maybeSingle(),
-    supabase.from('expense_log').select('*').eq('profile_id', profileId).order('month'),
-    supabase.from('scenarios').select('*').eq('profile_id', profileId).order('created_at'),
-    supabase.from('market_assumptions').select('*').eq('profile_id', profileId),
     supabase.from('bond_holdings').select('*').eq('profile_id', profileId).eq('is_active', true).order('maturity_date'),
     supabase.from('bank_interest_received').select('*').eq('profile_id', profileId).order('payment_date', { ascending: false }),
     supabase.from('holding_lots').select('*').eq('profile_id', profileId).order('purchase_date'),
@@ -102,9 +91,7 @@ async function fetchAll(profileId: string): Promise<AppData> {
   // exactly which file to run, instead of rendering an empty state that looks
   // identical to "you have no data" and leaves the user guessing.
   const v2 = [
-    ['transactions', txn], ['asset_metadata', meta], ['allocation_targets', targets],
-    ['financial_plan', plan], ['expense_log', expenses], ['scenarios', scen],
-    ['market_assumptions', assumptions], ['bond_holdings', bonds],
+    ['transactions', txn], ['asset_metadata', meta], ['bond_holdings', bonds],
     ['bank_interest_received', interest],
   ] as const
   const missingTables = v2
@@ -123,11 +110,6 @@ async function fetchAll(profileId: string): Promise<AppData> {
     realEstate:        r.data   ?? [],
     transactions:      txn.data  ?? [],
     assetMetadata:     meta.data ?? [],
-    allocationTargets: targets.data ?? [],
-    financialPlan:     (plan.data as FinancialPlan | null) ?? null,
-    expenseLog:        expenses.data ?? [],
-    scenarios:         scen.data ?? [],
-    marketAssumptions: assumptions.data ?? [],
     bondHoldings:      bonds.data ?? [],
     bankInterest:      interest.data ?? [],
     holdingLots:       lots.data ?? [],
@@ -179,8 +161,7 @@ interface UseAppData extends AppData {
 const EMPTY: AppData = {
   holdings: [], projections: [], dividendsReceived: [],
   bankAccounts: [], cryptoHoldings: [], realEstate: [],
-  transactions: [], assetMetadata: [], allocationTargets: [],
-  financialPlan: null, expenseLog: [], scenarios: [], marketAssumptions: [],
+  transactions: [], assetMetadata: [],
   bondHoldings: [], bankInterest: [], holdingLots: [],
   cachedAt: 0, profileId: null, error: null, missingTables: [],
 }

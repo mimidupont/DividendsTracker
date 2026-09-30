@@ -2,12 +2,11 @@
  * alerts.ts — the "needs attention" list on the dashboard.
  *
  * Signals that used to live only on their own pages (a term deposit about to
- * mature, a position valued at cost, drift outside its band) are gathered here
+ * mature, a position valued at cost) are gathered here
  * so the overview can say what to look at, with a link to where to fix it.
  */
 import type { Position } from './portfolio'
-import type { AllocationTarget, BankAccount, BondHolding, AssetMetadata, Holding } from './supabase'
-import { computeDrift, targetsStatus } from './rebalance'
+import type { BankAccount, BondHolding, AssetMetadata, Holding } from './supabase'
 import { isValuedAtCost } from './snapshot'
 import { daysBetween, fmtISODate } from './date'
 
@@ -33,7 +32,6 @@ export function attentionItems(input: {
   bonds: BondHolding[]
   holdings: Holding[]
   metadata: AssetMetadata[]
-  targets: AllocationTarget[]
   costFxUnknown: string[]
   snapshotBlockedBy: string[]
   today: string
@@ -98,7 +96,7 @@ export function attentionItems(input: {
     out.push({
       id: 'unclassified', level: 'info',
       text: `${n} ${plural(n, 'holding has', 'holdings have')} no sector or type, so allocation and risk show ${plural(n, 'it', 'them')} as Unclassified`,
-      href: '/risk#classification', action: 'Classify',
+      href: '/allocation#classification', action: 'Classify',
     })
   }
 
@@ -109,27 +107,6 @@ export function attentionItems(input: {
       text: `${n} ${plural(n, 'position has', 'positions have')} no purchase FX rate, so ${plural(n, 'its', 'their')} P&L leaves out currency moves`,
       href: '/holdings?filter=fx-unknown', action: 'Fill FX',
     })
-  }
-
-  // Drift is only meaningful against a plan that adds up. All-zero rows (a
-  // targets form opened and saved empty) are no plan at all: measured against
-  // 0 %, every holding is a "breach".
-  const plan = targetsStatus(input.targets, 'asset_class')
-  if (plan.status === 'incomplete') {
-    out.push({
-      id: 'targets-sum', level: 'info',
-      text: `Allocation targets add up to ${(plan.sum * 100).toFixed(1)} %, not 100 % — drift can't be measured until they do`,
-      href: '/rebalance', action: 'Finish targets',
-    })
-  } else if (plan.status === 'ok') {
-    const breaches = computeDrift(input.positions, input.targets, 'asset_class').filter(r => r.status === 'breach')
-    if (breaches.length > 0) {
-      out.push({
-        id: 'drift', level: 'warn',
-        text: `Allocation outside its band: ${breaches.map(r => `${r.bucket} ${r.driftPct > 0 ? '+' : '−'}${Math.abs(r.driftPct * 100).toFixed(1)} pp`).join(', ')}`,
-        href: '/rebalance', action: 'Rebalance',
-      })
-    }
   }
 
   // Warnings first: they are the ones that make a number wrong today.
