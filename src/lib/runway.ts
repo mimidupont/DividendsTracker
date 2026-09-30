@@ -19,6 +19,8 @@ export const EMERGENCY_HAIRCUTS: Record<string, number> = {
   cash: 1.0,
   stock: 1.0,
   etf: 1.0,
+  // Bonds sell quickly but may be below par when you need them.
+  bond: 0.95,
   crypto: 0.7,
   realestate: 0,
 }

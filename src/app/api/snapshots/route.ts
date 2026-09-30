@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
+import { todayInZone, addDays } from '@/lib/date'
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
@@ -35,6 +36,9 @@ const CORE_COLUMNS =
 const EXPOSURE_COLUMNS =
   'exposure_usd_local, exposure_eur_local, exposure_czk_local, exposure_other_czk, fx_usd, fx_eur, fx_gbp'
 
+/** Added by migrations 010 / 011. */
+const V3_COLUMNS = 'exposure_gbp_local, unpriced_count, bonds_czk'
+
 /** PostgREST's code for "no such column". */
 const isMissingColumn = (error: { code?: string; message?: string } | null): boolean => {
   if (!error) return false
@@ -60,9 +64,8 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: 'a valid profileId is required' }, { status: 400 })
   }
 
-  const since = new Date()
-  since.setDate(since.getDate() - days)
-  const sinceStr = since.toISOString().slice(0, 10)
+  // Calendar arithmetic in the user's timezone, like every other date here.
+  const sinceStr = addDays(todayInZone(), -days)
 
   const query = (columns: string) =>
     supabase
@@ -72,13 +75,16 @@ export async function GET(req: NextRequest) {
       .gte('snapshot_date', sinceStr)
       .order('snapshot_date', { ascending: true })
 
-  let { data, error } = await query(`${CORE_COLUMNS}, ${EXPOSURE_COLUMNS}`)
+  let { data, error } = await query(`${CORE_COLUMNS}, ${EXPOSURE_COLUMNS}, ${V3_COLUMNS}`)
 
   // PostgREST rejects the whole request if any listed column is absent, so on a
-  // database predating migration 005 the entire P&L chart came back empty. Fall
-  // back to the columns every install has and say the extras are missing, so
-  // the FX-attribution page can tell the user which migration to run.
+  // database predating a migration the entire P&L chart came back empty. Fall
+  // back step by step and say which extras are missing, so the FX-attribution
+  // page can tell the user which migration to run.
   let exposureAvailable = true
+  if (isMissingColumn(error)) {
+    ;({ data, error } = await query(`${CORE_COLUMNS}, ${EXPOSURE_COLUMNS}`))
+  }
   if (isMissingColumn(error)) {
     exposureAvailable = false
     ;({ data, error } = await query(CORE_COLUMNS))
@@ -99,9 +105,9 @@ export async function POST(req: NextRequest) {
   const body = await req.json()
   const {
     profileId, snapshotDate,
-    total_value_czk, stocks_czk, cash_czk, crypto_czk, realestate_czk,
+    total_value_czk, stocks_czk, bonds_czk, cash_czk, crypto_czk, realestate_czk,
     fx_usd, fx_eur, fx_gbp,
-    exposure_usd_local, exposure_eur_local, exposure_czk_local, exposure_other_czk,
+    exposure_usd_local, exposure_eur_local, exposure_czk_local, exposure_gbp_local, exposure_other_czk,
   } = body
 
   if (!profileId || !UUID.test(String(profileId)) || total_value_czk == null) {
@@ -121,33 +127,64 @@ export async function POST(req: NextRequest) {
   }
 
   // The client sends its own calendar date: the snapshot belongs to the user's
-  // day, not the server's UTC day (they differ for several hours every night).
-  const date = typeof snapshotDate === 'string' && ISO_DATE.test(snapshotDate)
-    ? snapshotDate
-    : new Date().toISOString().slice(0, 10)
+  // day, not the server's UTC day. Only today or yesterday (Prague) is
+  // accepted — this route is unauthenticated, and accepting any date let a
+  // caller rewrite history.
+  const today = todayInZone()
+  const yesterday = addDays(today, -1)
+  let date = today
+  if (snapshotDate != null) {
+    if (typeof snapshotDate !== 'string' || !ISO_DATE.test(snapshotDate) ||
+        (snapshotDate !== today && snapshotDate !== yesterday)) {
+      return NextResponse.json(
+        { error: 'snapshotDate must be today or yesterday (YYYY-MM-DD, Europe/Prague)' },
+        { status: 400 })
+    }
+    date = snapshotDate
+  }
 
-  const { error } = await supabase
+  const optionalRate = (v: unknown) => Number.isFinite(Number(v)) && v != null ? Number(v) : null
+  const row = {
+    profile_id: profileId,
+    snapshot_date: date,
+    total_value_czk: num(total_value_czk),
+    stocks_czk:     num(stocks_czk),
+    cash_czk:       num(cash_czk),
+    crypto_czk:     num(crypto_czk),
+    realestate_czk: num(realestate_czk),
+    // Recorded for auditing what rates a historical value was struck at.
+    // Null beats inventing a rate the snapshot was not actually computed with.
+    fx_usd: optionalRate(fx_usd),
+    fx_eur: optionalRate(fx_eur),
+    fx_gbp: optionalRate(fx_gbp),
+    // Exposure per currency, in that currency's own units — this is what
+    // makes asset-vs-FX attribution possible after the fact.
+    exposure_usd_local: num(exposure_usd_local),
+    exposure_eur_local: num(exposure_eur_local),
+    exposure_czk_local: num(exposure_czk_local),
+    exposure_other_czk: num(exposure_other_czk),
+  }
+  const v3 = {
+    bonds_czk: num(bonds_czk),
+    exposure_gbp_local: num(exposure_gbp_local),
+    unpriced_count: 0,
+  }
+
+  let { error } = await supabase
     .from('portfolio_snapshots')
-    .upsert({
-      profile_id: profileId,
-      snapshot_date: date,
-      total_value_czk: num(total_value_czk),
-      stocks_czk:     num(stocks_czk),
-      cash_czk:       num(cash_czk),
-      crypto_czk:     num(crypto_czk),
-      realestate_czk: num(realestate_czk),
-      // Recorded for auditing what rates a historical value was struck at.
-      // Null beats inventing a rate the snapshot was not actually computed with.
-      fx_usd: Number.isFinite(Number(fx_usd)) ? Number(fx_usd) : null,
-      fx_eur: Number.isFinite(Number(fx_eur)) ? Number(fx_eur) : null,
-      fx_gbp: Number.isFinite(Number(fx_gbp)) ? Number(fx_gbp) : null,
-      // Exposure per currency, in that currency's own units — this is what
-      // makes asset-vs-FX attribution possible after the fact.
-      exposure_usd_local: num(exposure_usd_local),
-      exposure_eur_local: num(exposure_eur_local),
-      exposure_czk_local: num(exposure_czk_local),
-      exposure_other_czk: num(exposure_other_czk),
-    }, { onConflict: 'profile_id,snapshot_date' })
+    .upsert({ ...row, ...v3 }, { onConflict: 'profile_id,snapshot_date' })
+
+  // Before migrations 010/011: write the columns that exist, folding bonds into
+  // stocks and GBP into "other" so the total still reconciles.
+  if (isMissingColumn(error)) {
+    ;({ error } = await supabase
+      .from('portfolio_snapshots')
+      .upsert({
+        ...row,
+        stocks_czk: row.stocks_czk + v3.bonds_czk,
+        exposure_other_czk: row.exposure_other_czk + v3.exposure_gbp_local * (row.fx_gbp ?? 0),
+      }, { onConflict: 'profile_id,snapshot_date' }))
+  }
 
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 })

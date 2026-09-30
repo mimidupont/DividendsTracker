@@ -20,6 +20,31 @@ describe('runMonteCarlo', () => {
     expect(c.finalValues.p50).not.toBe(a.finalValues.p50)
   })
 
+  it('reports no median year when fewer than half the runs reach the target', () => {
+    // 1M in equities, no contributions, 20y, target 3M: roughly a third reach it.
+    const r = runMonteCarlo({ ...base, monthlyContributionCZK: 0, targetCZK: 3_000_000 })
+    expect(r.probabilityOfTarget!).toBeLessThan(0.5)
+    expect(r.medianYearReachingTarget).toBeNull()
+  })
+
+  it('reports the median run when most runs reach the target', () => {
+    const r = runMonteCarlo({ ...base, targetCZK: 1_200_000 })
+    expect(r.medianYearReachingTarget).not.toBeNull()
+  })
+
+  it('subtracts debt from every reported value and keeps it constant', () => {
+    const noDebt = runMonteCarlo({ ...base, startValueByClass: { cash: 2_000_000, realestate: 5_000_000 } })
+    const withDebt = runMonteCarlo({ ...base, startValueByClass: { cash: 2_000_000, realestate: 5_000_000 }, debtCZK: 3_000_000 })
+    expect(withDebt.percentiles[0].p50).toBeCloseTo(4_000_000, 0)
+    expect(noDebt.finalValues.p50 - withDebt.finalValues.p50).toBeCloseTo(3_000_000, 0)
+  })
+
+  it('handles a bond allocation', () => {
+    const r = runMonteCarlo({ ...base, startValueByClass: { etf: 600_000, bond: 400_000 } })
+    expect(r.correlationDegraded).toBe(false)
+    expect(r.finalValues.p50).toBeGreaterThan(0)
+  })
+
   it('orders the percentiles', () => {
     const r = runMonteCarlo(base)
     for (const p of r.percentiles) {

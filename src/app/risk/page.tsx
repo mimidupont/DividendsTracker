@@ -9,28 +9,32 @@ import { useMarketData } from '@/hooks/useMarketData'
 import { useCryptoPrices } from '@/hooks/useCryptoPrices'
 import { buildPositions } from '@/lib/portfolio'
 import {
-  riskSummary, concentrationTable, exposureBy, liquidityLadder, raisableWithin,
-  topFiveBand, effectiveNBand, unhedgedFxBand, liquidityBand, ASSET_CLASS_LABELS,
+  riskSummary, concentrationTable, liquidityLadder, raisableWithin, fundShare,
+  topFiveBand, effectiveNBand, unhedgedFxBand, liquidityBand, ASSET_CLASS_LABELS, ASSET_CLASS_COLORS,
 } from '@/lib/risk'
 import { effectiveAnnualExpenses, DEFAULT_PLAN } from '@/lib/fire'
 import { SEED_SECTORS } from '@/lib/risk'
 import { useProfile } from '@/lib/profile'
-import { supabase } from '@/lib/supabase'
+import { supabase, type AssetMetadata } from '@/lib/supabase'
 import { btnStyle } from '@/lib/ui'
 import { useState } from 'react'
-import { fmtCZK } from '@/lib/fx'
-import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from 'recharts'
+import Link from 'next/link'
+import { fmtCZK, fmtShare } from '@/lib/fx'
+import { whtRateFor } from '@/lib/tax'
+import { Notice, inputStyle } from '@/components/FormFields'
 import { tdR, tdL, th } from '@/lib/ui'
 
-const SECTOR_COLORS = [
-  '#4a9448', '#185fa5', '#7a5810', '#8a2b22', '#2a7a7a',
-  '#5a3a8a', '#8a6a2a', '#4a6a2a', '#6a4a8a', '#888c8e',
-]
-
+/** Sequential blues for liquidity: darker = faster to raise. */
 const TIER_COLORS: Record<string, string> = {
-  instant: 'var(--green)', week: 'var(--blue)', month: 'var(--amber)',
-  year: 'var(--teal)', illiquid: 'var(--text4)',
+  instant: '#1d4ed8', week: '#3b6fd8', month: '#6f93dc', year: '#a3b7df', illiquid: '#c9cfd9',
 }
+const TIER_LABEL: Record<string, string> = {
+  instant: 'Instant', week: 'Within a week', month: 'Within a month', year: 'Within a year', illiquid: 'Locked / illiquid',
+}
+const ASSET_TYPES = [
+  { key: 'stock', label: 'Stock' }, { key: 'etf', label: 'Equity ETF' },
+  { key: 'bond_etf', label: 'Bond ETF' }, { key: 'reit', label: 'REIT' },
+]
 
 export default function RiskPage() {
   const data = useAppData()
@@ -60,10 +64,9 @@ export default function RiskPage() {
 
   const summary = riskSummary(positions, monthlyExpenses)
   const rows = concentrationTable(positions)
-  const sectors = exposureBy(positions, 'sector')
-  const regions = exposureBy(positions, 'region')
-  const currencies = exposureBy(positions, 'currency')
   const ladder = liquidityLadder(positions)
+  const funds = fundShare(positions)
+  const [notice, setNotice] = useState<string | null>(null)
 
   /**
    * Seed sector/region metadata for the symbols you hold. Without it the
@@ -82,16 +85,22 @@ export default function RiskPage() {
           return {
             profile_id: activeProfile.id,
             symbol: h.symbol.toUpperCase(),
-            sector: seed?.sector ?? 'Other',
-            region: seed?.region ?? 'Other',
+            sector: seed?.sector ?? null,
+            region: seed?.region ?? null,
+            asset_type: seed?.sector === 'ETF' ? 'etf' : seed ? 'stock' : null,
             liquidity_tier: 'week',
             is_hedged: false,
           }
         })
-      if (rows.length === 0) { alert('Every holding already has metadata.'); return }
-      const { error } = await supabase.from('asset_metadata')
+      if (rows.length === 0) { setNotice('Every holding already has a classification row.'); return }
+      let { error } = await supabase.from('asset_metadata')
         .upsert(rows, { onConflict: 'profile_id,symbol' })
-      if (error) { alert(`Could not seed metadata: ${error.message}`); return }
+      if (error && /asset_type/.test(error.message)) {
+        ;({ error } = await supabase.from('asset_metadata')
+          .upsert(rows.map(({ asset_type: _t, ...r }) => { void _t; return r }), { onConflict: 'profile_id,symbol' }))
+      }
+      if (error) { setNotice(`Could not seed classifications: ${error.message}`); return }
+      setNotice(`Added ${rows.length} rows — ${rows.filter(r => !r.sector).length} still need a sector; fill them in below.`)
       data.reload()
     } finally {
       setSeeding(false)
@@ -99,14 +108,14 @@ export default function RiskPage() {
   }
 
   const unclassified = data.holdings.filter(h =>
-    !data.assetMetadata.some(m => m.symbol.toUpperCase() === h.symbol.toUpperCase()))
+    !data.assetMetadata.some(m => m.symbol.toUpperCase() === h.symbol.toUpperCase() && (m.sector || m.asset_type)))
 
   if (data.loading) return <LoadingShell label="Loading risk profile…" />
 
   if (positions.length === 0) {
     return (
       <PageShell>
-        <PageHeader title="Risk" subtitle="Concentration, exposure and liquidity" />
+        <PageHeader eyebrow="Analysis" title="Risk & liquidity" subtitle="Concentration and how quickly you could raise cash" />
         <EmptyState
           icon="◈"
           title="Nothing to measure yet"
@@ -116,30 +125,13 @@ export default function RiskPage() {
     )
   }
 
-  const pieData = (buckets: { key: string; valueCZK: number; pct: number; count: number }[]) =>
-    buckets.map((b, i) => ({
-      name: b.key, value: b.valueCZK, pct: b.pct * 100,
-      count: b.count, color: SECTOR_COLORS[i % SECTOR_COLORS.length],
-    }))
-
-  const PieTip = ({ active, payload }: any) => {
-    if (!active || !payload?.length) return null
-    const d = payload[0].payload
-    return (
-      <div style={{ background: 'var(--bg2)', border: '1px solid var(--border2)', borderRadius: 8, padding: '10px 14px', fontSize: 11 }}>
-        <div style={{ fontWeight: 600, marginBottom: 4 }}>{d.name}</div>
-        <div>{fmtCZK(d.value)} · {d.pct.toFixed(1)}%</div>
-        <div style={{ color: 'var(--text3)', marginTop: 2 }}>{d.count} position{d.count > 1 ? 's' : ''}</div>
-      </div>
-    )
-  }
-
   const ladderTotal = Object.values(ladder).reduce((s, v) => s + v, 0)
 
   return (
     <PageShell maxWidth={1160}>
       <PageHeader
-        title="Risk"
+        eyebrow="Analysis"
+        title="Risk & liquidity"
         subtitle={
           <>
             Concentration, exposure and liquidity across {summary.positionCount} positions ·
@@ -149,13 +141,14 @@ export default function RiskPage() {
           </>
         }
         actions={unclassified.length > 0 ? (
-          <button onClick={seedMetadata} disabled={seeding} style={btnStyle('secondary')}>
+          <button type="button" onClick={seedMetadata} disabled={seeding} style={btnStyle('secondary')}>
             {seeding ? 'Seeding…' : `↺ Classify ${unclassified.length} holdings`}
           </button>
         ) : undefined}
       />
 
       <SetupNotice tables={data.missingTables.filter(t => t === 'asset_metadata')} />
+      {notice && <Notice tone="blue">{notice}</Notice>}
 
       {unclassified.length > 0 && (
         <div style={{
@@ -163,9 +156,10 @@ export default function RiskPage() {
           color: 'var(--amber)', borderRadius: 8, padding: '9px 14px',
           marginBottom: 14, fontSize: 11, lineHeight: 1.6,
         }}>
-          ⚠ {unclassified.length} holding{unclassified.length > 1 ? 's have' : ' has'} no sector or
-          region on file, so they fall into &ldquo;Unclassified&rdquo; below. Classify them to make
-          the exposure breakdowns meaningful.
+          ⚠ {unclassified.length} holding{unclassified.length > 1 ? 's have' : ' has'} no classification
+          ({unclassified.slice(0, 5).map(h => h.symbol).join(', ')}{unclassified.length > 5 ? '…' : ''}), so
+          {unclassified.length > 1 ? ' they count' : ' it counts'} as an unclassified stock. Set sector, region, country
+          and type in <a href="#classification">Classification</a> below.
         </div>
       )}
 
@@ -184,7 +178,7 @@ export default function RiskPage() {
             value: summary.effectiveN.toFixed(1),
             accent: `var(--${effectiveNBand(summary.effectiveN)})`,
             color: `var(--${effectiveNBand(summary.effectiveN)})`,
-            note: 'how many bets you really have',
+            note: funds > 0.2 ? `${fmtShare(funds * 100, 0)} in funds, each counted as one` : 'how many bets you really have',
           },
           {
             label: 'Unhedged FX',
@@ -207,37 +201,41 @@ export default function RiskPage() {
         background: 'var(--bg3)', border: '1px solid var(--border)', borderRadius: 8,
         padding: '10px 14px', marginBottom: 14, fontSize: 11, color: 'var(--text3)', lineHeight: 1.7,
       }}>
-        ⓘ For a CZK-based investor, high unhedged FX is usually a deliberate diversification
-        choice rather than a defect — the koruna is a small currency and holding only CZK assets
-        is its own concentration. It is flagged here so it stays visible, not because it is wrong.
+        ⓘ Funds (ETFs) are scored as one position each — there is no look-through to what they
+        hold, so a portfolio built on one world ETF reads as concentrated when it holds thousands
+        of companies. High unhedged FX is usually a deliberate choice for a CZK investor; it is shown,
+        not judged. Sector, region and currency splits are on <Link href="/allocation">Allocation</Link>.
       </div>
 
       {/* Concentration */}
       <Panel title="Concentration by position" right={<Badge variant="gray">{rows.length} positions</Badge>} padded={false}>
-        <div style={{ overflowX: 'auto' }}>
+        <div className="table-wrap" style={{ maxHeight: 520 }}>
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <caption className="sr-only">Positions by weight</caption>
             <thead>
               <tr>
                 {['Position', 'Class', 'Value (CZK)', 'Weight', 'Cumulative', ''].map((h, i) => (
-                  <th key={h} style={{ ...th, textAlign: i <= 1 ? 'left' : 'right' }}>{h}</th>
+                  <th key={h || 'bar'} scope="col" style={{ ...th, textAlign: i <= 1 ? 'left' : 'right' }}>{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {rows.map(r => (
-                <tr key={r.position.id} style={{
-                  background: r.band === 'red' ? 'var(--red-bg)' : undefined,
-                }}>
+                <tr key={r.position.id}>
                   <td style={tdL}>
-                    <div style={{ fontWeight: 500 }}>{r.position.label}</div>
-                    <div style={{ fontSize: 10, color: 'var(--text4)' }}>{r.position.name}</div>
+                    <div style={{ fontWeight: 500 }}>{r.position.label}{r.position.isFund && <span style={{ fontSize: 10, color: 'var(--text3)' }}> · fund</span>}</div>
+                    <div style={{ fontSize: 11, color: 'var(--text3)' }}>{r.position.name}</div>
                   </td>
                   <td style={tdL}>
-                    <Badge variant="gray">{ASSET_CLASS_LABELS[r.position.assetClass]}</Badge>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
+                      <span aria-hidden="true" style={{ width: 7, height: 7, borderRadius: 2, background: ASSET_CLASS_COLORS[r.position.assetClass] }} />
+                      {ASSET_CLASS_LABELS[r.position.assetClass]}
+                    </span>
                   </td>
                   <td style={{ ...tdR, fontFamily: "'DM Mono', monospace" }}>{fmtCZK(r.position.valueCZK)}</td>
-                  <td style={{ ...tdR, fontFamily: "'DM Mono', monospace", color: `var(--${r.band})` }}>
+                  <td style={{ ...tdR, fontFamily: "'DM Mono', monospace" }}>
                     {(r.pct * 100).toFixed(1)}%
+                    {r.band !== 'green' && <span style={{ marginLeft: 6 }}><Badge variant={r.band}>{r.band === 'red' ? 'high' : 'watch'}</Badge></span>}
                   </td>
                   <td style={{ ...tdR, fontFamily: "'DM Mono', monospace", color: 'var(--text3)' }}>
                     {(r.cumulativePct * 100).toFixed(1)}%
@@ -257,93 +255,23 @@ export default function RiskPage() {
         </div>
       </Panel>
 
-      {/* Sector + region pies */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 14 }}>
-        {[{ title: 'Sector exposure', buckets: sectors }, { title: 'Region exposure', buckets: regions }].map(({ title, buckets }) => (
-          <div key={title} style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 10, padding: '16px 20px' }}>
-            <div style={{ fontSize: 11, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--text2)', fontWeight: 500, marginBottom: 14 }}>
-              {title}
-            </div>
-            {buckets.length === 0 || buckets.every(b => b.key === 'Unclassified') ? (
-              <div style={{ fontSize: 11, color: 'var(--text3)', lineHeight: 1.7, padding: '20px 0' }}>
-                Nothing classified yet. Sector and region come from the asset metadata table —
-                seed it from the Risk setup, or add rows per symbol.
-              </div>
-            ) : (
-              <div style={{ display: 'flex', gap: 16, alignItems: 'center' }}>
-                <ResponsiveContainer width={150} height={150}>
-                  <PieChart>
-                    <Pie data={pieData(buckets)} dataKey="value" cx="50%" cy="50%" outerRadius={68} innerRadius={38} paddingAngle={2}>
-                      {pieData(buckets).map((e, i) => <Cell key={i} fill={e.color} />)}
-                    </Pie>
-                    <Tooltip content={<PieTip />} />
-                  </PieChart>
-                </ResponsiveContainer>
-                <div style={{ flex: 1 }}>
-                  {pieData(buckets).slice(0, 7).map(b => (
-                    <div key={b.name} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
-                      <div style={{ width: 8, height: 8, borderRadius: 2, background: b.color, flexShrink: 0 }} />
-                      <span style={{ fontSize: 11, flex: 1 }}>{b.name}</span>
-                      <span style={{ fontSize: 11, fontFamily: "'DM Mono', monospace", color: 'var(--text3)' }}>
-                        {b.pct.toFixed(1)}%
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-        ))}
-      </div>
-
-      {/* Currency */}
-      <Panel title="Currency exposure">
-        <div style={{ display: 'flex', height: 10, borderRadius: 5, overflow: 'hidden', marginBottom: 12 }}>
-          {currencies.map((c, i) => (
-            <div key={c.key} title={`${c.key} ${(c.pct * 100).toFixed(1)}%`} style={{
-              flex: c.valueCZK,
-              background: c.key === 'CZK' ? 'var(--green)' : SECTOR_COLORS[(i + 1) % SECTOR_COLORS.length],
-              opacity: 0.85,
-            }} />
-          ))}
-        </div>
-        <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap' }}>
-          {currencies.map((c, i) => (
-            <div key={c.key} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <div style={{
-                width: 8, height: 8, borderRadius: 2,
-                background: c.key === 'CZK' ? 'var(--green)' : SECTOR_COLORS[(i + 1) % SECTOR_COLORS.length],
-              }} />
-              <span style={{ fontSize: 11 }}>{c.key}</span>
-              <span style={{ fontSize: 11, color: 'var(--text3)', fontFamily: "'DM Mono', monospace" }}>
-                {(c.pct * 100).toFixed(1)}%
-              </span>
-              <span style={{ fontSize: 10, color: 'var(--text4)' }}>{fmtCZK(c.valueCZK)}</span>
-            </div>
-          ))}
-        </div>
-      </Panel>
-
       {/* Liquidity ladder */}
       <Panel title="Liquidity ladder">
-        <div style={{ display: 'flex', height: 26, borderRadius: 6, overflow: 'hidden', marginBottom: 12 }}>
+        <div aria-hidden="true" style={{ display: 'flex', height: 14, borderRadius: 6, overflow: 'hidden', marginBottom: 12 }}>
           {(Object.keys(ladder) as (keyof typeof ladder)[]).map(tier => (
             ladder[tier] > 0 && (
-              <div key={tier} title={`${tier}: ${fmtCZK(ladder[tier])}`} style={{
-                flex: ladder[tier], background: TIER_COLORS[tier], opacity: 0.8,
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                fontSize: 9, color: '#fff', overflow: 'hidden', whiteSpace: 'nowrap',
-              }}>
-                {ladderTotal > 0 && ladder[tier] / ladderTotal > 0.08 ? tier : ''}
-              </div>
+              <div key={tier} title={`${TIER_LABEL[tier]}: ${fmtCZK(ladder[tier])}`} style={{
+                flex: ladder[tier], background: TIER_COLORS[tier],
+              }} />
             )
           ))}
         </div>
         <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <caption className="sr-only">Liquidity ladder</caption>
           <thead>
             <tr>
               {['Tier', 'Available', 'Share', 'Months of expenses'].map((h, i) => (
-                <th key={h} style={{ ...th, textAlign: i === 0 ? 'left' : 'right' }}>{h}</th>
+                <th key={h} scope="col" style={{ ...th, textAlign: i === 0 ? 'left' : 'right' }}>{h}</th>
               ))}
             </tr>
           </thead>
@@ -351,7 +279,10 @@ export default function RiskPage() {
             {(Object.keys(ladder) as (keyof typeof ladder)[]).map(tier => (
               <tr key={tier}>
                 <td style={tdL}>
-                  <span style={{ color: TIER_COLORS[tier], textTransform: 'capitalize' }}>{tier}</span>
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                    <span aria-hidden="true" style={{ width: 8, height: 8, borderRadius: 2, background: TIER_COLORS[tier] }} />
+                    {TIER_LABEL[tier]}
+                  </span>
                 </td>
                 <td style={{ ...tdR, fontFamily: "'DM Mono', monospace" }}>{fmtCZK(ladder[tier])}</td>
                 <td style={{ ...tdR, color: 'var(--text3)' }}>
@@ -365,10 +296,117 @@ export default function RiskPage() {
           </tbody>
         </table>
         <div style={{ marginTop: 12, fontSize: 11, color: 'var(--text2)' }}>
-          You could raise <strong style={{ color: 'var(--green)' }}>{fmtCZK(raisableWithin(positions, 'week'))}</strong> within a week
+          You could raise <strong>{fmtCZK(raisableWithin(positions, 'week'))}</strong> within a week
           {monthlyExpenses > 0 && ` — ${(raisableWithin(positions, 'week') / monthlyExpenses).toFixed(1)} months of expenses`}.
         </div>
       </Panel>
+
+      <ClassificationPanel />
     </PageShell>
+  )
+}
+
+
+/**
+ * Per-symbol classification: sector, region, issuer country (drives the
+ * dividend withholding default), asset type (a bond ETF counts as fixed
+ * income) and liquidity. The single source for all of these — no page keeps
+ * its own copy.
+ */
+function ClassificationPanel() {
+  const data = useAppData()
+  const { activeProfile } = useProfile()
+  const [drafts, setDrafts] = useState<Record<string, Partial<AssetMetadata>>>({})
+  const [saving, setSaving] = useState(false)
+  const [msg, setMsg] = useState<string | null>(null)
+  const metaBy = new Map(data.assetMetadata.map(m => [m.symbol.toUpperCase(), m]))
+  const symbols = data.holdings.map(h => h.symbol.toUpperCase())
+  const val = (sym: string, k: keyof AssetMetadata) =>
+    (drafts[sym]?.[k] ?? metaBy.get(sym)?.[k] ?? '') as string
+  const set = (sym: string, k: keyof AssetMetadata, v: string) =>
+    setDrafts(d => ({ ...d, [sym]: { ...d[sym], [k]: v } }))
+  const dirty = Object.keys(drafts).length > 0
+
+  const save = async () => {
+    if (!activeProfile) return
+    setSaving(true); setMsg(null)
+    const rows = Object.entries(drafts).map(([symbol, d]) => {
+      const cur = metaBy.get(symbol)
+      const pick = (k: keyof AssetMetadata) => {
+        const v = (d[k] ?? cur?.[k] ?? null) as string | null
+        return v === '' ? null : v
+      }
+      return {
+        profile_id: activeProfile.id, symbol,
+        sector: pick('sector'), region: pick('region'), country: pick('country')?.toUpperCase() ?? null,
+        asset_type: pick('asset_type'), liquidity_tier: pick('liquidity_tier') ?? 'week',
+        is_hedged: cur?.is_hedged ?? false,
+      }
+    })
+    const { error } = await supabase.from('asset_metadata').upsert(rows, { onConflict: 'profile_id,symbol' })
+    setSaving(false)
+    if (error) { setMsg(`Could not save: ${error.message}${/asset_type/.test(error.message) ? ' — run migration 011.' : ''}`); return }
+    setDrafts({}); setMsg(`Saved ${rows.length} classification${rows.length > 1 ? 's' : ''}.`)
+    data.reload()
+  }
+
+  if (symbols.length === 0) return null
+  const cell = { ...inputStyle, padding: '4px 6px', fontSize: 12 }
+  return (
+    <section id="classification">
+      <Panel title="Classification" right={
+        <button type="button" onClick={save} disabled={!dirty || saving} style={btnStyle(dirty ? 'primary' : 'secondary')}>
+          {saving ? 'Saving…' : dirty ? `Save ${Object.keys(drafts).length} change${Object.keys(drafts).length > 1 ? 's' : ''}` : 'Saved'}
+        </button>
+      } padded={false}>
+        {msg && <div style={{ padding: '8px 18px', fontSize: 11, color: 'var(--text2)' }}>{msg}</div>}
+        <div className="table-wrap" style={{ maxHeight: 520 }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <caption className="sr-only">Classification of each holding</caption>
+            <thead><tr>
+              {['Symbol', 'Type', 'Sector', 'Region', 'Issuer country', 'Withholding', 'Liquidity'].map((h, i) => (
+                <th key={h} scope="col" style={{ ...th, textAlign: i === 5 ? 'right' : 'left' }}>{h}</th>
+              ))}
+            </tr></thead>
+            <tbody>
+              {symbols.map(sym => {
+                const wht = whtRateFor({ country: val(sym, 'country'), region: val(sym, 'region') })
+                return (
+                  <tr key={sym}>
+                    <td style={{ ...tdL, fontWeight: 500 }}>{sym}</td>
+                    <td style={tdL}>
+                      <select aria-label={`${sym} type`} style={cell} value={val(sym, 'asset_type')} onChange={e => set(sym, 'asset_type', e.target.value)}>
+                        <option value="">—</option>
+                        {ASSET_TYPES.map(t => <option key={t.key} value={t.key}>{t.label}</option>)}
+                      </select>
+                    </td>
+                    <td style={tdL}><input aria-label={`${sym} sector`} style={cell} value={val(sym, 'sector')} onChange={e => set(sym, 'sector', e.target.value)} placeholder="Technology" list="sector-options" /></td>
+                    <td style={tdL}>
+                      <select aria-label={`${sym} region`} style={cell} value={val(sym, 'region')} onChange={e => set(sym, 'region', e.target.value)}>
+                        <option value="">—</option>
+                        {['US', 'EU', 'CZ', 'UK', 'Global', 'EM', 'Other'].map(r => <option key={r}>{r}</option>)}
+                      </select>
+                    </td>
+                    <td style={tdL}><input aria-label={`${sym} issuer country`} style={{ ...cell, width: 64 }} maxLength={2} value={val(sym, 'country')} onChange={e => set(sym, 'country', e.target.value.toUpperCase())} placeholder="US" /></td>
+                    <td className="num" style={tdR} title={wht.basis === 'default' ? 'Country unknown — US treaty rate assumed' : undefined}>
+                      {fmtShare(wht.rate * 100, wht.rate * 100 % 1 ? 2 : 0)}{wht.basis === 'default' && ' ?'}
+                    </td>
+                    <td style={tdL}>
+                      <select aria-label={`${sym} liquidity`} style={cell} value={val(sym, 'liquidity_tier') || 'week'} onChange={e => set(sym, 'liquidity_tier', e.target.value)}>
+                        {Object.entries(TIER_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+                      </select>
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+          <datalist id="sector-options">
+            {['Technology', 'Financials', 'Consumer Staples', 'Consumer Discretionary', 'Health Care', 'Industrials',
+              'Energy', 'Materials', 'Utilities', 'Real Estate', 'Telecom'].map(s => <option key={s} value={s} />)}
+          </datalist>
+        </div>
+      </Panel>
+    </section>
   )
 }

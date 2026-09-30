@@ -7,6 +7,7 @@
  */
 import type { Position, AssetClass } from './portfolio'
 import { netWorthCZK, investableNetWorthCZK, annualIncomeCZK } from './portfolio'
+import { ASSET_CLASS_LABELS } from './risk'
 import { toCZK } from './fx'
 import { runwaySummary } from './runway'
 import { fiNumber, fiProgress, yearsToFI } from './fire'
@@ -21,6 +22,12 @@ export interface Shocks {
   fx?: Record<string, number>
   /** Change in deposit rates, as a fraction of current rates. */
   rates_pct?: number
+  /**
+   * Parallel shift in bond yields, in basis points (+200 = yields up 2 pp).
+   * Bond prices move by −duration × Δy; positions without a known duration
+   * use DEFAULT_BOND_DURATION.
+   */
+  rates_bp?: number
   rent_vacancy_pct?: number
   expense_shock_pct?: number
   income_loss_months?: number
@@ -50,9 +57,13 @@ export interface ScenarioResult {
   shockedPositions: Position[]
 }
 
+/** Modified duration assumed for bond positions with no computed one (a typical aggregate bond fund). */
+export const DEFAULT_BOND_DURATION = 6
+
 const EMPTY_CLASS: Record<AssetClass, ClassImpact> = {
   stock: { before: 0, after: 0, delta: 0 },
   etf: { before: 0, after: 0, delta: 0 },
+  bond: { before: 0, after: 0, delta: 0 },
   cash: { before: 0, after: 0, delta: 0 },
   crypto: { before: 0, after: 0, delta: 0 },
   realestate: { before: 0, after: 0, delta: 0 },
@@ -83,6 +94,10 @@ export function applyScenario(
       } else if (p.assetClass === 'realestate') {
         valueLocal *= 1 + (shocks.property_pct ?? 0)
         annualIncomeCZKAfter *= 1 + (shocks.rent_vacancy_pct ?? 0)
+      } else if (p.assetClass === 'bond' && shocks.rates_bp) {
+        // First-order duration approximation; a price can't fall below zero.
+        const dur = p.duration != null && isFinite(p.duration) ? p.duration : DEFAULT_BOND_DURATION
+        valueLocal *= Math.max(0, 1 - dur * (shocks.rates_bp / 10_000))
       }
     }
 
@@ -109,6 +124,30 @@ export function applyScenario(
     }
   })
 
+  const expensesBefore = plan.annual_expenses_czk
+  const expensesAfter = expensesBefore * (1 + (shocks.expense_shock_pct ?? 0))
+  const monthlyBefore = expensesBefore / 12
+  const monthlyAfter = expensesAfter / 12
+
+  // A job loss means N months of spending paid out of savings with nothing
+  // coming in. It is drawn from cash first; contributions pause for those
+  // months and then resume. (Stopping contributions *forever* overstated the
+  // delay to FI by decades.)
+  const lossMonths = Math.max(0, shocks.income_loss_months ?? 0)
+  let spendDraw = lossMonths * monthlyAfter
+  if (spendDraw > 0) {
+    for (const p of shocked) {
+      if (spendDraw <= 0) break
+      if (p.assetClass !== 'cash' || p.isLiability || p.valueCZK <= 0) continue
+      const take = Math.min(p.valueCZK, spendDraw)
+      const ratio = p.valueCZK > 0 ? (p.valueCZK - take) / p.valueCZK : 0
+      p.valueCZK -= take
+      p.valueLocal *= ratio
+      p.annualIncomeCZK *= ratio
+      spendDraw -= take
+    }
+  }
+
   // ── Aggregate ──
   const byClass: Record<AssetClass, ClassImpact> = JSON.parse(JSON.stringify(EMPTY_CLASS))
   for (const p of positions) byClass[p.assetClass].before += p.valueCZK
@@ -120,32 +159,29 @@ export function applyScenario(
   const netWorthBefore = netWorthCZK(positions)
   const netWorthAfter = netWorthCZK(shocked)
 
-  const expensesBefore = plan.annual_expenses_czk
-  const expensesAfter = expensesBefore * (1 + (shocks.expense_shock_pct ?? 0))
-  const monthlyBefore = expensesBefore / 12
-  const monthlyAfter = expensesAfter / 12
-
   const investableBefore = investableNetWorthCZK(positions, {
     includePrimaryResidence: plan.include_primary_residence,
     includeProperty: plan.include_property_in_fi,
   })
-  const investableAfter = investableNetWorthCZK(shocked, {
+  const investableAfterShock = investableNetWorthCZK(shocked, {
     includePrimaryResidence: plan.include_primary_residence,
     includeProperty: plan.include_property_in_fi,
   })
+  // Anything the cash could not cover still has to be paid from investments.
+  const investableAfter = investableAfterShock - Math.max(0, spendDraw)
 
   const targetBefore = fiNumber(expensesBefore, plan.swr_pct)
   const targetAfter = fiNumber(expensesAfter, plan.swr_pct)
 
   const yearsBefore = yearsToFI(
     investableBefore, plan.monthly_contribution_czk, plan.expected_real_return, targetBefore)
-  // A job loss stops contributions for the affected months; modelled simply as
-  // no contributions at all during the shock.
-  const contributionAfter = (shocks.income_loss_months ?? 0) > 0
-    ? 0
-    : plan.monthly_contribution_czk
-  const yearsAfter = yearsToFI(
-    investableAfter, contributionAfter, plan.expected_real_return, targetAfter)
+  // During the gap the pot still compounds but receives nothing; afterwards
+  // contributions resume from wherever it stands.
+  const gapYears = lossMonths / 12
+  const potAfterGap = investableAfter * Math.pow(1 + plan.expected_real_return, gapYears)
+  const yearsAfterGap = yearsToFI(
+    potAfterGap, plan.monthly_contribution_czk, plan.expected_real_return, targetAfter)
+  const yearsAfter = yearsAfterGap != null ? yearsAfterGap + gapYears : null
 
   const runwayBefore = runwaySummary(positions, monthlyBefore)
   const runwayAfter = runwaySummary(shocked, monthlyAfter)
@@ -182,7 +218,8 @@ export const SCENARIO_PRESETS: ScenarioPreset[] = [
   {
     name: '2008 replay',
     description: 'Global financial crisis: equities halve, property slides, rates collapse.',
-    shocks: { equity_pct: -0.50, property_pct: -0.20, crypto_pct: -0.60, rates_pct: -0.80 },
+    // Government yields fell ~150 bp as money fled to safety.
+    shocks: { equity_pct: -0.50, property_pct: -0.20, crypto_pct: -0.60, rates_pct: -0.80, rates_bp: -150 },
   },
   {
     name: 'COVID crash',
@@ -211,17 +248,20 @@ export const SCENARIO_PRESETS: ScenarioPreset[] = [
   },
   {
     name: 'Stagflation',
-    description: 'Equities fall, living costs rise, deposit rates climb.',
-    shocks: { equity_pct: -0.20, expense_shock_pct: 0.15, rates_pct: 0.50 },
+    description: 'Equities fall, living costs rise, deposit rates and bond yields climb.',
+    shocks: { equity_pct: -0.20, expense_shock_pct: 0.15, rates_pct: 0.50, rates_bp: 200 },
+  },
+  {
+    name: 'Rates +2 pp',
+    description: 'Bond yields jump 200 bp (2022-style): bond prices fall by roughly duration × 2 %.',
+    shocks: { rates_bp: 200, rates_pct: 0.30 },
   },
 ]
 
 /** Waterfall steps from starting net worth to the shocked figure. */
 export function waterfall(result: ScenarioResult): { label: string; delta: number }[] {
   const steps: { label: string; delta: number }[] = []
-  const classLabels: Record<AssetClass, string> = {
-    stock: 'Stocks', etf: 'ETFs', cash: 'Cash', crypto: 'Crypto', realestate: 'Real estate',
-  }
+  const classLabels = ASSET_CLASS_LABELS
   for (const k of Object.keys(result.byClass) as AssetClass[]) {
     const delta = result.byClass[k].delta
     if (Math.abs(delta) > 0.5) steps.push({ label: classLabels[k], delta })

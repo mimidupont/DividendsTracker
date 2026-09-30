@@ -11,13 +11,13 @@ import {
   supabase, supabaseConfigError,
   Holding, DividendProjection, DividendReceived, BankAccount, CryptoHolding, RealEstate,
   Transaction, AssetMetadata, AllocationTarget, FinancialPlan, ExpenseLogRow,
-  ScenarioRow, MarketAssumption,
+  ScenarioRow, MarketAssumption, BondHolding, BankInterestReceived, HoldingLot,
 } from '@/lib/supabase'
 import { getStoredProfileId } from '@/lib/profile'
 
 const CACHE_TTL = 5 * 60 * 1000
 
-interface AppData {
+export interface AppData {
   holdings: Holding[]
   projections: DividendProjection[]
   dividendsReceived: DividendReceived[]
@@ -32,6 +32,10 @@ interface AppData {
   expenseLog: ExpenseLogRow[]
   scenarios: ScenarioRow[]
   marketAssumptions: MarketAssumption[]
+  // ── v3 ──
+  bondHoldings: BondHolding[]
+  bankInterest: BankInterestReceived[]
+  holdingLots: HoldingLot[]
   cachedAt: number
   profileId: string | null
   /** Non-null when one or more queries failed — totals would be understated. */
@@ -62,15 +66,17 @@ async function fetchAll(profileId: string): Promise<AppData> {
     return { ...EMPTY, cachedAt: Date.now(), profileId, error: supabaseConfigError }
   }
 
-  const [h, p, div, b, c, r, txn, meta, targets, plan, expenses, scen, assumptions] = await Promise.all([
-    supabase.from('holdings').select('*').eq('profile_id', profileId).order('symbol'),
+  const [h, p, div, b, c, r, txn, meta, targets, plan, expenses, scen, assumptions, bonds, interest, lots] = await Promise.all([
+    // Fully sold positions are kept at zero shares (their lots and history stay
+    // attached) but are not holdings any more.
+    supabase.from('holdings').select('*').eq('profile_id', profileId).gt('shares', 0).order('symbol'),
     // Every year is fetched — the projections page shows a multi-year table and
     // income estimates need whichever year is currently relevant, not a single
     // hardcoded one.
     supabase.from('dividend_projections').select('*').eq('profile_id', profileId).order('year').order('projected_total', { ascending: false }),
     supabase.from('dividends_received').select('*').eq('profile_id', profileId).order('payment_date', { ascending: false }),
     supabase.from('bank_accounts').select('*').eq('profile_id', profileId).eq('is_active', true).order('balance', { ascending: false }),
-    supabase.from('crypto_holdings').select('*').eq('profile_id', profileId).order('avg_cost_usd', { ascending: false }),
+    supabase.from('crypto_holdings').select('*').eq('profile_id', profileId).gt('amount', 0).order('avg_cost_usd', { ascending: false }),
     supabase.from('real_estate').select('*').eq('profile_id', profileId).order('current_value', { ascending: false }),
     supabase.from('transactions').select('*').eq('profile_id', profileId).order('txn_date', { ascending: false }),
     supabase.from('asset_metadata').select('*').eq('profile_id', profileId),
@@ -79,11 +85,14 @@ async function fetchAll(profileId: string): Promise<AppData> {
     supabase.from('expense_log').select('*').eq('profile_id', profileId).order('month'),
     supabase.from('scenarios').select('*').eq('profile_id', profileId).order('created_at'),
     supabase.from('market_assumptions').select('*').eq('profile_id', profileId),
+    supabase.from('bond_holdings').select('*').eq('profile_id', profileId).eq('is_active', true).order('maturity_date'),
+    supabase.from('bank_interest_received').select('*').eq('profile_id', profileId).order('payment_date', { ascending: false }),
+    supabase.from('holding_lots').select('*').eq('profile_id', profileId).order('purchase_date'),
   ])
 
   // A failed query used to be indistinguishable from "you own nothing", which
   // quietly wiped an asset class out of net worth. Surface it instead.
-  const failures = [h, p, div, b, c, r]
+  const failures = [h, p, div, b, c, r, lots]
     .map(res => res.error?.message)
     .filter((m): m is string => !!m)
 
@@ -94,7 +103,8 @@ async function fetchAll(profileId: string): Promise<AppData> {
   const v2 = [
     ['transactions', txn], ['asset_metadata', meta], ['allocation_targets', targets],
     ['financial_plan', plan], ['expense_log', expenses], ['scenarios', scen],
-    ['market_assumptions', assumptions],
+    ['market_assumptions', assumptions], ['bond_holdings', bonds],
+    ['bank_interest_received', interest],
   ] as const
   const missingTables = v2
     .filter(([, res]) => isMissingTable(res.error))
@@ -117,6 +127,9 @@ async function fetchAll(profileId: string): Promise<AppData> {
     expenseLog:        expenses.data ?? [],
     scenarios:         scen.data ?? [],
     marketAssumptions: assumptions.data ?? [],
+    bondHoldings:      bonds.data ?? [],
+    bankInterest:      interest.data ?? [],
+    holdingLots:       lots.data ?? [],
     cachedAt:          Date.now(),
     profileId,
     error:             [...failures, ...v2Failures].join(' · ') || null,
@@ -133,7 +146,9 @@ export function isMissingTable(error: { code?: string; message?: string } | null
   if (!error) return false
   if (error.code === '42P01' || error.code === 'PGRST205') return true
   const msg = (error.message ?? '').toLowerCase()
-  return msg.includes('does not exist') || msg.includes('could not find the table')
+  // Only a missing *relation*: "column … does not exist" is a real error and
+  // must not be reported as "run migration 00X".
+  return /relation .* does not exist/.test(msg) || msg.includes('could not find the table')
 }
 
 async function getOrFetch(profileId: string, force = false): Promise<AppData> {
@@ -165,6 +180,7 @@ const EMPTY: AppData = {
   bankAccounts: [], cryptoHoldings: [], realEstate: [],
   transactions: [], assetMetadata: [], allocationTargets: [],
   financialPlan: null, expenseLog: [], scenarios: [], marketAssumptions: [],
+  bondHoldings: [], bankInterest: [], holdingLots: [],
   cachedAt: 0, profileId: null, error: null, missingTables: [],
 }
 

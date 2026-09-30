@@ -1,4 +1,5 @@
 'use client'
+import { ErrorBox } from '@/components/FormFields'
 import { useEffect, useMemo, useState } from 'react'
 import Badge from '@/components/Badge'
 import RunwayCard from '@/components/RunwayCard'
@@ -30,6 +31,7 @@ export default function FirePage() {
 
   const [saving, setSaving] = useState(false)
   const [draft, setDraft] = useState<Partial<FinancialPlan> | null>(null)
+  const [saveError, setSaveError] = useState<string | null>(null)
 
   const symbolKey = data.holdings.map(h => h.symbol).join(',')
   const coinKey = data.cryptoHoldings.map(c => c.coin_id).join(',')
@@ -94,7 +96,7 @@ export default function FirePage() {
         include_primary_residence: plan.include_primary_residence,
         updated_at: new Date().toISOString(),
       }, { onConflict: 'profile_id' })
-      if (error) { alert(`Could not save plan: ${error.message}`); return }
+      if (error) { setSaveError(`Could not save plan: ${error.message}`); return }
       setDraft(null)
       data.reload()
     } finally {
@@ -110,6 +112,7 @@ export default function FirePage() {
   return (
     <PageShell maxWidth={1100}>
       <PageHeader
+        eyebrow="Planning"
         title="Financial independence"
         subtitle={
           <>
@@ -124,6 +127,7 @@ export default function FirePage() {
           </button>
         ) : undefined}
       />
+      {saveError && <ErrorBox msg={saveError} />}
 
       <SetupNotice tables={data.missingTables.filter(t => t === 'financial_plan' || t === 'expense_log')} />
 
@@ -151,8 +155,8 @@ export default function FirePage() {
           }} />
         </div>
         <div style={{ marginTop: 10, fontSize: 11, color: 'var(--text4)' }}>
-          Investable net worth excludes your primary residence
-          {plan.include_primary_residence ? ' (currently included)' : ''} — mortgages are subtracted either way.
+          Investable net worth {plan.include_primary_residence ? 'includes' : 'excludes'} your primary residence — a
+          property and its mortgage are always included or excluded together.
         </div>
       </div>
 
@@ -260,9 +264,9 @@ export default function FirePage() {
               </linearGradient>
             </defs>
             <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
-            <XAxis dataKey="year" tick={{ fontSize: 9, fill: 'var(--text3)' }}
+            <XAxis dataKey="year" tick={{ fontSize: 11, fill: 'var(--text3)' }}
               tickFormatter={y => `${y}y`} axisLine={false} tickLine={false} />
-            <YAxis tick={{ fontSize: 9, fill: 'var(--text3)' }} width={64}
+            <YAxis tick={{ fontSize: 11, fill: 'var(--text3)' }} width={64}
               tickFormatter={n => `${(n / 1_000_000).toFixed(1)}M`} axisLine={false} tickLine={false} />
             <Tooltip
               formatter={(v: number) => fmtCZK(v)}
@@ -271,7 +275,7 @@ export default function FirePage() {
             />
             {target != null && (
               <ReferenceLine y={target} stroke="var(--green)" strokeDasharray="4 4"
-                label={{ value: 'FI number', fontSize: 9, fill: 'var(--green)', position: 'insideTopRight' }} />
+                label={{ value: 'FI number', fontSize: 11, fill: 'var(--green)', position: 'insideTopRight' }} />
             )}
             <Area type="monotone" dataKey="value" stroke="var(--green)" strokeWidth={2} fill="url(#fireGrad)" />
           </AreaChart>

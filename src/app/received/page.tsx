@@ -1,126 +1,171 @@
 'use client'
-import { useState } from 'react'
-import Sidebar from '@/components/Sidebar'
+import { useMemo, useState } from 'react'
+import { PageShell, PageHeader, LoadingShell, EmptyState, MetricCards, Panel, Tabs } from '@/components/PageShell'
 import Badge from '@/components/Badge'
-import LogDividendModal from '@/components/LogDividendModal'
+import RecordModal, { type RecordPreset } from '@/components/RecordModal'
+import DataTable, { type Column } from '@/components/DataTable'
 import { useAppData } from '@/hooks/useAppData'
 import { useFx } from '@/hooks/useFx'
-import { toCZK, fmtCZK } from '@/lib/fx'
+import { fmtCZK, fmtNum } from '@/lib/fx'
 import { fmtISODate, todayISO, yearOf } from '@/lib/date'
+import { paymentCZK } from '@/lib/dividends'
+import { czkOf } from '@/lib/transactions'
+import { btnStyle } from '@/lib/ui'
 
-export default function ReceivedPage() {
-  const { dividendsReceived: dividends, reload: load } = useAppData()
-  const [showModal, setShowModal] = useState(false)
-  // Live rates, like every other page — this used to be pinned to the
-  // hardcoded fallback table, so the CZK column disagreed with the dashboard.
-  const { fx, fxLive, fxTs } = useFx()
+type Stream = 'dividend' | 'interest' | 'coupon' | 'rent'
 
-  const totalGrossCZK = dividends.reduce((s, d) => s + toCZK(d.gross_amount, d.currency, fx), 0)
-  const totalWHT_CZK  = dividends.reduce((s, d) => s + toCZK(d.withholding_tax ?? 0, d.currency, fx), 0)
-  const totalNetCZK   = totalGrossCZK - totalWHT_CZK
-
-  const currentYear = yearOf(todayISO())
-  const ytd = dividends.filter(d => yearOf(d.payment_date) === currentYear)
-  const ytdCZK = ytd.reduce((s, d) => s + toCZK(d.gross_amount, d.currency, fx), 0)
-
-  return (
-    <div style={{ display: 'flex' }}>
-      <Sidebar />
-      {showModal && <LogDividendModal onClose={() => setShowModal(false)} onSaved={load} />}
-      <main style={{ marginLeft: 'var(--sidebar-w)', flex: 1, padding: '28px 36px', maxWidth: 1060 }}>
-
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 22 }}>
-          <div>
-            <h1 style={{ fontFamily: "'Instrument Serif', serif", fontSize: 26, fontWeight: 400, letterSpacing: -0.5 }}>
-              Dividends received
-            </h1>
-            <div style={{ fontSize: 11, color: 'var(--text3)', marginTop: 3 }}>
-              {dividends.length} payments logged · converted at
-              {fxLive ? <span style={{ color: 'var(--green)' }}> live rates{fxTs ? ` (${fxTs})` : ''}</span>
-                      : <span style={{ color: 'var(--amber)' }}> fallback rates</span>}
-            </div>
-          </div>
-          <button onClick={() => setShowModal(true)} style={{
-            padding: '7px 16px', borderRadius: 6, cursor: 'pointer',
-            background: 'var(--green-bg)', border: '1px solid var(--green-bd)',
-            color: 'var(--green)', fontFamily: "'Geist', sans-serif", fontSize: 12, fontWeight: 500,
-          }}>
-            + Log dividend
-          </button>
-        </div>
-
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 20 }}>
-          {[
-            { label: `${currentYear} YTD gross`, value: fmtCZK(ytdCZK, 2), accent: 'var(--green)' },
-            { label: 'All-time gross', value: fmtCZK(totalGrossCZK, 2), accent: 'var(--green)' },
-            { label: 'Withholding tax', value: `−${fmtCZK(totalWHT_CZK, 2)}`, accent: 'var(--red)' },
-            { label: 'All-time net', value: fmtCZK(totalNetCZK, 2), accent: 'var(--blue)' },
-          ].map((m, i) => (
-            <div key={i} style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 10, padding: '14px 18px', position: 'relative', overflow: 'hidden' }}>
-              <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 2, background: m.accent, opacity: 0.8 }} />
-              <div style={{ fontSize: 10, letterSpacing: '0.09em', textTransform: 'uppercase', color: 'var(--text3)', marginBottom: 6, fontWeight: 500 }}>{m.label}</div>
-              <div style={{ fontFamily: "'Instrument Serif', serif", fontSize: 20, fontWeight: 400 }}>{m.value}</div>
-            </div>
-          ))}
-        </div>
-
-        <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 10, overflow: 'hidden' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-            <thead>
-              <tr style={{ background: 'var(--bg3)' }}>
-                {['Symbol', 'Payment date', 'Shares', 'Per share', 'Gross (CZK)', 'WHT (CZK)', 'Net (CZK)', 'DRIP', 'CCY'].map((h, i) => (
-                  <th key={h} style={{
-                    fontSize: 9, letterSpacing: '0.09em', textTransform: 'uppercase',
-                    color: 'var(--text3)', padding: '9px 13px',
-                    textAlign: i < 2 ? 'left' : 'right',
-                    borderBottom: '1px solid var(--border)', fontWeight: 400,
-                  }}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {dividends.length === 0 && (
-                <tr><td colSpan={9} style={{ padding: '24px', color: 'var(--text3)', textAlign: 'center' }}>No dividends logged yet.</td></tr>
-              )}
-              {dividends.map(d => (
-                <tr key={d.id}
-                  onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg3)')}
-                  onMouseLeave={e => (e.currentTarget.style.background = '')}
-                >
-                  <td style={{ padding: '9px 13px', borderBottom: '1px solid var(--border)', fontWeight: 500 }}>{d.symbol}</td>
-                  <td style={{ padding: '9px 13px', borderBottom: '1px solid var(--border)', color: 'var(--text2)' }}>{fmtISODate(d.payment_date)}</td>
-                  <td style={tdR}>{d.shares_held.toLocaleString(undefined, { maximumFractionDigits: 4 })}</td>
-                  <td style={tdR}>{d.amount_per_share.toLocaleString(undefined, { maximumFractionDigits: 4 })}</td>
-                  <td style={{ ...tdR, color: 'var(--green)', fontFamily: "'DM Mono', monospace" }}>+{fmtCZK(toCZK(d.gross_amount, d.currency, fx), 2)}</td>
-                  <td style={{ ...tdR, color: 'var(--red)', fontFamily: "'DM Mono', monospace" }}>−{fmtCZK(toCZK(d.withholding_tax ?? 0, d.currency, fx), 2)}</td>
-                  <td style={{ ...tdR, fontWeight: 500, fontFamily: "'DM Mono', monospace" }}>
-                    {/* net_amount is a generated column; fall back to the arithmetic if it is absent */}
-                    {fmtCZK(toCZK(d.net_amount ?? (d.gross_amount - (d.withholding_tax ?? 0)), d.currency, fx), 2)}
-                  </td>
-                  <td style={tdR}>
-                    {d.drip_shares_added ? (
-                      <Badge variant="green">+{d.drip_shares_added.toFixed(4)} sh</Badge>
-                    ) : <span style={{ color: 'var(--text4)' }}>—</span>}
-                  </td>
-                  <td style={tdR}>
-                    <Badge variant={d.currency === 'USD' ? 'gray' : d.currency === 'EUR' ? 'blue' : 'amber'}>
-                      {d.currency}
-                    </Badge>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </main>
-    </div>
-  )
+interface IncomeRow {
+  id: string
+  stream: Stream
+  source: string
+  date: string
+  grossCZK: number
+  taxCZK: number
+  netCZK: number
+  currency: string
+  frozen: boolean
+  detail?: string
 }
 
-const tdR: React.CSSProperties = {
-  padding: '9px 13px',
-  borderBottom: '1px solid var(--border)',
-  textAlign: 'right',
-  color: 'var(--text2)',
-  fontSize: 12,
+const STREAM_LABEL: Record<Stream, string> = { dividend: 'Dividend', interest: 'Interest', coupon: 'Coupon', rent: 'Rent' }
+const STREAM_COLOR: Record<Stream, string> = {
+  dividend: 'var(--c-stocks)', interest: 'var(--c-cash)', coupon: 'var(--c-bond)', rent: 'var(--c-realestate)',
+}
+
+/**
+ * Every payment received, across income streams. Converted at the rate on the
+ * payment date where recorded, so a year's total no longer moves every time
+ * the koruna does — which is also what the Czech return needs.
+ */
+export default function ReceivedPage() {
+  const { dividendsReceived, bankInterest, bankAccounts, transactions, loading, reload } = useAppData()
+  const { fx } = useFx()
+  const [record, setRecord] = useState<RecordPreset | null>(null)
+  const [tab, setTab] = useState<'all' | Stream>('all')
+  const [year, setYear] = useState<'all' | number>(yearOf(todayISO()))
+
+  const rows: IncomeRow[] = useMemo(() => {
+    const out: IncomeRow[] = []
+    for (const d of dividendsReceived) {
+      const g = paymentCZK(d, fx, 'gross')
+      const n = paymentCZK(d, fx, 'net')
+      out.push({
+        id: `d-${d.id}`, stream: 'dividend', source: d.symbol, date: d.payment_date,
+        grossCZK: g.czk, taxCZK: g.czk - n.czk, netCZK: n.czk, currency: d.currency, frozen: g.frozen,
+        detail: `${fmtNum(d.shares_held, 4)} sh × ${fmtNum(d.amount_per_share, 4)} ${d.currency}${d.drip_shares_added ? ` · DRIP +${fmtNum(d.drip_shares_added, 4)} sh` : ''}`,
+      })
+    }
+    const accountName = new Map(bankAccounts.map(a => [a.id, a.name]))
+    for (const i of bankInterest) {
+      const g = paymentCZK({ gross_amount: i.gross_amount, withholding_tax: i.tax_withheld, currency: i.currency, fx_rate_czk: i.fx_rate_czk }, fx, 'gross')
+      const n = paymentCZK({ gross_amount: i.gross_amount, withholding_tax: i.tax_withheld, currency: i.currency, fx_rate_czk: i.fx_rate_czk }, fx, 'net')
+      out.push({
+        id: `i-${i.id}`, stream: 'interest', source: accountName.get(i.account_id) ?? 'Bank account', date: i.payment_date,
+        grossCZK: g.czk, taxCZK: g.czk - n.czk, netCZK: n.czk, currency: i.currency, frozen: g.frozen,
+      })
+    }
+    // Coupons and rent live in the ledger only (interest on bank accounts is
+    // taken from the interest log above, so it is not counted twice).
+    for (const t of transactions) {
+      const stream: Stream | null = t.type === 'interest' && t.asset_class === 'bond' ? 'coupon'
+        : t.type === 'rent' ? 'rent' : null
+      if (!stream) continue
+      const gross = Math.abs(czkOf(t))
+      const tax = (t.tax ?? 0) * (t.fx_rate_czk || 1)
+      out.push({
+        id: `t-${t.id}`, stream, source: t.symbol ?? t.notes ?? STREAM_LABEL[stream], date: t.txn_date,
+        grossCZK: gross, taxCZK: tax, netCZK: gross - tax, currency: t.currency, frozen: true,
+      })
+    }
+    return out.sort((a, b) => b.date.localeCompare(a.date))
+  }, [dividendsReceived, bankInterest, bankAccounts, transactions, fx])
+
+  const years = Array.from(new Set(rows.map(r => yearOf(r.date)))).sort((a, b) => b - a)
+  const shown = rows.filter(r => (tab === 'all' || r.stream === tab) && (year === 'all' || yearOf(r.date) === year))
+  const sum = (k: 'grossCZK' | 'taxCZK' | 'netCZK', list = shown) => list.reduce((s, r) => s + r[k], 0)
+  const unfrozen = shown.filter(r => !r.frozen).length
+
+  if (loading) return <LoadingShell />
+
+  const columns: Column<IncomeRow>[] = [
+    { key: 'date', label: 'Date', sortValue: r => r.date, render: r => fmtISODate(r.date) },
+    { key: 'stream', label: 'Type', sortValue: r => r.stream, render: r => (
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+        <span aria-hidden="true" style={{ width: 7, height: 7, borderRadius: 2, background: STREAM_COLOR[r.stream] }} />
+        {STREAM_LABEL[r.stream]}
+      </span>
+    ) },
+    { key: 'source', label: 'Source', sortValue: r => r.source, render: r => <>
+      <div style={{ fontWeight: 500 }}>{r.source}</div>
+      {r.detail && <div style={{ fontSize: 11, color: 'var(--text3)' }}>{r.detail}</div>}
+    </> },
+    { key: 'gross', label: 'Gross (CZK)', numeric: true, sortValue: r => r.grossCZK, render: r => fmtCZK(r.grossCZK, 2) },
+    { key: 'tax', label: 'Tax withheld', numeric: true, sortValue: r => r.taxCZK, render: r => r.taxCZK > 0 ? `−${fmtCZK(r.taxCZK, 2)}` : '—' },
+    { key: 'net', label: 'Net (CZK)', numeric: true, sortValue: r => r.netCZK, render: r => <strong>{fmtCZK(r.netCZK, 2)}</strong> },
+    { key: 'ccy', label: 'Paid in', align: 'right', render: r => <>
+      <Badge variant="gray">{r.currency}</Badge>
+      {!r.frozen && <span title="No payment-date rate recorded — converted at today's rate" style={{ marginLeft: 4, color: 'var(--text3)', fontSize: 10 }}>today&apos;s rate</span>}
+    </> },
+  ]
+
+  return (
+    <PageShell>
+      {record && <RecordModal preset={record} onClose={() => setRecord(null)} onSaved={reload} />}
+      <PageHeader
+        eyebrow="Income"
+        title="Received"
+        subtitle="Dividends, interest, coupons and rent — converted at the rate on the day each was paid"
+        actions={<>
+          <button type="button" onClick={() => setRecord({ kind: 'interest' })} style={btnStyle('secondary')}>+ Interest</button>
+          <button type="button" onClick={() => setRecord({ kind: 'dividend' })} style={btnStyle('primary')}>+ Dividend</button>
+        </>}
+      />
+
+      {rows.length === 0 ? (
+        <EmptyState
+          icon="↓"
+          title="No income logged yet"
+          body={<>Log dividends as they arrive (or use “Check dividends” on Stocks &amp; ETFs to find and reinvest recent ones),
+            and record bank interest and bond coupons with Record.</>}
+          action={<button type="button" onClick={() => setRecord({ kind: 'dividend' })} style={btnStyle('primary')}>+ Log a dividend</button>}
+        />
+      ) : <>
+        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+          <Tabs label="Income type" value={tab} onChange={setTab} tabs={[
+            { key: 'all', label: 'All' }, { key: 'dividend', label: 'Dividends' }, { key: 'interest', label: 'Interest' },
+            { key: 'coupon', label: 'Coupons' }, { key: 'rent', label: 'Rent' },
+          ]} />
+          <label style={{ fontSize: 12, color: 'var(--text3)', marginBottom: 16 }}>
+            Year{' '}
+            <select value={String(year)} onChange={e => setYear(e.target.value === 'all' ? 'all' : Number(e.target.value))}
+              style={{ padding: '5px 8px', borderRadius: 6, border: '1px solid var(--border2)', background: 'var(--bg2)' }}>
+              <option value="all">All years</option>
+              {years.map(y => <option key={y} value={y}>{y}</option>)}
+            </select>
+          </label>
+        </div>
+
+        <MetricCards cards={[
+          { label: 'Gross', value: fmtCZK(sum('grossCZK')), accent: 'var(--c-income)', note: `${shown.length} payments` },
+          { label: 'Tax withheld', value: sum('taxCZK') > 0 ? `−${fmtCZK(sum('taxCZK'))}` : fmtCZK(0), accent: 'var(--red)' },
+          { label: 'Net received', value: fmtCZK(sum('netCZK')), accent: 'var(--green)' },
+          ...(['dividend', 'interest', 'coupon', 'rent'] as Stream[])
+            .filter(s => tab === 'all' && shown.some(r => r.stream === s))
+            .map(s => ({ label: `${STREAM_LABEL[s]}s, net`, value: fmtCZK(sum('netCZK', shown.filter(r => r.stream === s))), accent: STREAM_COLOR[s] })),
+        ]} />
+        {unfrozen > 0 && (
+          <div style={{ fontSize: 11, color: 'var(--text3)', marginBottom: 12 }}>
+            ⓘ {unfrozen} older payment{unfrozen > 1 ? 's have' : ' has'} no payment-date rate and {unfrozen > 1 ? 'are' : 'is'} converted at today&apos;s rate
+            — {unfrozen > 1 ? 'their' : 'its'} CZK value will move with the koruna.
+          </div>
+        )}
+
+        <Panel title="Payments" padded={false}>
+          {shown.length === 0
+            ? <div style={{ padding: 24, color: 'var(--text3)', fontSize: 12, textAlign: 'center' }}>Nothing in this view.</div>
+            : <DataTable caption="Income payments" columns={columns} rows={shown} rowKey={r => r.id} initialSort={{ key: 'date', dir: 'desc' }} />}
+        </Panel>
+      </>}
+    </PageShell>
+  )
 }

@@ -8,7 +8,10 @@ import type { DividendProjection, Holding } from './supabase'
  */
 export function computeProjectedTotal(p: DividendProjection, holdings: Holding[]): number {
   const shares = holdings.find(h => h.symbol === p.symbol)?.shares ?? null
-  if (p.projected_div_per_share != null && shares != null) {
+  // A projection for something you no longer hold is not income. Falling back
+  // to the stored total kept a sold position "paying" indefinitely.
+  if (shares == null || shares <= 0) return 0
+  if (p.projected_div_per_share != null) {
     return p.projected_div_per_share * shares
   }
   return p.projected_total ?? 0

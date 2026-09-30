@@ -222,3 +222,69 @@ export function rollingReturns(series: ValuePoint[], windowDays: number): ValueP
   }
   return out
 }
+
+export interface PeriodPL {
+  /** Change in value minus money paid in (plus money taken out) — the part you earned. */
+  pl: number
+  /** Time-weighted return over the window, in percent; null when not computable. */
+  plPct: number | null
+  /** Net external flows inside the window (positive = paid in). */
+  flowsCZK: number
+  /** Raw change in value, flows included. */
+  changeCZK: number
+  fromDate: string
+  fromValue: number
+}
+
+/**
+ * Performance over a window, with deposits and withdrawals taken out.
+ *
+ * "Net worth went up 50k" and "you earned 50k" are the same sentence only when
+ * nothing was paid in. Subtracting the external flows dated after the baseline
+ * separates what the market did from what your salary did; the percentage is a
+ * time-weighted return over the snapshots in the window for the same reason.
+ *
+ * `points` must include today's live value as its last entry.
+ */
+export function periodPL(
+  points: ValuePoint[],
+  baseline: ValuePoint,
+  flows: { date: string; amountCZK: number }[]
+): PeriodPL | null {
+  const series = points
+    .filter(p => p.date >= baseline.date && isFinite(p.value))
+    .sort((a, b) => a.date.localeCompare(b.date))
+  if (series.length < 2) return null
+  const last = series[series.length - 1]
+  const inWindow = flows.filter(f => f.date > baseline.date && f.date <= last.date && isFinite(f.amountCZK))
+  const flowsCZK = inWindow.reduce((s, f) => s + f.amountCZK, 0)
+  const changeCZK = last.value - baseline.value
+  const pl = changeCZK - flowsCZK
+  const r = twr(series, inWindow)
+  return {
+    pl,
+    plPct: r != null ? r * 100 : null,
+    flowsCZK,
+    changeCZK,
+    fromDate: baseline.date,
+    fromValue: baseline.value,
+  }
+}
+
+/**
+ * Cumulative time-weighted performance as an index starting at 100 — the
+ * curve to put next to a benchmark. Indexing raw net worth instead would show
+ * every deposit as a jump in "performance".
+ */
+export function twrIndex(points: ValuePoint[], flows: { date: string; amountCZK: number }[]): ValuePoint[] {
+  const series = [...points].filter(p => isFinite(p.value)).sort((a, b) => a.date.localeCompare(b.date))
+  if (series.length === 0) return []
+  const out: ValuePoint[] = [{ date: series[0].date, value: 100 }]
+  let level = 100
+  for (let i = 1; i < series.length; i++) {
+    const r = twr([series[i - 1], series[i]], flows)
+    if (r != null) level *= 1 + r
+    out.push({ date: series[i].date, value: level })
+  }
+  return out
+}

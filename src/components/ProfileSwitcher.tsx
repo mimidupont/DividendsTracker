@@ -12,7 +12,11 @@ export default function ProfileSwitcher() {
     <div style={{ position: 'relative' }}>
       {/* Active profile button */}
       <button
+        type="button"
         onClick={() => setOpen(o => !o)}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-label={`Profile: ${activeProfile.display_name}. Switch profile`}
         style={{
           width: '100%',
           display: 'flex',
@@ -30,7 +34,7 @@ export default function ProfileSwitcher() {
           background: 'linear-gradient(135deg, var(--green-bg), var(--blue-bg))',
           border: '1px solid var(--border2)',
           display: 'flex', alignItems: 'center', justifyContent: 'center',
-          fontSize: 9, color: 'var(--green)', fontWeight: 600,
+          fontSize: 10, color: 'var(--green)', fontWeight: 600,
           fontFamily: "'Syne', sans-serif",
           flexShrink: 0,
         }}>
@@ -41,10 +45,10 @@ export default function ProfileSwitcher() {
             {activeProfile.display_name}
           </div>
           <div style={{ fontSize: 10, color: 'var(--text4)' }}>
-            IBKR · {activeProfile.base_currency} base
+            {activeProfile.base_currency} base
           </div>
         </div>
-        <span style={{ fontSize: 9, color: 'var(--text4)', flexShrink: 0 }}>
+        <span style={{ fontSize: 10, color: 'var(--text4)', flexShrink: 0 }}>
           {open ? '▲' : '▼'}
         </span>
       </button>
@@ -65,7 +69,7 @@ export default function ProfileSwitcher() {
           zIndex: 100,
         }}>
           <div style={{
-            fontSize: 9, letterSpacing: '0.1em', textTransform: 'uppercase',
+            fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase',
             color: 'var(--text4)', padding: '8px 12px 4px', fontWeight: 600,
           }}>
             Switch profile

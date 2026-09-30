@@ -1,41 +1,54 @@
 'use client'
 import { useState } from 'react'
-import { supabase, Holding } from '@/lib/supabase'
+import { supabase, type Holding, type AssetMetadata } from '@/lib/supabase'
 import { useProfile } from '@/lib/profile'
-import { toCZK, fxRate } from '@/lib/fx'
+import { fxRate, fetchHistoricalFx, normalizeCurrencyCode, fmtNum } from '@/lib/fx'
 import { todayISO, addDays, unixToISODate, fmtISODate } from '@/lib/date'
 import { useFx } from '@/hooks/useFx'
 import { useMarketData } from '@/hooks/useMarketData'
+import { recordEvent } from '@/lib/db'
+import { whtRateFor } from '@/lib/tax'
+import { sharesAsOf } from '@/lib/dividends'
+import { parseDecimal } from '@/lib/parse'
 import Modal from './Modal'
+import { ErrorBox, NumberInput, Notice, inputStyle } from './FormFields'
 import type { DividendSummary } from '@/app/api/market/dividends/route'
 
 interface DripEvent {
   symbol: string
-  name: string
   exDate: string
   payDate: string
-  amountPerShare: number       // native currency per share
+  amountPerShare: number
+  /** Currency the dividend was declared in; '' when the provider did not say. */
   currency: string
-  sharesHeld: number
-  grossNative: number          // e.g. USD 23.43
-  grossCZK: number             // e.g. CZK 486.99
-  whtNative: number            // e.g. USD 3.51
-  whtCZK: number               // e.g. CZK 73.05
-  netCZK: number               // e.g. CZK 413.94  ← what broker reinvests
-  reinvestPriceNative: number  // live market price in native currency
-  reinvestPriceCZK: number     // live price converted to CZK
-  reinvestShares: number       // netCZK / reinvestPriceCZK
+  sharesAtEx: number
+  /** Shares bought after the ex-date — they did not earn this dividend. */
+  sharesAfterEx: number
+  whtRate: number
+  whtBasis: string
   alreadyLogged: boolean
 }
 
-const WHT_RATE = 0.15
+interface EditState { wht: string; price: string; currency: string }
 
+const fmtCZK2 = (n: number) => `Kč ${n.toLocaleString('cs-CZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+
+/**
+ * Finds paid dividends not yet logged and reinvests them (DRIP).
+ *
+ * Shares are counted as of the ex-date (later purchases did not earn the
+ * payment), money is converted at the pay-date rate, withholding defaults to
+ * the issuer country's treaty rate, and the result is written through
+ * record_event — dividend row, new lot and ledger rows together.
+ */
 export default function DripCheckModal({
   holdings,
+  metadata = [],
   onClose,
   onSaved,
 }: {
   holdings: Holding[]
+  metadata?: AssetMetadata[]
   onClose: () => void
   onSaved: () => void
 }) {
@@ -45,12 +58,15 @@ export default function DripCheckModal({
 
   const [loading, setLoading]   = useState(false)
   const [events, setEvents]     = useState<DripEvent[]>([])
+  const [edits, setEdits]       = useState<Record<string, EditState>>({})
+  const [payFx, setPayFx]       = useState<Record<string, Record<string, number>>>({})
   const [checked, setChecked]   = useState(false)
   const [applying, setApplying] = useState<string | null>(null)
   const [done, setDone]         = useState<string[]>([])
   const [error, setError]       = useState('')
 
   const divPayers = holdings.filter(h => h.is_dividend_payer)
+  const key = (e: DripEvent) => `${e.symbol}::${e.payDate}`
 
   const checkDividends = async () => {
     if (!activeProfile) { setError('No active profile selected.'); return }
@@ -58,7 +74,6 @@ export default function DripCheckModal({
     setError('')
 
     try {
-      // Fetch fresh market prices alongside dividend data so reinvest price is live
       await market.refresh(divPayers.map(h => h.symbol), true)
 
       const res = await fetch('/api/market/dividends', {
@@ -70,93 +85,70 @@ export default function DripCheckModal({
         const err = await res.json().catch(() => ({}))
         throw new Error(err?.error ?? `HTTP ${res.status}`)
       }
-
       const data = await res.json() as { summaries: Record<string, DividendSummary> }
 
-      const { data: existing, error: existingErr } = await supabase
-        .from('dividends_received')
-        .select('symbol, payment_date')
-        .eq('profile_id', activeProfile.id)
+      const [{ data: existing, error: existingErr }, { data: lots, error: lotsErr }] = await Promise.all([
+        supabase.from('dividends_received').select('symbol, payment_date').eq('profile_id', activeProfile.id),
+        supabase.from('holding_lots').select('symbol, shares, purchase_date').eq('profile_id', activeProfile.id),
+      ])
       // Without this list a payment could be logged twice, double-counting the
       // income and the DRIP shares. Fail loudly rather than risk that.
       if (existingErr) throw new Error(`Could not read the dividend log: ${existingErr.message}`)
+      if (lotsErr) throw new Error(`Could not read purchase lots: ${lotsErr.message}`)
       const alreadyLogged = new Set((existing ?? []).map(d => `${d.symbol}::${d.payment_date}`))
 
       const today = todayISO()
       const ago90 = addDays(today, -90)
-      const dripEvents: DripEvent[] = []
+      const found: DripEvent[] = []
 
       for (const h of divPayers) {
         const s: DividendSummary = data.summaries[h.symbol]
         if (!s || s.error) continue
-
         const amountPerShare = s.lastDividendValue
-        // Accept the ISO pay date as well as the Unix one. StockAnalysis only
-        // supplies the ISO form, and the old code required the Unix field —
-        // which meant DRIP silently found nothing for every SA-covered ticker,
-        // i.e. essentially the whole portfolio.
-        const payDateStr = s.lastDividendDateISO ?? unixToISODate(s.lastDividendDate)
-        if (!amountPerShare || !payDateStr) continue
-
-        // Only already-paid dividends can be reinvested
-        if (payDateStr > today) continue
-        if (payDateStr < ago90) continue
-
-        // Prefer the reported ex-date; fall back to pay date − 21 days
-        const exDateStr = s.exDividendDateISO && s.exDividendDateISO <= payDateStr
+        const payDate = s.lastDividendDateISO ?? unixToISODate(s.lastDividendDate)
+        if (!amountPerShare || !payDate || payDate > today || payDate < ago90) continue
+        const exDate = s.exDividendDateISO && s.exDividendDateISO <= payDate
           ? s.exDividendDateISO
-          : addDays(payDateStr, -21)
+          : addDays(payDate, -21)
 
-        // Dividends are declared in the security's own currency, which is not
-        // always the currency the position was booked in.
-        const divCurrency = s.currency || h.currency
+        const { atDate, after } = sharesAsOf(h, (lots ?? []).filter(l => l.symbol === h.symbol), exDate)
+        if (atDate <= 0) continue
+        const meta = metadata.find(m => m.symbol.toUpperCase() === h.symbol.toUpperCase())
+        const wht = whtRateFor(meta)
 
-        // --- Money amounts ---
-        const grossNative = h.shares * amountPerShare
-        const grossCZK    = toCZK(grossNative, divCurrency, fx)
-        const whtNative   = grossNative * WHT_RATE
-        const whtCZK      = grossCZK * WHT_RATE
-        // Broker reinvests the CZK net amount
-        const netCZK      = grossCZK - whtCZK
-
-        // --- Reinvest price: live market price in its own ccy, converted to CZK ---
-        // Falls back to avg_price if a live price is not available
-        const reinvestPriceNative = market.getPrice(h.symbol, h.avg_price)
-        const priceCurrency = market.hasPrice(h.symbol)
-          ? market.getQuoteCurrency(h.symbol, h.currency)
-          : h.currency
-        const reinvestPriceCZK    = toCZK(reinvestPriceNative, priceCurrency, fx)
-
-        // Shares = CZK net ÷ CZK price (matches broker behaviour)
-        const reinvestShares = reinvestPriceCZK > 0 ? netCZK / reinvestPriceCZK : 0
-        if (reinvestShares <= 0) continue
-
-        dripEvents.push({
-          symbol: h.symbol,
-          name: h.name,
-          exDate: exDateStr,
-          payDate: payDateStr,
-          amountPerShare,
-          currency: divCurrency,
-          sharesHeld: h.shares,
-          grossNative,
-          grossCZK,
-          whtNative,
-          whtCZK,
-          netCZK,
-          reinvestPriceNative,
-          reinvestPriceCZK,
-          reinvestShares,
-          alreadyLogged: alreadyLogged.has(`${h.symbol}::${payDateStr}`),
+        found.push({
+          symbol: h.symbol, exDate, payDate, amountPerShare,
+          currency: s.currency ? normalizeCurrencyCode(s.currency) : '',
+          sharesAtEx: atDate, sharesAfterEx: after,
+          whtRate: wht.rate,
+          whtBasis: wht.basis === 'country' ? `issuer country ${meta?.country}` : wht.basis === 'region' ? `region ${meta?.region}` : 'US treaty default',
+          alreadyLogged: alreadyLogged.has(`${h.symbol}::${payDate}`),
         })
       }
 
-      dripEvents.sort((a, b) => {
-        if (a.alreadyLogged !== b.alreadyLogged) return a.alreadyLogged ? 1 : -1
-        return b.payDate.localeCompare(a.payDate)
-      })
+      // Pay-date FX for every pay date involved (one request per date).
+      const dates = Array.from(new Set(found.filter(e => !e.alreadyLogged).map(e => e.payDate)))
+      const rates: Record<string, Record<string, number>> = {}
+      await Promise.all(dates.map(async d => {
+        const h = await fetchHistoricalFx(d)
+        if (h) rates[d] = h.rates
+      }))
+      setPayFx(rates)
 
-      setEvents(dripEvents)
+      const initialEdits: Record<string, EditState> = {}
+      for (const e of found) {
+        const h = divPayers.find(x => x.symbol === e.symbol)!
+        initialEdits[key(e)] = {
+          wht: String(Number((e.whtRate * 100).toFixed(3))),
+          price: String(market.getPrice(h.symbol, h.avg_price)),
+          currency: e.currency,
+        }
+      }
+      setEdits(initialEdits)
+
+      found.sort((a, b) =>
+        a.alreadyLogged !== b.alreadyLogged ? (a.alreadyLogged ? 1 : -1) : b.payDate.localeCompare(a.payDate))
+      setEvents(found)
     } catch (e) {
       setError(`Could not fetch dividend data: ${e instanceof Error ? e.message : String(e)}`)
     } finally {
@@ -165,108 +157,86 @@ export default function DripCheckModal({
     }
   }
 
+  /** Everything the card shows and the write needs, from the editable inputs. */
+  const compute = (ev: DripEvent) => {
+    const h = divPayers.find(x => x.symbol === ev.symbol)
+    const ed = edits[key(ev)]
+    if (!h || !ed) return null
+    const divCcy = ed.currency
+    const whtPct = parseDecimal(ed.wht)
+    const reinvestPrice = parseDecimal(ed.price)
+    const priceCcy = market.hasPrice(h.symbol) ? normalizeCurrencyCode(market.getQuoteCurrency(h.symbol, h.currency)) : normalizeCurrencyCode(h.currency)
+    const rates = payFx[ev.payDate]
+    const divRate = divCcy ? (rates ? fxRate(divCcy, rates) : null) : null
+    const holdingRate = rates ? fxRate(h.currency, rates) : null
+    // Reinvest price is today's quote; convert it at today's rate.
+    const priceRate = fxRate(priceCcy, fx)
+    if (!divCcy || whtPct == null || whtPct < 0 || whtPct > 100 || reinvestPrice == null || reinvestPrice <= 0 ||
+        divRate == null || holdingRate == null || priceRate == null) {
+      return { h, ok: false as const, divRate, holdingRate }
+    }
+    const grossNative = ev.sharesAtEx * ev.amountPerShare
+    const whtNative = grossNative * whtPct / 100
+    const netCZK = (grossNative - whtNative) * divRate
+    const reinvestPriceCZK = reinvestPrice * priceRate
+    const reinvestShares = netCZK / reinvestPriceCZK
+    // Cost basis of the new shares, in the position's own currency at the
+    // pay-date rate: what the reinvested money actually was.
+    const dripPriceHoldingCcy = netCZK / holdingRate / reinvestShares
+    return {
+      h, ok: true as const, divCcy, grossNative, whtNative, netCZK, reinvestPrice, priceCcy,
+      reinvestPriceCZK, reinvestShares, dripPriceHoldingCcy, divRate, holdingRate,
+    }
+  }
+
   const applyDrip = async (ev: DripEvent) => {
-    if (!activeProfile) return
-    const holding = divPayers.find(h => h.symbol === ev.symbol)
-    if (!holding) { setError(`${ev.symbol} is no longer in your holdings.`); return }
-
-    // The cost basis is booked in the holding's currency, so the reinvested
-    // amount has to be expressed in that same currency. Bail out rather than
-    // guessing at a rate — a wrong one corrupts the cost basis permanently.
-    const holdingRate = fxRate(holding.currency, fx)
-    if (holdingRate == null) {
-      setError(`No FX rate for ${holding.currency} — cannot compute the new cost basis for ${ev.symbol}.`)
-      return
-    }
-
-    setApplying(ev.symbol)
+    const c = compute(ev)
+    if (!c || !c.ok) { setError(`Fill in the missing figures for ${ev.symbol} first.`); return }
+    setApplying(key(ev))
     setError('')
-
-    // Log the dividend payment
-    const { error: logErr } = await supabase.from('dividends_received').insert([{
-      symbol: ev.symbol,
-      payment_date: ev.payDate,
-      ex_date: ev.exDate,
-      amount_per_share: ev.amountPerShare,
-      shares_held: ev.sharesHeld,
-      gross_amount: ev.grossNative,
-      withholding_tax: ev.whtNative,
-      currency: ev.currency,
-      drip_shares_added: ev.reinvestShares,
-      drip_price: ev.reinvestPriceNative,
-      notes: `DRIP: ${ev.netCZK.toFixed(2)} CZK reinvested → +${ev.reinvestShares.toFixed(4)} shares @ ${ev.reinvestPriceNative.toFixed(2)} ${ev.currency} (${ev.reinvestPriceCZK.toFixed(2)} CZK)`,
-      profile_id: activeProfile.id,
-    }])
-
-    if (logErr) {
-      // Stop here: bumping the share count without logging the dividend would
-      // leave the position overstated with no record of why.
-      setError(`Could not log the ${ev.symbol} dividend: ${logErr.message}`)
-      setApplying(null)
-      return
-    }
-
-    // Update holding: add fractional shares, recalculate weighted avg price.
-    // New avg = (old cost basis + reinvested amount) / new share count, all in
-    // the holding's own currency.
-    const newTotalShares = holding.shares + ev.reinvestShares
-    const netInHoldingCcy = ev.netCZK / holdingRate
-    const newAvgPrice = (holding.shares * holding.avg_price + netInHoldingCcy) / newTotalShares
-
-    const { error: updErr } = await supabase.from('holdings').update({
-      shares: newTotalShares,
-      avg_price: newAvgPrice,
-      updated_at: new Date().toISOString(),
-    }).eq('id', holding.id)
-
-    if (updErr) {
-      setError(`Dividend logged, but the ${ev.symbol} position could not be updated: ${updErr.message}`)
-      setApplying(null)
-      onSaved()
-      return
-    }
-
-    setDone(d => [...d, ev.symbol])
+    const { error: err } = await recordEvent(activeProfile?.id, {
+      kind: 'dividend', asset_class: 'stock',
+      date: ev.payDate, currency: c.divCcy, fx_rate_czk: c.divCcy === 'CZK' ? 1 : c.divRate!,
+      symbol: ev.symbol, ex_date: ev.exDate,
+      amount_per_share: ev.amountPerShare, shares_held: ev.sharesAtEx,
+      gross: c.grossNative, tax: c.whtNative,
+      drip_shares: c.reinvestShares, drip_price: c.dripPriceHoldingCcy,
+      drip_fx_rate_czk: c.holdingRate,
+      notes: `DRIP: ${c.netCZK.toFixed(2)} CZK → +${c.reinvestShares.toFixed(4)} sh @ ${c.reinvestPrice.toFixed(2)} ${c.priceCcy}`,
+    })
     setApplying(null)
+    if (err) { setError(`${ev.symbol}: ${err}`); return }
+    setDone(d => [...d, key(ev)])
     onSaved()
   }
 
-  const pendingEvents = events.filter(e => !e.alreadyLogged && !done.includes(e.symbol))
+  const setEdit = (ev: DripEvent, patch: Partial<EditState>) =>
+    setEdits(e => ({ ...e, [key(ev)]: { ...e[key(ev)], ...patch } }))
 
-  const fmt2 = (n: number) => n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-  const fmt4 = (n: number) => n.toLocaleString('en-US', { minimumFractionDigits: 4, maximumFractionDigits: 4 })
-  const fmtCZK = (n: number) => `Kč\u202f${n.toLocaleString('cs-CZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+  const pendingEvents = events.filter(e => !e.alreadyLogged && !done.includes(key(e)))
+  const cell = { textAlign: 'right' as const, fontFamily: "'DM Mono', monospace" }
 
   return (
-    <Modal title="Check dividends" subtitle="Recent payments · auto-reinvest (DRIP)" onClose={onClose} width={580}>
+    <Modal title="Check dividends" subtitle="Recent payments · reinvest (DRIP)" onClose={onClose} width={600}>
       {!checked ? (
         <div style={{ textAlign: 'center', padding: '20px 0' }}>
           <div style={{ fontSize: 13, color: 'var(--text2)', marginBottom: 8 }}>
-            Checks dividend data for your{' '}
-            <strong>{divPayers.length} dividend-paying holdings</strong>.
+            Checks your <strong>{divPayers.length} dividend-paying holdings</strong> for payments in the last 90 days that are not logged yet.
           </div>
-          <div style={{ fontSize: 11, color: 'var(--text3)', marginBottom: 6 }}>
-            Looks back 90 days for confirmed payments not yet logged.
+          <div style={{ fontSize: 11, color: 'var(--text3)', marginBottom: 20, lineHeight: 1.6 }}>
+            Shares are counted as of the ex-date, money is converted at the pay-date rate,
+            and withholding defaults to the issuer country&apos;s treaty rate — every figure is editable before you apply.
           </div>
-          <div style={{ fontSize: 11, color: 'var(--text3)', marginBottom: 20 }}>
-            Reinvestment is calculated in <strong>CZK</strong> using live prices — matching IBKR&rsquo;s behaviour.
-          </div>
-          {error && (
-            <div style={{ fontSize: 12, color: 'var(--red)', marginBottom: 16,
-              background: 'var(--red-bg)', border: '1px solid var(--red-bd)',
-              borderRadius: 6, padding: '8px 12px' }}>
-              {error}
-            </div>
-          )}
+          <ErrorBox msg={error} />
           <button
+            type="button"
             onClick={checkDividends}
             disabled={loading}
             style={{
               padding: '10px 24px', borderRadius: 8,
               background: 'var(--green-bg)', border: '1px solid var(--green-bd)',
               color: 'var(--green)', fontSize: 13, fontWeight: 500,
-              cursor: loading ? 'not-allowed' : 'pointer',
-              opacity: loading ? 0.7 : 1,
+              cursor: loading ? 'not-allowed' : 'pointer', opacity: loading ? 0.7 : 1,
             }}
           >
             {loading ? '⟳ Checking…' : '⟳ Check now'}
@@ -274,17 +244,11 @@ export default function DripCheckModal({
         </div>
       ) : (
         <div>
-          {error && (
-            <div style={{ color: 'var(--red)', fontSize: 12, marginBottom: 12,
-              background: 'var(--red-bg)', border: '1px solid var(--red-bd)',
-              borderRadius: 6, padding: '8px 12px' }}>
-              {error}
-            </div>
-          )}
+          <ErrorBox msg={error} />
 
           {events.length === 0 && !error && (
             <div style={{ padding: '20px 0', textAlign: 'center', color: 'var(--text3)', fontSize: 12 }}>
-              No recent confirmed dividends found in the last 90 days.
+              No confirmed dividends found in the last 90 days.
             </div>
           )}
 
@@ -293,110 +257,115 @@ export default function DripCheckModal({
               <div style={{ fontSize: 11, color: 'var(--green)', fontWeight: 500, marginBottom: 10 }}>
                 {pendingEvents.length} payment{pendingEvents.length > 1 ? 's' : ''} ready to log
               </div>
-              {pendingEvents.map(ev => (
-                <div key={ev.symbol} style={{
-                  border: '1px solid var(--green-bd)', borderRadius: 8,
-                  padding: '14px 16px', marginBottom: 10, background: 'var(--green-bg)',
-                }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 10 }}>
-                    <div>
-                      <span style={{ fontWeight: 600, fontSize: 14 }}>{ev.symbol}</span>
-                      <span style={{ fontSize: 11, color: 'var(--text3)', marginLeft: 8 }}>
-                        paid {fmtISODate(ev.payDate)} · ex ~{fmtISODate(ev.exDate)}
+              {pendingEvents.map(ev => {
+                const c = compute(ev)
+                const ed = edits[key(ev)]
+                return (
+                  <div key={key(ev)} style={{
+                    border: '1px solid var(--green-bd)', borderRadius: 8,
+                    padding: '14px 16px', marginBottom: 10, background: 'var(--green-bg)',
+                  }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 10, gap: 8, flexWrap: 'wrap' }}>
+                      <div>
+                        <span style={{ fontWeight: 600, fontSize: 14 }}>{ev.symbol}</span>
+                        <span style={{ fontSize: 11, color: 'var(--text3)', marginLeft: 8 }}>
+                          paid {fmtISODate(ev.payDate)} · ex {fmtISODate(ev.exDate)}
+                        </span>
+                      </div>
+                      <span className="num" style={{ fontWeight: 500, color: 'var(--green)', fontSize: 13 }}>
+                        {fmtNum(ev.amountPerShare, 4)} {ed?.currency || '?'}/share
                       </span>
                     </div>
-                    <span style={{ fontWeight: 500, color: 'var(--green)', fontSize: 13 }}>
-                      {fmt2(ev.amountPerShare)} {ev.currency}/share
-                    </span>
+
+                    {!ev.currency && (
+                      <Notice>
+                        The data provider did not report this dividend&apos;s currency. Choose it:{' '}
+                        <select aria-label={`Dividend currency for ${ev.symbol}`} style={{ ...inputStyle, width: 90, display: 'inline-block', padding: '2px 6px' }}
+                          value={ed?.currency ?? ''} onChange={e => setEdit(ev, { currency: e.target.value })}>
+                          <option value="">—</option>
+                          {['USD', 'EUR', 'CZK', 'GBP', 'CHF'].map(x => <option key={x}>{x}</option>)}
+                        </select>
+                      </Notice>
+                    )}
+                    {ev.sharesAfterEx > 0 && (
+                      <Notice tone="gray">
+                        {fmtNum(ev.sharesAfterEx, 4)} shares bought after the ex-date are excluded.
+                      </Notice>
+                    )}
+
+                    <div style={{
+                      background: 'rgba(0,0,0,0.03)', borderRadius: 6, padding: '10px 12px', marginBottom: 10,
+                      display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px 16px', fontSize: 11, color: 'var(--text2)',
+                      alignItems: 'center',
+                    }}>
+                      <div>Shares at ex-date</div>
+                      <div style={cell}>{fmtNum(ev.sharesAtEx, 4)}</div>
+
+                      <div>Gross dividend</div>
+                      <div style={cell}>{c?.ok ? `${fmtNum(c.grossNative, 2)} ${c.divCcy}` : '—'}</div>
+
+                      <label htmlFor={`wht-${key(ev)}`}>Withholding % <span style={{ color: 'var(--text3)' }}>({ev.whtBasis})</span></label>
+                      <div><NumberInput id={`wht-${key(ev)}`} value={ed?.wht ?? ''} onChange={v => setEdit(ev, { wht: v })} suffix="%" /></div>
+
+                      <div style={{ borderTop: '1px solid var(--border)', paddingTop: 4, fontWeight: 600 }}>Net reinvested</div>
+                      <div style={{ ...cell, borderTop: '1px solid var(--border)', paddingTop: 4, fontWeight: 600, color: 'var(--green)' }}>
+                        {c?.ok ? fmtCZK2(c.netCZK) : '—'}
+                        {c?.ok && c.divCcy !== 'CZK' && <span style={{ color: 'var(--text3)', fontWeight: 400, marginLeft: 6 }}>@ {fmtNum(c.divRate!, 4)} on pay date</span>}
+                      </div>
+
+                      <label htmlFor={`px-${key(ev)}`}>Reinvest price <span style={{ color: 'var(--text3)' }}>(today&apos;s quote — use your fill)</span></label>
+                      <div><NumberInput id={`px-${key(ev)}`} value={ed?.price ?? ''} onChange={v => setEdit(ev, { price: v })} suffix={c?.ok ? c.priceCcy : undefined} /></div>
+
+                      <div style={{ fontWeight: 600 }}>New shares</div>
+                      <div style={{ ...cell, fontWeight: 600, color: 'var(--green)' }}>
+                        {c?.ok ? `+${fmtNum(c.reinvestShares, 4)}` : '—'}
+                      </div>
+                    </div>
+
+                    {c && !c.ok && (
+                      <div style={{ fontSize: 11, color: 'var(--amber)', marginBottom: 8 }}>
+                        {c.divRate == null || c.holdingRate == null
+                          ? 'No ECB rate for the pay date — cannot convert without guessing.'
+                          : 'Check the currency, withholding and price above.'}
+                      </div>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={() => applyDrip(ev)}
+                      disabled={applying === key(ev) || !c?.ok}
+                      style={{
+                        padding: '7px 16px', borderRadius: 6, background: 'var(--green)', border: 'none',
+                        color: '#fff', fontSize: 12, fontWeight: 500,
+                        cursor: applying === key(ev) || !c?.ok ? 'not-allowed' : 'pointer',
+                        opacity: applying === key(ev) || !c?.ok ? 0.6 : 1,
+                      }}
+                    >
+                      {applying === key(ev) ? 'Applying…' : 'Log & reinvest →'}
+                    </button>
                   </div>
-
-                  {/* Calculation breakdown — matches broker statement */}
-                  <div style={{
-                    background: 'rgba(0,0,0,0.03)', borderRadius: 6,
-                    padding: '10px 12px', marginBottom: 10,
-                    display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '5px 16px',
-                    fontSize: 11, color: 'var(--text2)',
-                  }}>
-                    <div>Shares held</div>
-                    <div style={{ textAlign: 'right', fontFamily: "'DM Mono', monospace" }}>{fmt4(ev.sharesHeld)}</div>
-
-                    <div>Gross dividend</div>
-                    <div style={{ textAlign: 'right', fontFamily: "'DM Mono', monospace" }}>
-                      {fmt2(ev.grossNative)} {ev.currency}
-                      <span style={{ color: 'var(--text3)', marginLeft: 6 }}>({fmtCZK(ev.grossCZK)})</span>
-                    </div>
-
-                    <div>WHT {(WHT_RATE * 100).toFixed(0)}%</div>
-                    <div style={{ textAlign: 'right', fontFamily: "'DM Mono', monospace", color: 'var(--red)' }}>
-                      −{fmt2(ev.whtNative)} {ev.currency}
-                      <span style={{ color: 'var(--text3)', marginLeft: 6 }}>(−{fmtCZK(ev.whtCZK)})</span>
-                    </div>
-
-                    <div style={{ borderTop: '1px solid var(--border)', paddingTop: 4, fontWeight: 600 }}>Net reinvested</div>
-                    <div style={{ borderTop: '1px solid var(--border)', paddingTop: 4, textAlign: 'right', fontFamily: "'DM Mono', monospace", fontWeight: 600, color: 'var(--green)' }}>
-                      {fmtCZK(ev.netCZK)}
-                    </div>
-
-                    <div style={{ color: 'var(--text3)' }}>Reinvest price</div>
-                    <div style={{ textAlign: 'right', fontFamily: "'DM Mono', monospace", color: 'var(--text3)' }}>
-                      {fmt2(ev.reinvestPriceNative)} {ev.currency}
-                      <span style={{ marginLeft: 6 }}>({fmtCZK(ev.reinvestPriceCZK)})</span>
-                    </div>
-
-                    <div style={{ fontWeight: 600 }}>New shares</div>
-                    <div style={{ textAlign: 'right', fontFamily: "'DM Mono', monospace", fontWeight: 600, color: 'var(--green)' }}>
-                      +{fmt4(ev.reinvestShares)} shares
-                    </div>
-                  </div>
-
-                  <div style={{ fontSize: 10, color: 'var(--text3)', marginBottom: 10 }}>
-                    = {fmtCZK(ev.netCZK)} ÷ {fmtCZK(ev.reinvestPriceCZK)} per share
-                    {market.state !== 'done' && ' · using avg price as fallback (refresh prices for live rate)'}
-                  </div>
-
-                  <button
-                    onClick={() => applyDrip(ev)}
-                    disabled={applying === ev.symbol}
-                    style={{
-                      padding: '7px 16px', borderRadius: 6,
-                      background: 'var(--green)', border: 'none',
-                      color: '#fff', fontSize: 12, fontWeight: 500,
-                      cursor: applying === ev.symbol ? 'not-allowed' : 'pointer',
-                      opacity: applying === ev.symbol ? 0.7 : 1,
-                    }}
-                  >
-                    {applying === ev.symbol ? 'Applying…' : 'Apply DRIP →'}
-                  </button>
-                </div>
-              ))}
+                )
+              })}
             </div>
           )}
 
-          {events.filter(e => e.alreadyLogged || done.includes(e.symbol)).map(ev => (
-            <div key={ev.symbol} style={{
+          {events.filter(e => e.alreadyLogged || done.includes(key(e))).map(ev => (
+            <div key={key(ev)} style={{
               border: '1px solid var(--border)', borderRadius: 8, padding: '10px 14px', marginBottom: 8,
-              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-              fontSize: 12, color: 'var(--text3)',
+              display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 12, color: 'var(--text3)',
             }}>
-              <span>{ev.symbol} · {fmtISODate(ev.payDate)} · {fmt2(ev.amountPerShare)} {ev.currency}/share</span>
-              <span style={{ color: 'var(--green)' }}>
-                {done.includes(ev.symbol) ? '✓ Applied' : '✓ Already logged'}
-              </span>
+              <span>{ev.symbol} · {fmtISODate(ev.payDate)} · {fmtNum(ev.amountPerShare, 4)}/share</span>
+              <span style={{ color: 'var(--green)' }}>{done.includes(key(ev)) ? '✓ Applied' : '✓ Already logged'}</span>
             </div>
           ))}
 
           <div style={{ marginTop: 16, display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-            <button
+            <button type="button"
               onClick={() => { setChecked(false); setEvents([]); setDone([]); setError('') }}
-              style={{
-                padding: '7px 14px', borderRadius: 6,
-                border: '1px solid var(--border2)', background: 'var(--bg)',
-                color: 'var(--text2)', fontSize: 12, cursor: 'pointer',
-              }}
+              style={{ padding: '7px 14px', borderRadius: 6, border: '1px solid var(--border2)', background: 'var(--bg)', color: 'var(--text2)', fontSize: 12, cursor: 'pointer' }}
             >Check again</button>
-            <button onClick={onClose} style={{
-              padding: '7px 14px', borderRadius: 6,
-              border: '1px solid var(--green-bd)', background: 'var(--green-bg)',
+            <button type="button" onClick={onClose} style={{
+              padding: '7px 14px', borderRadius: 6, border: '1px solid var(--green-bd)', background: 'var(--green-bg)',
               color: 'var(--green)', fontSize: 12, cursor: 'pointer',
             }}>Done</button>
           </div>

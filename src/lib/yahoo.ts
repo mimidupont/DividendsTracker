@@ -1,5 +1,8 @@
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 
+/** Every outbound call is bounded: one hung scrape used to stall a whole batch. */
+const FETCH_TIMEOUT_MS = 8000
+
 export const YAHOO_SYMBOL_MAP: Record<string, string> = {
   SPY5:  'SPY5.L',
   SPYW:  'SPYW.DE',
@@ -47,6 +50,7 @@ export async function getYahooSession(force = false): Promise<YahooSession | nul
 async function createYahooSession(): Promise<YahooSession | null> {
   try {
     const homeRes = await fetch('https://finance.yahoo.com/quote/AAPL/', {
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
       headers: { 'User-Agent': UA, Accept: 'text/html' },
       redirect: 'follow',
     })
@@ -57,6 +61,7 @@ async function createYahooSession(): Promise<YahooSession | null> {
     const cookie = setCookies.map(c => c.split(';')[0].trim()).filter(c => c.includes('=')).join('; ')
 
     const crumbRes = await fetch('https://query2.finance.yahoo.com/v1/test/getcrumb', {
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
       headers: { 'User-Agent': UA, Cookie: cookie },
     })
     if (!crumbRes.ok) return null
@@ -79,6 +84,7 @@ export async function fetchYahooQuoteSummary(
     `?modules=${modules}&crumb=${encodeURIComponent(crumb)}`
 
   const res = await fetch(url, {
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     headers: { 'User-Agent': UA, Accept: 'application/json', Cookie: cookie },
     next: { revalidate: 0 },
   })

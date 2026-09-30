@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import {
   toCZK, normalizeMoney, normalizeCurrencyCode, fxRate, hasFxRate,
-  DEFAULT_FX, MINOR_UNITS, fmtPct, fmtDate, fmtDateShort,
+  DEFAULT_FX, MINOR_UNITS, fmtPct, fmtDate, fmtDateShort, fmtCZK, fmtNum, fmtSignedCZK,
 } from './fx'
 
 const fx = { CZK: 1, USD: 23, EUR: 25, GBP: 29 }
@@ -63,6 +63,17 @@ describe('formatters refuse to render junk as data', () => {
     expect(fmtPct(NaN)).toBe('—')
     expect(fmtPct(0)).toBe('+0.00%')
     expect(fmtPct(-1.5)).toBe('-1.50%')
+  })
+  it('shows an em dash for a non-finite amount rather than "Kč 0"', () => {
+    expect(fmtCZK(NaN)).toBe('—')
+    expect(fmtCZK(null)).toBe('—')
+    expect(fmtNum(Infinity)).toBe('—')
+    expect(fmtSignedCZK(undefined)).toBe('—')
+  })
+  it('signs gains and losses explicitly, with a true minus', () => {
+    expect(fmtSignedCZK(1500)).toMatch(/^\+Kč 1\s500$/)
+    expect(fmtSignedCZK(-1500)).toMatch(/^\u2212Kč 1\s500$/)
+    expect(fmtSignedCZK(0)).toBe('Kč 0')
   })
   it('shows an em dash for an unparseable date', () => {
     expect(fmtDate('not-a-date')).toBe('—')

@@ -13,6 +13,7 @@ export const tdR: React.CSSProperties = {
 export const tdRMono: React.CSSProperties = {
   ...tdR,
   fontFamily: "'DM Mono', monospace",
+  fontVariantNumeric: 'tabular-nums',
 }
 
 export const tdL: React.CSSProperties = {
@@ -40,13 +41,14 @@ export const tableHeaderLabel: React.CSSProperties = {
 }
 
 export const th: React.CSSProperties = {
-  fontSize: 9,
+  fontSize: 10,
   letterSpacing: '0.09em',
   textTransform: 'uppercase',
-  color: 'var(--text4)',
+  color: 'var(--text3)',
   padding: '8px 14px',
   borderBottom: '1px solid var(--border)',
-  fontWeight: 400,
+  fontWeight: 500,
+  whiteSpace: 'nowrap',
 }
 
 // ─── Cards ────────────────────────────────────────────────────────────────────
@@ -59,7 +61,7 @@ export const cardStyle: React.CSSProperties = {
 }
 
 export const cardLabelStyle: React.CSSProperties = {
-  fontSize: 9,
+  fontSize: 10,
   letterSpacing: '0.12em',
   textTransform: 'uppercase',
   color: 'var(--text3)',
@@ -78,7 +80,6 @@ export const inputStyle: React.CSSProperties = {
   color: 'var(--text)',
   fontFamily: "'Inter', sans-serif",
   fontSize: 13,
-  outline: 'none',
   boxSizing: 'border-box',
 }
 
@@ -98,12 +99,12 @@ export function btnStyle(variant: 'primary' | 'secondary'): React.CSSProperties 
   if (variant === 'primary') return {
     padding: '7px 15px', borderRadius: 6, cursor: 'pointer',
     background: 'var(--green-bg)', border: '1px solid var(--green-bd)',
-    color: 'var(--green)', fontFamily: "'Geist', sans-serif", fontSize: 12, fontWeight: 500,
+    color: 'var(--green)', fontFamily: "'Inter', sans-serif", fontSize: 12, fontWeight: 500,
   }
   return {
     padding: '7px 15px', borderRadius: 6, cursor: 'pointer',
     background: 'var(--bg2)', border: '1px solid var(--border2)',
-    color: 'var(--text2)', fontFamily: "'Geist', sans-serif", fontSize: 12,
+    color: 'var(--text2)', fontFamily: "'Inter', sans-serif", fontSize: 12,
   }
 }
 
@@ -130,10 +131,21 @@ export const actionBtn: React.CSSProperties = {
   cursor: 'pointer',
   color: 'var(--text3)',
   fontSize: 12,
-  width: 24,
-  height: 24,
+  width: 28,
+  height: 28,
   display: 'inline-flex',
   alignItems: 'center',
   justifyContent: 'center',
   padding: 0,
+}
+
+// ─── Signed values ────────────────────────────────────────────────────────────
+
+/** Colour for a signed value; neutral when zero or unknown. Always pair with a sign. */
+export const signColor = (n: number | null | undefined): string =>
+  n == null || !isFinite(n) || n === 0 ? 'var(--text3)' : n > 0 ? 'var(--green)' : 'var(--red)'
+
+/** Heading style shared by every page title. */
+export const pageTitle: React.CSSProperties = {
+  fontFamily: "'Instrument Serif', serif", fontSize: 26, fontWeight: 400, letterSpacing: -0.5,
 }

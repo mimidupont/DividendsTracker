@@ -129,3 +129,38 @@ describe('indexTo100', () => {
     expect(out[1].value).toBeCloseTo(150, 9)
   })
 })
+
+import { periodPL } from './returns'
+
+describe('periodPL', () => {
+  it('does not count a deposit as profit', () => {
+    const base = { date: '2026-01-01', value: 1_000_000 }
+    const r = periodPL(
+      [base, { date: '2026-01-31', value: 1_050_000 }],
+      base,
+      [{ date: '2026-01-21', amountCZK: 50_000 }]
+    )!
+    expect(r.changeCZK).toBe(50_000)
+    expect(r.pl).toBeCloseTo(0, 9)
+    expect(r.plPct!).toBeCloseTo(0, 9)
+  })
+
+  it('equals the simple change when nothing was paid in', () => {
+    const base = { date: '2026-01-01', value: 1_000_000 }
+    const r = periodPL([base, { date: '2026-01-31', value: 1_100_000 }], base, [])!
+    expect(r.pl).toBe(100_000)
+    expect(r.plPct!).toBeCloseTo(10, 9)
+  })
+})
+
+import { twrIndex } from './returns'
+
+describe('twrIndex', () => {
+  it('stays flat when value rises only by a deposit', () => {
+    const idx = twrIndex(
+      [{ date: '2026-01-01', value: 100 }, { date: '2026-02-01', value: 200 }, { date: '2026-03-01', value: 220 }],
+      [{ date: '2026-02-01', amountCZK: 100 }],
+    )
+    expect(idx.map(p => Math.round(p.value * 100) / 100)).toEqual([100, 100, 110])
+  })
+})

@@ -10,6 +10,9 @@
  *   /etf/{slug}/     — ETFs (US-listed and UCITS)
  */
 
+/** Every outbound call is bounded: one hung scrape used to stall a whole batch. */
+const FETCH_TIMEOUT_MS = 8000
+
 const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 
@@ -147,6 +150,7 @@ export async function fetchSAQuote(symbol: string): Promise<SAQuote | null> {
 
   try {
     const res = await fetch(url, {
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
       headers: {
         'User-Agent': UA,
         'Accept': 'text/html,application/xhtml+xml',

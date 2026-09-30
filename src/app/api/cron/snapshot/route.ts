@@ -2,7 +2,10 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { getYahooSession, toYahoo, fetchYahooQuoteSummary, batchedMap } from '@/lib/yahoo'
 import { batchFetchSAQuotes } from '@/lib/stockanalysis'
-import { toCZK, normalizeMoney, DEFAULT_FX } from '@/lib/fx'
+import { DEFAULT_FX } from '@/lib/fx'
+import { todayInZone } from '@/lib/date'
+import { buildPositions, type QuoteSource, type CryptoPriceSource } from '@/lib/portfolio'
+import { snapshotValues, snapshotBlockers } from '@/lib/snapshot'
 
 /**
  * Daily portfolio snapshot, written server-side.
@@ -31,28 +34,10 @@ const supabase = createClient(
   supabaseAnonKey ?? 'missing-anon-key'
 )
 
-/**
- * Calendar date in the portfolio's own timezone.
- *
- * The browser writes a snapshot stamped with the *user's* date; this route runs
- * on a UTC server. Using UTC here means the two writers disagree about which
- * day it is for several hours every night, and the first time the schedule
- * moves past midnight UTC they would write two rows for one local day.
- *
- * Set SNAPSHOT_TIMEZONE to an IANA name if the portfolio is not kept in Prague.
- */
-const SNAPSHOT_TZ = process.env.SNAPSHOT_TIMEZONE || 'Europe/Prague'
-
-function todayInZone(tz = SNAPSHOT_TZ): string {
-  try {
-    // en-CA renders as YYYY-MM-DD, which is the format the column wants.
-    return new Intl.DateTimeFormat('en-CA', {
-      timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
-    }).format(new Date())
-  } catch {
-    return new Date().toISOString().slice(0, 10)
-  }
-}
+/** Per-profile time budget; one slow provider must not eat the whole 60 s run. */
+const PROFILE_BUDGET_MS = 20_000
+/** Stop starting new profiles once this much of maxDuration has gone. */
+const RUN_DEADLINE_MS = 50_000
 
 // ─── Market data, server-side ─────────────────────────────────────────────────
 
@@ -93,7 +78,9 @@ async function fetchQuotes(symbols: string[]): Promise<Record<string, Quote>> {
 
 async function fetchFx(): Promise<Record<string, number>> {
   try {
-    const res = await fetch('https://api.frankfurter.app/latest?from=CZK')
+    const res = await fetch('https://api.frankfurter.app/latest?from=CZK', {
+      signal: AbortSignal.timeout(8000),
+    })
     if (!res.ok) throw new Error(`Frankfurter ${res.status}`)
     const data = await res.json()
     const rates: Record<string, number> = { CZK: 1 }
@@ -114,7 +101,8 @@ async function fetchCryptoPrices(coinIds: string[]): Promise<Record<string, numb
   try {
     const ids = coinIds.map(encodeURIComponent).join(',')
     const res = await fetch(
-      `https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd`)
+      `https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd`,
+      { signal: AbortSignal.timeout(8000) })
     if (!res.ok) throw new Error(`CoinGecko ${res.status}`)
     const data = await res.json()
     const out: Record<string, number> = {}
@@ -165,114 +153,105 @@ export async function GET(req: NextRequest) {
 
   const today = todayInZone()
   const results: Record<string, unknown> = {}
+  const started = Date.now()
 
   for (const profile of profiles ?? []) {
+    if (Date.now() - started > RUN_DEADLINE_MS) {
+      results[profile.id] = { skipped: 'run deadline reached — will be picked up next run' }
+      continue
+    }
     try {
-      const [h, b, c, r] = await Promise.all([
-        supabase.from('holdings').select('*').eq('profile_id', profile.id),
-        supabase.from('bank_accounts').select('*').eq('profile_id', profile.id).eq('is_active', true),
-        supabase.from('crypto_holdings').select('*').eq('profile_id', profile.id),
-        supabase.from('real_estate').select('*').eq('profile_id', profile.id),
-      ])
-
-      const holdings = h.data ?? []
-      const accounts = b.data ?? []
-      const crypto = c.data ?? []
-      const property = r.data ?? []
-
-      if (holdings.length + accounts.length + crypto.length + property.length === 0) {
-        results[profile.id] = { skipped: 'no positions' }
-        continue
-      }
-
-      const quotes = await fetchQuotes(holdings.map(x => x.symbol))
-      const coinPrices = await fetchCryptoPrices(crypto.map(x => x.coin_id))
-
-      // ── Value each class, mirroring lib/portfolio exactly ──
-      let stocksCZK = 0
-      let usdLocal = 0
-      let eurLocal = 0
-      let czkLocal = 0
-      let otherCZK = 0
-
-      // Exposure is tracked in the quote's own units, with minor units (GBp, ZAc,
-      // ILA) folded into their major currency first. normalizeMoney does that
-      // fold and hands back the major-unit code, so toCZK below is given an
-      // already-normalized pair and never divides by 100 a second time.
-      const addExposure = (rawAmount: number, rawCurrency: string) => {
-        const { amount, ccy } = normalizeMoney(rawAmount, rawCurrency)
-        switch (ccy) {
-          case 'USD': usdLocal += amount; break
-          case 'EUR': eurLocal += amount; break
-          case 'CZK': czkLocal += amount; break
-          default: otherCZK += toCZK(amount, ccy, fx); break
-        }
-      }
-
-      for (const holding of holdings) {
-        const quote = quotes[holding.symbol]
-        const price = quote?.price ?? holding.avg_price
-        const currency = quote?.currency || holding.currency
-        const local = price * holding.shares
-        stocksCZK += toCZK(local, currency, fx)
-        addExposure(local, currency)
-      }
-
-      let cashCZK = 0
-      for (const account of accounts) {
-        cashCZK += toCZK(account.balance, account.currency, fx)
-        addExposure(account.balance, account.currency)
-      }
-
-      let cryptoCZK = 0
-      for (const coin of crypto) {
-        const priceUSD = coinPrices[coin.coin_id] ?? coin.avg_cost_usd
-        const local = priceUSD * coin.amount
-        cryptoCZK += toCZK(local, 'USD', fx)
-        addExposure(local, 'USD')
-      }
-
-      let realestateCZK = 0
-      for (const p of property) {
-        const share = (isFinite(p.ownership_pct) ? Math.min(Math.max(p.ownership_pct, 0), 100) : 100) / 100
-        const equityLocal = p.current_value * share - p.mortgage_balance * share
-        realestateCZK += toCZK(equityLocal, p.currency, fx)
-        addExposure(equityLocal, p.currency)
-      }
-
-      const total = stocksCZK + cashCZK + cryptoCZK + realestateCZK
-      if (!isFinite(total) || total <= 0) {
-        results[profile.id] = { skipped: 'non-positive total' }
-        continue
-      }
-
-      const { error } = await supabase.from('portfolio_snapshots').upsert({
-        profile_id: profile.id,
-        snapshot_date: today,
-        total_value_czk: total,
-        stocks_czk: stocksCZK,
-        cash_czk: cashCZK,
-        crypto_czk: cryptoCZK,
-        realestate_czk: realestateCZK,
-        fx_usd: fx.USD ?? null,
-        fx_eur: fx.EUR ?? null,
-        fx_gbp: fx.GBP ?? null,
-        exposure_usd_local: usdLocal,
-        exposure_eur_local: eurLocal,
-        exposure_czk_local: czkLocal,
-        exposure_other_czk: otherCZK,
-      }, { onConflict: 'profile_id,snapshot_date' })
-
-      results[profile.id] = error
-        ? { error: error.message }
-        : {
-            ok: true, total: Math.round(total),
-            priced: Object.keys(quotes).length, of: holdings.length,
-          }
+      results[profile.id] = await withTimeout(
+        snapshotProfile(profile.id, fx, today), PROFILE_BUDGET_MS)
     } catch (e) {
       results[profile.id] = { error: String(e) }
     }
   }
 
   return NextResponse.json({ date: today, profiles: results })
+}
+
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`timed out after ${ms} ms`)), ms)),
+  ])
+}
+
+/** Missing-table errors (a migration not run yet) are treated as "no rows". */
+const rowsOrEmpty = <T,>(res: { data: T[] | null; error: { code?: string; message?: string } | null }): T[] => {
+  if (!res.error) return res.data ?? []
+  const code = res.error.code
+  if (code === '42P01' || code === 'PGRST205') return []
+  throw new Error(res.error.message)
+}
+
+async function snapshotProfile(
+  profileId: string, fx: Record<string, number>, today: string
+): Promise<Record<string, unknown>> {
+  const [h, b, c, r, bonds, meta] = await Promise.all([
+    supabase.from('holdings').select('*').eq('profile_id', profileId),
+    supabase.from('bank_accounts').select('*').eq('profile_id', profileId).eq('is_active', true),
+    supabase.from('crypto_holdings').select('*').eq('profile_id', profileId),
+    supabase.from('real_estate').select('*').eq('profile_id', profileId),
+    supabase.from('bond_holdings').select('*').eq('profile_id', profileId).eq('is_active', true),
+    supabase.from('asset_metadata').select('*').eq('profile_id', profileId),
+  ])
+
+  const holdings = rowsOrEmpty(h)
+  const accounts = rowsOrEmpty(b)
+  const crypto = rowsOrEmpty(c)
+  const property = rowsOrEmpty(r)
+  const bondRows = rowsOrEmpty(bonds)
+  const metadata = rowsOrEmpty(meta)
+
+  if (holdings.length + accounts.length + crypto.length + property.length + bondRows.length === 0) {
+    return { skipped: 'no positions' }
+  }
+
+  const quotes = await fetchQuotes(holdings.map(x => x.symbol))
+  const coinPrices = await fetchCryptoPrices(crypto.map(x => x.coin_id))
+
+  // The same position model the dashboard uses — the two writers used to have
+  // their own valuation loops and could disagree about the same day.
+  const market: QuoteSource = {
+    getPrice: (s, fallback) => quotes[s]?.price ?? fallback,
+    getQuoteCurrency: (s, fallback) => quotes[s]?.currency || fallback,
+    getAnnualDiv: () => null,
+    hasPrice: s => (quotes[s]?.price ?? 0) > 0,
+    quotes: {},
+  }
+  const cryptoSource: CryptoPriceSource = {
+    getPrice: (id, fallback) => coinPrices[id] ?? fallback,
+    hasPrice: id => (coinPrices[id] ?? 0) > 0,
+  }
+  const positions = buildPositions({
+    holdings, bankAccounts: accounts, cryptoHoldings: crypto, realEstate: property,
+    bondHoldings: bondRows, assetMetadata: metadata,
+  }, fx, market, cryptoSource, today)
+
+  // A provider outage must not overwrite today's good browser snapshot with
+  // positions valued at cost.
+  const missing = snapshotBlockers(positions)
+  if (missing.length > 0) {
+    return { skipped: 'incomplete prices', missing }
+  }
+
+  const values = snapshotValues(positions, fx)
+  if (!isFinite(values.total_value_czk)) return { skipped: 'non-finite total' }
+
+  const row = { profile_id: profileId, snapshot_date: today, ...values, unpriced_count: 0 }
+  let { error } = await supabase.from('portfolio_snapshots').upsert(row, { onConflict: 'profile_id,snapshot_date' })
+  // Before migrations 010/011 the newer columns do not exist; write what fits.
+  if (error && (error.code === '42703' || error.code === 'PGRST204')) {
+    const { bonds_czk, exposure_gbp_local, unpriced_count, ...legacy } = row
+    void bonds_czk; void exposure_gbp_local; void unpriced_count
+    ;({ error } = await supabase.from('portfolio_snapshots').upsert(
+      { ...legacy, stocks_czk: legacy.stocks_czk + values.bonds_czk },
+      { onConflict: 'profile_id,snapshot_date' }))
+  }
+
+  return error
+    ? { error: error.message }
+    : { ok: true, total: Math.round(values.total_value_czk), priced: Object.keys(quotes).length, of: holdings.length }
 }

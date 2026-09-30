@@ -1,263 +1,202 @@
 'use client'
-import { useEffect, useState } from 'react'
-import { supabase, CryptoHolding } from '@/lib/supabase'
+import { useEffect, useMemo, useState } from 'react'
+import type { CryptoHolding } from '@/lib/supabase'
 import { useAppData } from '@/hooks/useAppData'
 import { useProfile } from '@/lib/profile'
-import Sidebar from '@/components/Sidebar'
-import { toCZK, fmtCZK } from '@/lib/fx'
 import { useFx } from '@/hooks/useFx'
 import { useCryptoPrices } from '@/hooks/useCryptoPrices'
-import { tdR, tdL, actionBtn, btnSecondary, btnPrimary,
-         inputStyle, inputLabel, cardStyle, cardLabelStyle,
-         tableHeader, tableHeaderLabel, th } from '@/lib/ui'
+import { useMarketData } from '@/hooks/useMarketData'
+import { PageShell, PageHeader, LoadingShell, EmptyState, MetricCards, Panel } from '@/components/PageShell'
+import Badge from '@/components/Badge'
+import Modal from '@/components/Modal'
+import RecordModal, { type RecordPreset } from '@/components/RecordModal'
+import DataTable, { type Column } from '@/components/DataTable'
+import { Field, FormGrid, FormActions, ErrorBox, NumberInput, Notice, inputStyle } from '@/components/FormFields'
+import { useUndoableDelete } from '@/components/UndoToast'
+import { fmtCZK, fmtSignedCZK, fmtNum, fmtPct, fmtShare, historicalRate } from '@/lib/fx'
+import { buildPositions, type Position } from '@/lib/portfolio'
+import { updateScoped, deleteScoped } from '@/lib/db'
+import { parseDecimal, parsePercent } from '@/lib/parse'
+import { btnStyle, actionBtn, signColor } from '@/lib/ui'
 
-const emptyForm = {
-  coin_id: '', symbol: '', name: '',
-  amount: '', avg_cost_usd: '',
-  wallet_label: '', staking_apy: '0',
-}
+type Row = { c: CryptoHolding; p: Position; price: number; change: number | null }
 
 export default function CryptoPage() {
-  const { cryptoHoldings: crypto, loading, reload } = useAppData()
+  const app = useAppData()
+  const { cryptoHoldings: coins, loading, reload } = app
   const { activeProfile } = useProfile()
   const { fx, fxLoading, fxTs, refresh: refreshFx } = useFx()
-  const prices      = useCryptoPrices()
-  const [showAdd, setShowAdd] = useState(false)
-  const [editId, setEditId]   = useState<string | null>(null)
-  const [form, setForm]       = useState(emptyForm)
-  const [saving, setSaving]   = useState(false)
+  const prices = useCryptoPrices()
+  const market = useMarketData()
+  const [record, setRecord] = useState<RecordPreset | null>(null)
+  const [editing, setEditing] = useState<CryptoHolding | null>(null)
+  const { schedule, pendingIds, toast } = useUndoableDelete()
 
-  // Fetch from an effect, not during render
-  const coinKey = crypto.map(c => c.coin_id).join(',')
+  const coinKey = coins.map(c => c.coin_id).join(',')
   useEffect(() => {
     if (coinKey) prices.refresh(coinKey.split(','))
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [coinKey])
 
-  const totalValueCZK = crypto.reduce((s, c) =>
-    s + toCZK(prices.getPrice(c.coin_id, c.avg_cost_usd) * c.amount, 'USD', fx), 0)
-  const totalCostCZK = crypto.reduce((s, c) =>
-    s + toCZK(c.avg_cost_usd * c.amount, 'USD', fx), 0)
-  const totalPLCZK = totalValueCZK - totalCostCZK
-  const annualStakingCZK = crypto.reduce((s, c) => {
-    const price = prices.getPrice(c.coin_id, c.avg_cost_usd)
-    return s + toCZK(price * c.amount * c.staking_apy, 'USD', fx)
-  }, 0)
-
-  const resetForm = () => { setForm(emptyForm); setEditId(null) }
-
-  const startEdit = (c: CryptoHolding) => {
-    setForm({
-      coin_id: c.coin_id, symbol: c.symbol, name: c.name,
-      amount: String(c.amount), avg_cost_usd: String(c.avg_cost_usd),
-      wallet_label: c.wallet_label ?? '',
-      staking_apy: String((c.staking_apy * 100).toFixed(2)),
-    })
-    setEditId(c.id)
-    setShowAdd(true)
-  }
-
-  const saveCrypto = async () => {
-    if (!form.coin_id || !form.amount || !form.avg_cost_usd) return
-    if (!activeProfile) return
-    setSaving(true)
-    const payload = {
-      coin_id: form.coin_id.toLowerCase(),
-      symbol: form.symbol.toUpperCase(),
-      name: form.name,
-      amount: parseFloat(form.amount),
-      avg_cost_usd: parseFloat(form.avg_cost_usd),
-      wallet_label: form.wallet_label || null,
-      staking_apy: parseFloat(form.staking_apy) / 100 || 0,
-      updated_at: new Date().toISOString(),
-    }
-    if (editId) {
-      await supabase.from('crypto_holdings').update(payload).eq('id', editId)
-    } else {
-      await supabase.from('crypto_holdings').insert([{ ...payload, profile_id: activeProfile.id }])
-    }
-    setSaving(false)
-    setShowAdd(false)
-    resetForm()
-    reload()
-  }
-
-  if (loading) return (
-    <div style={{ display: 'flex' }}>
-      <Sidebar />
-      <main style={{ marginLeft: 'var(--sidebar-w)', flex: 1, padding: 40, color: 'var(--text3)' }}>Loading…</main>
-    </div>
+  const visible = coins.filter(c => !pendingIds.has(c.id))
+  // Same valuation as everywhere else (and cost at the rate it was paid).
+  const positions = useMemo(
+    () => buildPositions({ ...app, cryptoHoldings: visible, holdings: [], bankAccounts: [], realEstate: [], bondHoldings: [] }, fx, market, prices),
+    [app, visible, fx, market, prices]
   )
+  const rows: Row[] = visible.map(c => ({
+    c, p: positions.find(p => p.id === c.id)!,
+    price: prices.getPrice(c.coin_id, c.avg_cost_usd),
+    change: prices.getChange(c.coin_id),
+  })).filter(r => r.p)
+
+  const value = rows.reduce((s, r) => s + r.p.valueCZK, 0)
+  const cost = rows.reduce((s, r) => s + r.p.costCZK, 0)
+  const pl = value - cost
+  const staking = rows.reduce((s, r) => s + r.p.annualIncomeCZK, 0)
+  const atCost = rows.filter(r => !r.p.isLivePrice)
+  const fxUnknown = rows.filter(r => r.c.avg_fx_czk == null)
+
+  if (loading) return <LoadingShell />
+
+  const columns: Column<Row>[] = [
+    { key: 'name', label: 'Asset', sortValue: r => r.c.name, render: r => <>
+      <div style={{ fontWeight: 500 }}>{r.c.name} <span style={{ color: 'var(--text3)', fontWeight: 400 }}>{r.c.symbol}</span></div>
+      <div style={{ fontSize: 11, color: 'var(--text3)' }}>{r.c.wallet_label ?? r.c.coin_id}</div>
+    </> },
+    { key: 'amount', label: 'Amount', numeric: true, sortValue: r => r.c.amount, render: r => fmtNum(r.c.amount, 6) },
+    { key: 'price', label: 'Price (USD)', numeric: true, sortValue: r => r.price, render: r => <>
+      {fmtNum(r.price, 2)}
+      {!r.p.isLivePrice && <> <Badge variant="amber">at cost</Badge></>}
+      {r.change != null && <div style={{ fontSize: 11, color: signColor(r.change) }}>{fmtPct(r.change)} 24h</div>}
+    </> },
+    { key: 'value', label: 'Value (CZK)', numeric: true, sortValue: r => r.p.valueCZK, render: r => fmtCZK(r.p.valueCZK) },
+    { key: 'cost', label: 'Cost (CZK)', numeric: true, sortValue: r => r.p.costCZK, render: r => <>
+      {fmtCZK(r.p.costCZK)}
+      {r.c.avg_fx_czk == null && <div style={{ fontSize: 10, color: 'var(--text3)' }} title="USD/CZK at purchase unknown — today's rate used">FX ?</div>}
+    </> },
+    { key: 'pl', label: 'P&L', numeric: true, sortValue: r => r.p.valueCZK - r.p.costCZK, render: r => {
+      const v = r.p.valueCZK - r.p.costCZK
+      return <span style={{ color: signColor(v) }}>{fmtSignedCZK(v)}<div style={{ fontSize: 10 }}>{fmtPct(r.p.costCZK > 0 ? (v / r.p.costCZK) * 100 : null, 1)}</div></span>
+    } },
+    { key: 'apy', label: 'Staking', numeric: true, sortValue: r => r.c.staking_apy, render: r => r.c.staking_apy > 0 ? <>
+      {fmtShare(r.c.staking_apy * 100, 2)}<div style={{ fontSize: 10, color: 'var(--text3)' }}>{fmtCZK(r.p.annualIncomeCZK)}/yr</div>
+    </> : '—' },
+    { key: 'actions', label: '', align: 'center', render: r => (
+      <span style={{ whiteSpace: 'nowrap' }}>
+        <button type="button" aria-label={`Buy more ${r.c.symbol}`} title="Buy" onClick={() => setRecord({ kind: 'buy', asset: 'crypto', coinId: r.c.coin_id })} style={actionBtn}>+</button>
+        <button type="button" aria-label={`Sell ${r.c.symbol}`} title="Sell" onClick={() => setRecord({ kind: 'sell', asset: 'crypto', coinId: r.c.coin_id })} style={{ ...actionBtn, marginLeft: 4 }}>−</button>
+        <button type="button" aria-label={`Edit ${r.c.symbol}`} title="Edit" onClick={() => setEditing(r.c)} style={{ ...actionBtn, marginLeft: 4 }}>✎</button>
+        <button type="button" aria-label={`Delete ${r.c.symbol}`} title="Delete (mistake)" onClick={() =>
+          schedule(r.c.id, r.c.symbol, () => deleteScoped('crypto_holdings', r.c.id, activeProfile?.id), reload)}
+          style={{ ...actionBtn, marginLeft: 4, color: 'var(--red)' }}>✕</button>
+      </span>
+    ) },
+  ]
 
   return (
-    <div style={{ display: 'flex' }}>
-      <Sidebar />
-      <main style={{ marginLeft: 'var(--sidebar-w)', flex: 1, padding: '32px 40px', maxWidth: 1100 }}>
+    <PageShell>
+      {toast}
+      {record && <RecordModal preset={record} onClose={() => setRecord(null)} onSaved={reload} />}
+      {editing && <CoinModal coin={editing} onClose={() => setEditing(null)} onSaved={reload} />}
 
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 28 }}>
-          <div>
-            <div style={{ fontSize: 10, letterSpacing: '0.12em', textTransform: 'uppercase', color: 'var(--purple)', marginBottom: 4, fontWeight: 600 }}>Digital Assets</div>
-            <h1 style={{ fontFamily: "'Syne', sans-serif", fontSize: 26, fontWeight: 700, letterSpacing: '-0.02em' }}>Crypto Holdings</h1>
-          </div>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button onClick={refreshFx} style={btnSecondary}>{fxLoading ? '⟳' : '↻'} FX {fxTs && <span style={{ color: 'var(--green)', marginLeft: 4 }}>{fxTs}</span>}</button>
-            <button onClick={() => prices.refresh(crypto.map(c => c.coin_id), true)} disabled={prices.state === 'loading'} style={btnSecondary}>
+      <PageHeader
+        eyebrow="Assets"
+        accent="var(--c-crypto)"
+        title="Crypto"
+        subtitle={<>Priced in USD via CoinGecko, valued in CZK{fxTs && <> · FX {fxTs}</>}</>}
+        actions={<>
+          <button type="button" onClick={refreshFx} disabled={fxLoading} style={btnStyle('secondary')}>{fxLoading ? '⟳ FX…' : '↻ FX'}</button>
+          {coins.length > 0 && (
+            <button type="button" onClick={() => prices.refresh(coins.map(c => c.coin_id), true)} disabled={prices.state === 'loading'} style={btnStyle('secondary')}>
               {prices.state === 'loading' ? '⟳ Fetching…' : '↻ Prices'}
-              {prices.state === 'done'  && <span style={{ color: 'var(--purple)', marginLeft: 6 }}>✓</span>}
-              {prices.state === 'error' && <span style={{ color: 'var(--red)', marginLeft: 6 }}>⚠</span>}
             </button>
-            <button onClick={() => { resetForm(); setShowAdd(true) }} style={btnPrimary('var(--purple)', 'var(--purple-bd)', 'var(--purple-bg)')}>
-              + Add holding
-            </button>
-          </div>
-        </div>
+          )}
+          <button type="button" onClick={() => setRecord({ kind: 'buy', asset: 'crypto' })} style={btnStyle('primary')}>+ Buy</button>
+        </>}
+      />
 
-        {prices.state === 'error' && (
-          <div style={{
-            background: 'var(--amber-bg)', border: '1px solid var(--amber-bd)',
-            color: 'var(--amber)', borderRadius: 8, padding: '9px 14px',
-            marginBottom: 14, fontSize: 11,
-          }}>
-            ⚠ Live crypto prices unavailable — holdings are valued at cost. {prices.errorMsg}
-          </div>
-        )}
+      {prices.state === 'error' && (
+        <Notice>⚠ Live crypto prices unavailable — coins are valued at average cost. {prices.errorMsg}</Notice>
+      )}
 
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 20 }}>
-          {[
-            { label: 'Portfolio value', value: fmtCZK(totalValueCZK), accent: 'var(--purple)', note: `${crypto.length} assets` },
-            { label: 'Unrealized P&L',  value: (totalPLCZK >= 0 ? '+' : '') + fmtCZK(totalPLCZK), accent: totalPLCZK >= 0 ? 'var(--green)' : 'var(--red)', note: `${totalCostCZK > 0 ? ((totalPLCZK / totalCostCZK) * 100).toFixed(1) : 0}% on cost` },
-            { label: 'Annual staking',  value: annualStakingCZK > 0 ? fmtCZK(annualStakingCZK) : '—', accent: 'var(--amber)', note: 'Passive yield' },
-            { label: 'Cost basis',      value: fmtCZK(totalCostCZK), accent: 'var(--text3)', note: 'Total invested' },
-          ].map((m, i) => (
-            <div key={i} style={{ ...cardStyle, borderTop: `2px solid ${m.accent}` }}>
-              <div style={cardLabelStyle}>{m.label}</div>
-              <div style={{ fontFamily: "'Syne', sans-serif", fontSize: 20, fontWeight: 700, letterSpacing: '-0.02em', marginBottom: 4 }}>{m.value}</div>
-              <div style={{ fontSize: 10, color: 'var(--text4)' }}>{m.note}</div>
-            </div>
-          ))}
-        </div>
+      {rows.length === 0 ? (
+        <EmptyState
+          icon="⬡"
+          title="No crypto yet"
+          body="Record a purchase with its date — the USD/CZK rate that day is kept, so your P&L includes the currency effect. You need the CoinGecko id (e.g. bitcoin, ethereum)."
+          action={<button type="button" onClick={() => setRecord({ kind: 'buy', asset: 'crypto' })} style={btnStyle('primary')}>+ Record a purchase</button>}
+        />
+      ) : <>
+        <MetricCards cards={[
+          { label: 'Value', value: fmtCZK(value), accent: 'var(--c-crypto)', note: `${rows.length} assets${atCost.length ? ` · ${atCost.length} at cost` : ''}` },
+          { label: 'Cost', value: fmtCZK(cost), accent: 'var(--border3)', note: fxUnknown.length ? `${fxUnknown.length} without purchase rate` : 'at the rates paid' },
+          { label: 'Unrealised P&L', value: fmtSignedCZK(pl), color: signColor(pl), accent: signColor(pl), note: fmtPct(cost > 0 ? (pl / cost) * 100 : null, 1) },
+          { label: 'Staking a year', value: staking > 0 ? fmtCZK(staking) : '—', accent: 'var(--c-income)', note: 'gross, at today\'s price' },
+        ]} />
+        <Panel title="Holdings" padded={false}>
+          <DataTable caption="Crypto holdings" columns={columns} rows={rows} rowKey={r => r.c.id} initialSort={{ key: 'value', dir: 'desc' }} />
+        </Panel>
+      </>}
+    </PageShell>
+  )
+}
 
-        <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 12, overflow: 'hidden', marginBottom: 16 }}>
-          <div style={tableHeader}><span style={tableHeaderLabel}>Holdings</span></div>
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-            <thead>
-              <tr>
-                {['Asset', 'Amount', 'Avg cost', 'Price', 'Value (CZK)', 'P&L', 'Staking APY', 'Wallet', ''].map((h, i) => (
-                  <th key={h} style={{ ...th, textAlign: i <= 1 ? 'left' : 'right' }}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {crypto.map(c => {
-                const price    = prices.getPrice(c.coin_id, c.avg_cost_usd)
-                const valueCZK = toCZK(price * c.amount, 'USD', fx)
-                const costCZK  = toCZK(c.avg_cost_usd * c.amount, 'USD', fx)
-                const plCZK    = valueCZK - costCZK
-                const plPct    = costCZK > 0 ? (plCZK / costCZK) * 100 : 0
-                const chgPct   = prices.getChange(c.coin_id)
-                return (
-                  <tr key={c.id}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg3)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = '')}
-                  >
-                    <td style={tdL}>
-                      <div style={{ fontWeight: 600, fontSize: 13 }}>{c.name}</div>
-                      <div style={{ fontSize: 10, color: 'var(--purple)', fontFamily: "'DM Mono', monospace" }}>{c.symbol}</div>
-                    </td>
-                    <td style={tdL}>
-                      <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 12 }}>{c.amount.toLocaleString(undefined, { maximumFractionDigits: 8 })}</span>
-                    </td>
-                    <td style={{ ...tdR, fontFamily: "'DM Mono', monospace" }}>${c.avg_cost_usd.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
-                    <td style={tdR}>
-                      <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 12 }}>
-                        {prices.state === 'loading' ? '…' : `$${price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
-                        {prices.state !== 'loading' && !prices.hasPrice(c.coin_id) && (
-                          <span style={{ fontSize: 9, color: 'var(--text4)', marginLeft: 3 }} title="No live price for this CoinGecko id — showing average cost">at cost</span>
-                        )}
-                      </div>
-                      {chgPct !== null && (
-                        <div style={{ fontSize: 10, color: chgPct >= 0 ? 'var(--green)' : 'var(--red)' }}>
-                          {chgPct >= 0 ? '+' : ''}{chgPct.toFixed(2)}%
-                        </div>
-                      )}
-                    </td>
-                    <td style={{ ...tdR, fontFamily: "'DM Mono', monospace", fontWeight: 500 }}>{fmtCZK(valueCZK)}</td>
-                    <td style={{ ...tdR, fontFamily: "'DM Mono', monospace", color: plCZK >= 0 ? 'var(--green)' : 'var(--red)' }}>
-                      {plCZK >= 0 ? '+' : ''}{fmtCZK(plCZK)}
-                      <div style={{ fontSize: 10, opacity: 0.7 }}>{plPct >= 0 ? '+' : ''}{plPct.toFixed(1)}%</div>
-                    </td>
-                    <td style={{ ...tdR, color: c.staking_apy > 0 ? 'var(--amber)' : 'var(--text4)', fontFamily: "'DM Mono', monospace" }}>
-                      {c.staking_apy > 0 ? `${(c.staking_apy * 100).toFixed(1)}%` : '—'}
-                    </td>
-                    <td style={{ ...tdR, fontSize: 11 }}>
-                      {c.wallet_label
-                        ? <span style={{ padding: '2px 8px', borderRadius: 4, background: 'var(--bg4)', color: 'var(--text3)', border: '1px solid var(--border)' }}>{c.wallet_label}</span>
-                        : '—'}
-                    </td>
-                    <td style={{ padding: '9px 14px', borderBottom: '1px solid var(--border)', whiteSpace: 'nowrap' }}>
-                      <button title="Edit holding" onClick={() => startEdit(c)} style={actionBtn}>✎</button>
-                      <button title="Delete holding" onClick={async () => {
-                        if (!confirm(`Delete ${c.name}?`)) return
-                        await supabase.from('crypto_holdings').delete().eq('id', c.id)
-                        reload()
-                      }} style={{ ...actionBtn, marginLeft: 4, color: 'var(--red)' }}>✕</button>
-                    </td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
-        </div>
+/** Corrections and non-trade details (wallet, staking). Buys and sells go through Record. */
+function CoinModal({ coin, onClose, onSaved }: { coin: CryptoHolding; onClose: () => void; onSaved: () => void }) {
+  const { activeProfile } = useProfile()
+  const [form, setForm] = useState({
+    name: coin.name, symbol: coin.symbol, amount: String(coin.amount), avg_cost_usd: String(coin.avg_cost_usd),
+    avg_fx_czk: coin.avg_fx_czk != null ? String(coin.avg_fx_czk) : '',
+    wallet_label: coin.wallet_label ?? '', staking_apy: String(Number((coin.staking_apy * 100).toFixed(3))),
+    purchase_date: coin.purchase_date ?? '',
+  })
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const set = <K extends keyof typeof form>(k: K, v: string) => setForm(f => ({ ...f, [k]: v }))
 
-        {showAdd && (
-          <div style={{ background: 'var(--bg2)', border: '1px solid var(--purple-bd)', borderRadius: 12, padding: '24px 28px' }}>
-            <div style={{ fontFamily: "'Syne', sans-serif", fontSize: 16, fontWeight: 600, marginBottom: 18 }}>
-              {editId ? 'Edit holding' : 'Add crypto holding'}
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
-              <div style={{ gridColumn: '1/-1' }}>
-                <div style={inputLabel}>
-                  CoinGecko ID
-                  {editId && <span style={{ color: 'var(--text4)', marginLeft: 6, fontWeight: 400, textTransform: 'none', letterSpacing: 0 }}>(locked — delete & re-add to change)</span>}
-                </div>
-                <input
-                  style={{ ...inputStyle, opacity: editId ? 0.5 : 1, cursor: editId ? 'not-allowed' : 'text' }}
-                  placeholder="bitcoin"
-                  value={form.coin_id}
-                  readOnly={!!editId}
-                  onChange={e => !editId && setForm(p => ({ ...p, coin_id: e.target.value }))}
-                />
-                {!editId && <div style={{ fontSize: 10, color: 'var(--text4)', marginTop: 3 }}>From coingecko.com/coins/list</div>}
-              </div>
-              {[
-                { label: 'Symbol',          key: 'symbol',        placeholder: 'BTC' },
-                { label: 'Name',            key: 'name',          placeholder: 'Bitcoin' },
-                { label: 'Amount held',     key: 'amount',        placeholder: '0.5',   type: 'number' },
-                { label: 'Avg cost (USD)',   key: 'avg_cost_usd',  placeholder: '45000', type: 'number' },
-                { label: 'Staking APY (%)', key: 'staking_apy',   placeholder: '0',     type: 'number' },
-                { label: 'Wallet / Exchange', key: 'wallet_label', placeholder: 'Ledger, Binance…' },
-              ].map((f: any) => (
-                <div key={f.key}>
-                  <div style={inputLabel}>{f.label}</div>
-                  <input
-                    style={inputStyle}
-                    type={f.type ?? 'text'}
-                    placeholder={f.placeholder}
-                    value={(form as any)[f.key]}
-                    onChange={e => setForm(p => ({ ...p, [f.key]: e.target.value }))}
-                  />
-                </div>
-              ))}
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 18 }}>
-              <button onClick={() => { setShowAdd(false); resetForm() }} style={btnSecondary}>Cancel</button>
-              <button onClick={saveCrypto} disabled={saving} style={btnPrimary('var(--purple)', 'var(--purple-bd)', 'var(--purple-bg)')}>
-                {saving ? 'Saving…' : editId ? 'Save changes' : 'Add holding'}
-              </button>
-            </div>
-          </div>
-        )}
-      </main>
-    </div>
+  const lookUp = async () => {
+    if (!form.purchase_date) { setError('Enter the purchase date first.'); return }
+    const r = await historicalRate('USD', form.purchase_date)
+    if (r == null) { setError('No ECB rate for that date — enter it by hand.'); return }
+    setError(''); set('avg_fx_czk', String(Number(r.toFixed(6))))
+  }
+
+  const save = async () => {
+    const amount = parseDecimal(form.amount), cost = parseDecimal(form.avg_cost_usd)
+    const apy = form.staking_apy.trim() ? parsePercent(form.staking_apy) : 0
+    const fx = form.avg_fx_czk.trim() ? parseDecimal(form.avg_fx_czk) : null
+    if (amount == null || amount <= 0 || cost == null || cost < 0) { setError('Amount and average cost must be valid numbers.'); return }
+    if (apy == null || apy < 0 || apy > 1) { setError('Staking APY must be a percentage between 0 and 100.'); return }
+    if (form.avg_fx_czk.trim() && (fx == null || fx <= 0)) { setError('Purchase USD/CZK must be positive.'); return }
+    setSaving(true)
+    const { error: err } = await updateScoped('crypto_holdings', coin.id, activeProfile?.id, {
+      name: form.name.trim() || coin.name, symbol: form.symbol.trim().toUpperCase() || coin.symbol,
+      amount, avg_cost_usd: cost, avg_fx_czk: fx, wallet_label: form.wallet_label.trim() || null,
+      staking_apy: apy, purchase_date: form.purchase_date || null, updated_at: new Date().toISOString(),
+    })
+    setSaving(false)
+    if (err) { setError(err); return }
+    onSaved(); onClose()
+  }
+
+  return (
+    <Modal title="Edit coin" subtitle={`${coin.name} · ${coin.coin_id}`} onClose={onClose} width={520}>
+      <Notice tone="gray">To record a purchase or sale use <strong>Buy</strong> / <strong>−</strong>. This form is for corrections and staking details.</Notice>
+      <ErrorBox msg={error} />
+      <FormGrid>
+        <Field label="Name"><input style={inputStyle} value={form.name} onChange={e => set('name', e.target.value)} /></Field>
+        <Field label="Symbol"><input style={inputStyle} value={form.symbol} onChange={e => set('symbol', e.target.value)} /></Field>
+        <Field label="Amount"><NumberInput value={form.amount} onChange={v => set('amount', v)} /></Field>
+        <Field label="Average cost"><NumberInput value={form.avg_cost_usd} onChange={v => set('avg_cost_usd', v)} suffix="USD" /></Field>
+        <Field label="Purchase date"><input style={inputStyle} type="date" value={form.purchase_date} onChange={e => set('purchase_date', e.target.value)} /></Field>
+        <Field label="Avg purchase rate (CZK/USD)" hint={<button type="button" onClick={lookUp} style={{ background: 'none', border: 'none', padding: 0, color: 'var(--blue)', cursor: 'pointer', fontSize: 10, textDecoration: 'underline' }}>Use ECB rate on purchase date</button>}>
+          <NumberInput value={form.avg_fx_czk} onChange={v => set('avg_fx_czk', v)} placeholder="unknown" />
+        </Field>
+        <Field label="Wallet / exchange"><input style={inputStyle} value={form.wallet_label} onChange={e => set('wallet_label', e.target.value)} /></Field>
+        <Field label="Staking APY"><NumberInput value={form.staking_apy} onChange={v => set('staking_apy', v)} suffix="%" /></Field>
+      </FormGrid>
+      <FormActions onCancel={onClose} onSubmit={save} label="Save" saving={saving} />
+    </Modal>
   )
 }
