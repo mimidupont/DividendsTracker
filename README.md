@@ -21,22 +21,22 @@ Tracks stocks & ETFs, cash, crypto and real estate, and reports everything in **
 
 | Route | Description |
 |-------|-------------|
-| `/` | Net worth dashboard — asset mix, income streams, daily P&L chart |
-| `/performance` | Per-position P&L, total return incl. dividends, monthly income |
-| `/allocation` | Currency, sector and concentration (HHI) breakdown |
-| `/holdings` | Full holdings table with live prices, edit, add lot, DRIP |
-| `/received` | Dividend payments log with DRIP tracking |
-| `/projected` | Multi-year income projections by holding |
-| `/calendar` | Ex-dividend calendar for the next 90 days |
-| `/currency` | Currency exposure breakdown with visual bars |
-| `/cash` | Bank accounts and interest income |
+| `/` | Net worth dashboard — attention list, flow-aware change, class cards |
+| `/transactions` | **Activity** — every buy, sell, dividend, coupon, split; realised P&L (FIFO or average), Czech tax view, historical-FX backfill |
+| `/holdings` | Stocks & ETFs with live prices, edit, add lot, DRIP check |
+| `/bonds` | Bonds: accrued interest, YTM, duration, maturity ladder |
+| `/cash` | Current, savings and term accounts; interest; runway |
 | `/crypto` | Crypto holdings, staking yield |
-| `/realestate` | Properties, mortgages, equity and rental yield |
+| `/realestate` | Properties, mortgages, equity, net rental yield, valuation date |
+| `/received` | All income received — dividends, coupons, interest, rent |
+| `/projected` | Next 12 months of income, gross and net of tax |
+| `/calendar` | Ex-dividend dates, coupons, maturities and deposits coming due |
+| `/allocation` | Cross-asset, currency, sector and region breakdown (`/currency` redirects here) |
+| `/performance` | Per-position P&L incl. realised gains, net dividends and FX effect |
 | `/fees` | Expense ratios, brokerage costs and long-run fee drag |
-| `/transactions` | Cash-flow ledger: realized P&L, contributions vs growth |
-| `/benchmark` | Your cash flows replayed into an index (shadow portfolio) |
+| `/benchmark` | Time-weighted return vs an index; your cash flows replayed into it |
 | `/rebalance` | Drift against targets + no-sell contribution allocator |
-| `/risk` | Concentration, sector/region/currency exposure, liquidity ladder |
+| `/risk` | Concentration, exposure, liquidity ladder; edit each holding's classification |
 | `/fx-attribution` | Splits returns into asset effect vs currency effect |
 | `/fire` | FI number, years to FI, coast FIRE, milestones, runway |
 | `/scenarios` | Stress tests (2008 replay, crypto winter, job loss…) |
@@ -49,7 +49,9 @@ Tracks stocks & ETFs, cash, crypto and real estate, and reports everything in **
 Anyone relying on these figures should know what's measured and what's assumed.
 
 **Everything is converted to CZK** through `src/lib/fx.ts`. Rates come from
-Frankfurter (CZK per 1 unit of foreign currency), refreshed hourly. If the live
+Frankfurter (CZK per 1 unit of foreign currency; these are **ECB** reference rates,
+not ČNB — close, but not the rates the Czech tax return formally uses), refreshed
+hourly. If the live
 fetch fails, the app falls back to the fixed rates in `DEFAULT_FX` **and says so**
 — pages show a "fallback rates" marker rather than presenting stale numbers as
 current. Currencies quoted in minor units (`GBp` pence, `ZAc`, `ILA`) are folded
@@ -60,7 +62,15 @@ unconverted and flagged, never converted at some other currency's rate.
 the live price converted with *the currency the quote came back in* (which is not
 always the currency the position was booked in); cost basis uses the currency you
 recorded. If a symbol has no live quote, it is valued at average cost and marked
-"at cost".
+"at cost" — unless you entered a **manual price** (✎ on Positions, migration 015),
+which is then used and marked "manual" (flagged after 30 days). A position valued
+at cost holds back that day's history point; a manual one does not.
+
+**Which listing is priced** is decided by the position's exchange: a bare ticker
+gets the exchange's Yahoo suffix (`SBF` → `.PA`, `AEB` → `.AS`, `IBIS2` → `.DE`,
+`LSEETF` → `.L`, `PRA` → `.PR`; US venues none — `EXCHANGE_SUFFIX` in
+`src/lib/yahoo.ts`). `YAHOO_SYMBOL_MAP` overrides broker codes that differ from
+the exchange's ticker (IBKR's `CSG1` is Euronext's `CSG`).
 
 **Income** is the declared forward annual dividend rate × shares. When no live
 rate is available it falls back to your saved projection for the nearest
@@ -71,7 +81,8 @@ figure can never disagree.
 Reinvested (DRIP) dividends raise the cost basis by the reinvested amount, so
 they are not double-counted.
 
-**Net worth** = stocks + cash + crypto + real-estate *equity*. Real estate applies
+**Net worth** = stocks + bonds + cash + crypto + real-estate *equity*. Rental
+income is counted net of the property's `annual_costs`. Real estate applies
 your `ownership_pct` to the property value, purchase price, mortgage and rent
 alike. The "% on invested" figure excludes cash, which has no cost basis.
 
@@ -90,13 +101,44 @@ have all loaded — a snapshot taken mid-load would record assets still valued a
 cost. The P&L windows compare today's value against the newest snapshot on or
 before the window start; with no history yet they report "no data" rather than 0%.
 
+**Frozen FX.** Every lot, dividend and interest payment stores the CZK rate on its
+own date (`fx_rate_czk`), and holdings keep a blended `avg_fx_czk`. Cost is
+converted at that frozen rate, so the P&L splits into price and currency parts.
+Rows recorded before migration 010 have no rate — the UI says "purchase FX
+unknown" for them until you click **Fill from ECB rates** on Positions
+(`src/lib/purchasefx.ts`): it writes each lot's rate and the position's
+cost-weighted `avg_fx_czk`. Purchase dates of 1 January are treated as
+placeholders and skipped — set the real date first. Zero-cost positions (RSUs,
+gifts) have no currency effect and are not flagged.
+
+**Allocation targets** only count once they add up to 100 % (± 0.5 pp). All-zero
+rows are treated as "no targets" rather than as a 0 % plan that every holding
+breaches.
+
+**Bonds** (`src/lib/bonds.ts`) are valued at clean price + accrued interest
+(ACT/ACT ICMA, ACT/365 or 30E/360). Without a quote they fall back to cost and are
+labelled. YTM, Macaulay/modified duration and convexity are computed from the
+coupon schedule; Czech savings bonds that can be redeemed early carry duration 0.
+
+**Changes in net worth are flow-aware.** Deposits and withdrawals recorded in
+Activity are taken out of the change, so saving money does not look like profit;
+the benchmark page compares a time-weighted return, not raw growth.
+
+**Czech tax view** (Activity page) applies the 3-year time test (the holding period
+must *exceed* three years), the 100 000 CZK annual proceeds exemption and the
+40 M CZK cap. It is an aid, not advice — confirm with a tax adviser.
+
 Assumptions you may want to change:
-- `WHT_RATE` in `src/components/DripCheckModal.tsx` — 15% withholding on dividends
-- `ASSUMED_WHT` in `src/app/projected/page.tsx` — 15% for the projected net figure
-- `ASSUMED_TURNOVER` and `IBKR_COMMISSION` in `src/app/fees/page.tsx`
-- `EXPENSE_RATIOS` in `src/app/fees/page.tsx` — tickers not listed count as 0% TER
-  and are flagged in the UI
-- `SECTORS` in `src/app/allocation/page.tsx` — unlisted tickers fall into "Other"
+- `DIVIDEND_WHT_BY_COUNTRY` / `DEFAULT_DIVIDEND_WHT` in `src/lib/tax.ts` — dividend
+  withholding by country of the issuer (overridable per holding on `/risk`)
+- `CZ_INTEREST_TAX`, `CZ_COUPON_TAX` in `src/lib/tax.ts` — 15%
+- `ASSUMED_TURNOVER` and `DEFAULT_COMMISSION_RATE` in `src/app/fees/page.tsx`
+- `EXPENSE_RATIOS` in `src/app/fees/page.tsx` — tickers not listed are flagged in
+  the UI and left out of the TER total
+- `SEED_SECTORS` in `src/lib/risk.ts` — defaults only; set sector, region, type
+  and country per holding on `/risk`
+- `EMERGENCY_HAIRCUTS` in `src/lib/runway.ts`, `DEFAULT_BOND_DURATION` in
+  `src/lib/scenarios.ts`, return/volatility assumptions in `src/lib/montecarlo.ts`
 - `CZK_SAVINGS_APY` in `src/app/api/benchmark/sync/route.ts` — 4% p.a. for the
   "CZK savings" benchmark, which is generated rather than fetched (there is no
   market series for money in the bank). The rate is in the option's label so the
@@ -106,19 +148,22 @@ Assumptions you may want to change:
 
 ## Key features
 
-### ✎ Edit positions
-Click the pencil icon on any row in Holdings to edit shares, price, currency, exchange.
+### + Record
+One button (top of the sidebar) records any money movement: buy, sell, dividend
+(optionally reinvested), bond coupon, interest, deposit, withdrawal, fee or stock
+split. It saves through the `record_event()` database function, so the ledger row
+and its effect on the position, dividend log or bank balance land together or not
+at all. The FX rate defaults to the rate on the transaction date.
 
-### + Add lot
-Click the + icon to add a new purchase lot to an existing holding.
-- Recalculates the weighted average price automatically
-- Saves lot history to `holding_lots`
+### ✎ Edit positions
+Click the pencil icon on any row in Stocks & ETFs to edit shares, price, currency,
+exchange. Deletes can be undone for a few seconds from the toast.
 
 ### ⟳ Check dividends (DRIP)
 Looks back 90 days for confirmed payments not yet logged.
+- Shares are counted as of the ex-date, the FX rate is the pay-date rate
+- Withholding defaults by country (`src/lib/tax.ts`) and can be edited per payment
 - "Apply DRIP" logs the dividend and adds the fractional shares to your position
-- Reinvestment is computed in CZK from the net-of-WHT amount, matching IBKR
-- Cost basis is raised by the reinvested amount, in the holding's own currency
 - Payments already in the log are skipped, so nothing is counted twice
 
 ### Ex-dividend calendar
@@ -149,6 +194,13 @@ live quote fall back to cost rather than to zero.
 instead run just the new files in `supabase/migrations/` — every one is
 idempotent (`create table if not exists`, `add column if not exists`) and none
 drops or rewrites an existing column.
+
+**Upgrading to this version:** run `supabase/migrations/010_frozen_fx.sql`,
+`011_bonds.sql`, `012_record_event.sql`, `013_property_details.sql`,
+`014_bank_interest_profile.sql` and
+`015_manual_price.sql` **in that order** (SQL Editor), then open Activity → *Backfill from holdings* once to create
+ledger rows and historical FX rates for positions entered before the ledger existed.
+Until 012 is run, the Record button reports that `record_event()` is missing.
 
 The schema creates one seed profile. Every table is scoped by `profile_id`, and
 the app needs at least one row in `profiles` — with none, all pages come up empty.

@@ -8,11 +8,26 @@
  * same number for the same position.
  */
 import type {
-  DividendProjection, Holding, BankAccount, CryptoHolding, RealEstate, AssetMetadata, Bond,
+  DividendProjection, Holding, BankAccount, CryptoHolding, RealEstate, AssetMetadata, BondHolding,
 } from './supabase'
-import { valueBond } from './bonds'
-import { toCZK, normalizeCurrencyCode, normalizeMoney, hasFxRate } from './fx'
+import { toCZK, normalizeCurrencyCode, normalizeMoney, hasFxRate, fxRate } from './fx'
 import { computeProjectedTotal, findProjection } from './projections'
+import { valueBond, annualCouponLocal, bondLiquidity, yieldToMaturity, bondRisk } from './bonds'
+import { todayISO } from './date'
+
+/**
+ * CZK value of a local cost, at the rate it was actually paid when known.
+ * `frozenRate` is CZK per unit of the *major* currency (GBP, not GBp).
+ */
+export function costToCZK(
+  amountLocal: number, currency: string, frozenRate: number | null | undefined,
+  fx: Record<string, number>
+): { czk: number; frozen: boolean } {
+  if (frozenRate != null && isFinite(frozenRate) && frozenRate > 0) {
+    return { czk: normalizeMoney(amountLocal, currency).amount * frozenRate, frozen: true }
+  }
+  return { czk: toCZK(amountLocal, currency, fx), frozen: false }
+}
 
 /** The slice of useMarketData() this module needs (kept structural to avoid a cycle). */
 export interface QuoteSource {
@@ -30,12 +45,26 @@ export interface PositionMetrics {
   /** Currency the price above is expressed in. */
   priceCurrency: string
   isLivePrice: boolean
+  /**
+   * No live quote, but the user entered a price (delisted or unquoted ticker).
+   * Valued at that price instead of cost; still not a live price.
+   */
+  isManualPrice: boolean
   changePercent: number | null
   marketCZK: number
+  /** Cost at the FX rate it was paid (today's rate when that is unknown — see costFxFrozen). */
   costCZK: number
   plCZK: number
-  /** P&L as a percentage of cost. */
-  plPct: number
+  /** P&L as a percentage of cost; null when there is no cost to measure against. */
+  plPct: number | null
+  /**
+   * The part of plCZK that came from the exchange rate moving since purchase.
+   * Null when the purchase rate is unknown (cost then uses today's rate and the
+   * currency effect is invisible — the UI says so).
+   */
+  fxPLCZK: number | null
+  /** True when cost is converted at the rate actually paid. */
+  costFxFrozen: boolean
   /** Estimated forward annual dividend, in CZK. Null when unknown. */
   annualDivCZK: number | null
   /** Forward yield on current market value, as a fraction. Null when unknown. */
@@ -53,7 +82,9 @@ export function positionMetrics(
   allHoldings: Holding[] = []
 ): PositionMetrics {
   const isLivePrice = market.hasPrice(holding.symbol)
-  const price = market.getPrice(holding.symbol, holding.avg_price)
+  const manual = holding.manual_price
+  const isManualPrice = !isLivePrice && manual != null && isFinite(manual) && manual >= 0
+  const price = isManualPrice ? manual! : market.getPrice(holding.symbol, holding.avg_price)
 
   // A quote can come back in a different currency than the position is booked
   // in (an ADR, a dual listing, or a London line quoted in pence). Convert the
@@ -64,8 +95,15 @@ export function positionMetrics(
     : holding.currency
 
   const marketCZK = toCZK(price * holding.shares, priceCurrency, fx)
-  const costCZK   = toCZK(holding.avg_price * holding.shares, holding.currency, fx)
+  const costLocal = holding.avg_price * holding.shares
+  const cost      = costToCZK(costLocal, holding.currency, holding.avg_fx_czk, fx)
+  const costCZK   = cost.czk
   const plCZK     = marketCZK - costCZK
+  // Currency effect = cost re-valued at today's rate minus cost at the paid rate.
+  const todayRate = fxRate(holding.currency, fx)
+  const fxPLCZK = cost.frozen && todayRate != null
+    ? normalizeMoney(costLocal, holding.currency).amount * todayRate - costCZK
+    : null
 
   // Live annual dividend is quoted per share in the quote's currency.
   const liveAnnual = market.getAnnualDiv(holding.symbol)
@@ -91,11 +129,14 @@ export function positionMetrics(
     price,
     priceCurrency,
     isLivePrice,
+    isManualPrice,
     changePercent: market.quotes[holding.symbol]?.changePercent ?? null,
     marketCZK,
     costCZK,
     plCZK,
-    plPct: costCZK > 0 ? (plCZK / costCZK) * 100 : 0,
+    plPct: costCZK > 0 ? (plCZK / costCZK) * 100 : null,
+    fxPLCZK,
+    costFxFrozen: cost.frozen,
     annualDivCZK,
     divYield: annualDivCZK != null && marketCZK > 0 ? annualDivCZK / marketCZK : null,
     isLiveIncome,
@@ -117,14 +158,27 @@ export interface PortfolioTotals {
   marketCZK: number
   costCZK: number
   plCZK: number
-  plPct: number
+  /** Null when there is no cost basis to measure against. */
+  plPct: number | null
+  /** Sum of the known currency effects (positions with a frozen purchase rate). */
+  fxPLCZK: number
   annualDivCZK: number
-  /** Forward yield on market value, as a percentage. */
-  yieldPct: number
-  /** Forward yield on cost basis, as a percentage. */
-  yieldOnCostPct: number
+  /** Forward yield on market value, as a percentage; null with no market value. */
+  yieldPct: number | null
+  /** Forward yield on cost basis, as a percentage; null with no cost. */
+  yieldOnCostPct: number | null
   /** Symbols whose CZK value could not be computed reliably. */
   fxProblems: string[]
+  /** Dividend payers whose income is unknown (no live rate, no projection) — excluded from annualDivCZK. */
+  incomeUnknown: string[]
+  /** Symbols valued at cost because no live quote (and no manual price) arrived. */
+  atCost: string[]
+  /**
+   * Foreign-currency symbols whose cost uses today's FX because the purchase
+   * rate is unknown. A zero-cost position (RSUs, a gift) has no currency
+   * effect to lose and is not listed.
+   */
+  costFxUnknown: string[]
 }
 
 export function portfolioTotals(rows: PositionMetrics[]): PortfolioTotals {
@@ -136,11 +190,20 @@ export function portfolioTotals(rows: PositionMetrics[]): PortfolioTotals {
     marketCZK,
     costCZK,
     plCZK,
-    plPct: costCZK > 0 ? (plCZK / costCZK) * 100 : 0,
+    plPct: costCZK > 0 ? (plCZK / costCZK) * 100 : null,
+    fxPLCZK: rows.reduce((s, r) => s + (r.fxPLCZK ?? 0), 0),
     annualDivCZK,
-    yieldPct: marketCZK > 0 ? (annualDivCZK / marketCZK) * 100 : 0,
-    yieldOnCostPct: costCZK > 0 ? (annualDivCZK / costCZK) * 100 : 0,
+    yieldPct: marketCZK > 0 ? (annualDivCZK / marketCZK) * 100 : null,
+    yieldOnCostPct: costCZK > 0 ? (annualDivCZK / costCZK) * 100 : null,
     fxProblems: rows.filter(r => r.fxUnavailable).map(r => r.holding.symbol),
+    incomeUnknown: rows
+      .filter(r => r.holding.is_dividend_payer && r.annualDivCZK == null)
+      .map(r => r.holding.symbol),
+    atCost: rows.filter(r => !r.isLivePrice && !r.isManualPrice).map(r => r.holding.symbol),
+    costFxUnknown: Array.from(new Set(rows
+      .filter(r => !r.costFxFrozen && normalizeCurrencyCode(r.holding.currency) !== 'CZK' &&
+        r.holding.avg_price * r.holding.shares > 0)
+      .map(r => r.holding.symbol))),
   }
 }
 
@@ -157,6 +220,8 @@ export const exposureCurrency = (r: PositionMetrics): string =>
 // ─────────────────────────────────────────────────────────────────────────────
 
 export type AssetClass = 'stock' | 'etf' | 'bond' | 'cash' | 'crypto' | 'realestate'
+
+export const ASSET_CLASSES: AssetClass[] = ['stock', 'etf', 'bond', 'cash', 'crypto', 'realestate']
 export type LiquidityTier = 'instant' | 'week' | 'month' | 'year' | 'illiquid'
 
 export const LIQUIDITY_TIERS: LiquidityTier[] = ['instant', 'week', 'month', 'year', 'illiquid']
@@ -184,18 +249,23 @@ export interface Position {
   /** Primary residence is excluded from investable net worth by default. */
   isPrimaryResidence?: boolean
   /**
-   * Modified duration, on bond positions only. Carried on the position so a
-   * rate scenario can shock fixed income by its actual sensitivity instead of
-   * applying one blanket percentage to every bond in the book.
+   * False when the value is not a live market price: a stock or coin with no
+   * quote (valued at cost), a bond with no entered price. Cash and property
+   * are true (their value *is* the entered figure).
    */
-  modifiedDuration?: number | null
-  /** Maturity date, on bond positions only. */
-  maturityDate?: string
+  isLivePrice: boolean
+  /** Valued at a price the user entered because no quote exists (stocks only). */
+  isManualPrice?: boolean
+  /** Modified duration, for bonds with a known yield — drives rate-shock scenarios. */
+  duration?: number | null
+  /** A fund (ETF, bond ETF): one line here, many underlying holdings. */
+  isFund?: boolean
 }
 
 /** Minimal shape of the crypto price hook this module needs. */
 export interface CryptoPriceSource {
   getPrice: (coinId: string, fallback: number) => number
+  hasPrice?: (coinId: string) => boolean
 }
 
 export interface BuildPositionsInput {
@@ -203,9 +273,17 @@ export interface BuildPositionsInput {
   bankAccounts: BankAccount[]
   cryptoHoldings: CryptoHolding[]
   realEstate: RealEstate[]
+  bondHoldings?: BondHolding[]
   projections?: DividendProjection[]
   assetMetadata?: AssetMetadata[]
-  bonds?: Bond[]
+}
+
+/** How a stock-table holding is classified: bond ETFs count as fixed income. */
+export function holdingAssetClass(meta: AssetMetadata | undefined): AssetClass {
+  const type = (meta?.asset_type ?? '').toLowerCase()
+  if (type === 'bond_etf' || type === 'bond') return 'bond'
+  if (type === 'etf' || meta?.industry === 'ETF' || meta?.sector === 'ETF') return 'etf'
+  return 'stock'
 }
 
 function coerceTier(raw: string | null | undefined, fallback: LiquidityTier): LiquidityTier {
@@ -216,12 +294,16 @@ function coerceTier(raw: string | null | undefined, fallback: LiquidityTier): Li
  * Default liquidity for a cash account. A term deposit whose maturity is still
  * far out is not instant money, however the row is labelled.
  */
-function cashTier(a: BankAccount): LiquidityTier {
-  const explicit = coerceTier(a.liquidity_tier, 'instant')
-  if (a.liquidity_tier) return explicit
-  if (a.account_type !== 'fixed_deposit') return 'instant'
+export function cashTier(a: BankAccount, today: string = todayISO()): LiquidityTier {
+  // Migration 002 gave every existing row liquidity_tier = 'instant' by
+  // default, so for a term deposit that value says nothing — it was never
+  // chosen. Only a tier *other* than the default overrides the maturity date.
+  const explicit = LIQUIDITY_TIERS.includes(a.liquidity_tier as LiquidityTier)
+    ? (a.liquidity_tier as LiquidityTier) : null
+  if (a.account_type !== 'fixed_deposit') return explicit ?? 'instant'
+  if (explicit && explicit !== 'instant') return explicit
   if (!a.maturity_date) return 'month'
-  const daysOut = (Date.parse(a.maturity_date) - Date.now()) / 86_400_000
+  const daysOut = (Date.parse(a.maturity_date) - Date.parse(today)) / 86_400_000
   if (!isFinite(daysOut)) return 'month'
   return daysOut > 365 ? 'year' : daysOut > 31 ? 'month' : 'week'
 }
@@ -240,7 +322,8 @@ export function buildPositions(
   data: BuildPositionsInput,
   fx: Record<string, number>,
   market: QuoteSource,
-  crypto: CryptoPriceSource
+  crypto: CryptoPriceSource,
+  today: string = todayISO()
 ): Position[] {
   const metaBySymbol = new Map(
     (data.assetMetadata ?? []).map(m => [m.symbol.toUpperCase(), m])
@@ -258,7 +341,8 @@ export function buildPositions(
     const cost = normalizeMoney(h.avg_price * h.shares, h.currency)
     positions.push({
       id: h.id,
-      assetClass: meta?.industry === 'ETF' || meta?.sector === 'ETF' ? 'etf' : 'stock',
+      assetClass: holdingAssetClass(meta),
+      isFund: holdingAssetClass(meta) !== 'stock',
       label: h.symbol,
       name: h.name,
       currency: value.ccy,
@@ -272,43 +356,8 @@ export function buildPositions(
       liquidityTier: coerceTier(meta?.liquidity_tier, 'week'),
       annualIncomeCZK: m.annualDivCZK ?? 0,
       isLiability: false,
-    })
-  }
-
-  // ── Bonds ──────────────────────────────────────────────────────────────────
-  // Valued dirty (clean + accrued): accrued interest is money already earned
-  // and paid out on the next coupon date, so leaving it out understates the
-  // position every day of the year except the coupon date itself.
-  for (const b of data.bonds ?? []) {
-    const v = valueBond(b)
-    const value = normalizeMoney(v.dirtyValue, b.currency)
-    const cost = normalizeMoney(v.costValue, b.currency)
-    positions.push({
-      id: b.id,
-      assetClass: 'bond',
-      label: b.isin ?? b.name,
-      name: b.name,
-      currency: value.ccy,
-      quantity: v.nominal,
-      valueLocal: value.amount,
-      valueCZK: toCZK(v.dirtyValue, b.currency, fx),
-      costLocal: cost.amount,
-      costCZK: toCZK(v.costValue, b.currency, fx),
-      sector: 'Fixed income',
-      region: b.country,
-      // A listed government bond sells in days; anything else is assumed less
-      // liquid unless the row says otherwise. A matured line is cash awaiting
-      // redemption, so it is treated as reachable.
-      liquidityTier: coerceTier(
-        b.liquidity_tier,
-        v.isMatured ? 'week' : b.bond_type === 'government' ? 'week' : 'month'
-      ),
-      // Net of withholding: the gross coupon is not what lands in the account,
-      // and this figure feeds FIRE and runway.
-      annualIncomeCZK: toCZK(v.annualCouponNet, b.currency, fx),
-      isLiability: false,
-      modifiedDuration: v.modifiedDuration,
-      maturityDate: b.maturity_date,
+      isLivePrice: m.isLivePrice,
+      isManualPrice: m.isManualPrice,
     })
   }
 
@@ -328,15 +377,48 @@ export function buildPositions(
       costCZK: toCZK(a.balance, a.currency, fx),
       sector: null,
       region: null,
-      liquidityTier: cashTier(a),
+      liquidityTier: cashTier(a, today),
       annualIncomeCZK: toCZK(a.balance * a.interest_rate, a.currency, fx),
       isLiability: false,
+      isLivePrice: true,
+    })
+  }
+
+  // ── Bonds (held directly) ──────────────────────────────────────────────────
+  for (const b of data.bondHoldings ?? []) {
+    if (!b.is_active || b.quantity <= 0) continue
+    const v = valueBond(b, today)
+    const ytm = yieldToMaturity(b, v.cleanPct, today)
+    const risk = ytm != null ? bondRisk(b, ytm, today) : null
+    const value = normalizeMoney(v.valueLocal, b.currency)
+    const cost = normalizeMoney(v.costLocal, b.currency)
+    positions.push({
+      id: b.id,
+      assetClass: 'bond',
+      label: b.isin,
+      name: b.name,
+      currency: value.ccy,
+      quantity: b.quantity,
+      valueLocal: value.amount,
+      valueCZK: toCZK(v.valueLocal, b.currency, fx),
+      costLocal: cost.amount,
+      costCZK: costToCZK(v.costLocal, b.currency, b.purchase_fx_czk, fx).czk,
+      sector: null,
+      region: b.currency.toUpperCase() === 'CZK' ? 'CZ' : null,
+      liquidityTier: coerceTier(b.liquidity_tier, bondLiquidity(b, today)),
+      annualIncomeCZK: toCZK(annualCouponLocal(b, today), b.currency, fx),
+      isLiability: false,
+      isLivePrice: v.isMarketPrice || v.basis === 'redemption' || v.basis === 'par',
+      // A redeemable savings bond can be cashed at par, so its price does not
+      // move with yields.
+      duration: b.redeemable_early ? 0 : risk?.modified ?? null,
     })
   }
 
   // ── Crypto (priced in USD) ─────────────────────────────────────────────────
   for (const c of data.cryptoHoldings) {
     const priceUSD = crypto.getPrice(c.coin_id, c.avg_cost_usd)
+    const live = crypto.hasPrice ? crypto.hasPrice(c.coin_id) : true
     positions.push({
       id: c.id,
       assetClass: 'crypto',
@@ -347,12 +429,13 @@ export function buildPositions(
       valueLocal: priceUSD * c.amount,
       valueCZK: toCZK(priceUSD * c.amount, 'USD', fx),
       costLocal: c.avg_cost_usd * c.amount,
-      costCZK: toCZK(c.avg_cost_usd * c.amount, 'USD', fx),
+      costCZK: costToCZK(c.avg_cost_usd * c.amount, 'USD', c.avg_fx_czk, fx).czk,
       sector: null,
       region: 'Global',
       liquidityTier: coerceTier(c.liquidity_tier, 'week'),
       annualIncomeCZK: toCZK(priceUSD * c.amount * c.staking_apy, 'USD', fx),
       isLiability: false,
+      isLivePrice: live,
     })
   }
 
@@ -378,9 +461,11 @@ export function buildPositions(
         p.liquidity_tier,
         p.is_primary_residence ? 'illiquid' : 'year'
       ),
-      annualIncomeCZK: toCZK(p.monthly_rent * 12 * share, p.currency, fx),
+      // Rent after running costs (before mortgage interest and income tax).
+      annualIncomeCZK: toCZK(Math.max(0, p.monthly_rent * 12 - (p.annual_costs ?? 0)) * share, p.currency, fx),
       isLiability: false,
       isPrimaryResidence: p.is_primary_residence,
+      isLivePrice: true,
     })
 
     if (p.mortgage_balance > 0) {
@@ -404,6 +489,7 @@ export function buildPositions(
         annualIncomeCZK: 0,
         isLiability: true,
         isPrimaryResidence: p.is_primary_residence,
+        isLivePrice: true,
       })
     }
   }
@@ -431,22 +517,63 @@ export const netWorthCZK = (positions: Position[]): number =>
  * Subtracting the debt for an asset that isn't in the total would report an
  * investable net worth below zero for anyone with a mortgaged home.
  */
-export function investableNetWorthCZK(
-  positions: Position[],
-  opts: { includePrimaryResidence?: boolean; includeProperty?: boolean } = {}
-): number {
+export interface InvestableOpts { includePrimaryResidence?: boolean; includeProperty?: boolean }
+
+/** The positions that count towards investable net worth (property and its mortgage kept as a pair). */
+export function investablePositions(positions: Position[], opts: InvestableOpts = {}): Position[] {
   const includeProperty = opts.includeProperty ?? true
-  return positions.reduce((sum, p) => {
-    if (p.assetClass === 'realestate') {
-      if (p.isPrimaryResidence) {
-        if (!opts.includePrimaryResidence) return sum
-      } else if (!includeProperty) {
-        return sum
-      }
-    }
-    return sum + p.valueCZK
-  }, 0)
+  return positions.filter(p => {
+    if (p.assetClass !== 'realestate') return true
+    if (p.isPrimaryResidence) return !!opts.includePrimaryResidence
+    return includeProperty
+  })
 }
+
+export function investableNetWorthCZK(positions: Position[], opts: InvestableOpts = {}): number {
+  return netWorthCZK(investablePositions(positions, opts))
+}
+
+/**
+ * Investable net worth split by asset class — the starting point for Monte
+ * Carlo, so the simulation starts from the same pot /fire measures.
+ *
+ * Property is returned **gross** under `realestate` with its mortgages under
+ * `debtCZK` (a positive number): the asset is what moves with prices, the debt
+ * does not, and netting them first would model levered equity as unlevered.
+ */
+export function investableByClass(
+  positions: Position[], opts: InvestableOpts = {}
+): { byClass: Record<AssetClass, number>; debtCZK: number } {
+  const byClass = totalsByClass([])
+  let debtCZK = 0
+  for (const p of investablePositions(positions, opts)) {
+    if (p.isLiability) debtCZK += -p.valueCZK
+    else byClass[p.assetClass] += p.valueCZK
+  }
+  return { byClass, debtCZK }
+}
+
+/** Forward annual income by asset class, in CZK. */
+export function incomeByClass(positions: Position[]): Record<AssetClass, number> {
+  const out = totalsByClass([])
+  for (const p of positions) out[p.assetClass] += p.annualIncomeCZK
+  return out
+}
+
+/** Cost of everything with a cost basis (cash excluded — it has none), and its current value. */
+export function investedCostAndValue(positions: Position[]): { costCZK: number; valueCZK: number } {
+  let costCZK = 0, valueCZK = 0
+  for (const p of positions) {
+    if (p.isLiability || p.assetClass === 'cash') continue
+    costCZK += p.costCZK
+    valueCZK += p.valueCZK
+  }
+  return { costCZK, valueCZK }
+}
+
+/** Positions valued at cost or an entered figure instead of a live market price. */
+export const unpricedPositions = (positions: Position[]): Position[] =>
+  positions.filter(p => !p.isLivePrice && !p.isLiability)
 
 /** Total forward annual income across every asset class, in CZK. */
 export const annualIncomeCZK = (positions: Position[]): number =>

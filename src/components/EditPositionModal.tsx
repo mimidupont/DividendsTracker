@@ -1,9 +1,19 @@
 'use client'
 import { useState } from 'react'
-import { supabase, Holding } from '@/lib/supabase'
+import type { Holding } from '@/lib/supabase'
+import { useProfile } from '@/lib/profile'
+import { updateScoped } from '@/lib/db'
+import { parseDecimal } from '@/lib/parse'
+import { historicalRate, normalizeCurrencyCode } from '@/lib/fx'
+import { todayISO } from '@/lib/date'
 import Modal from './Modal'
-import { Field, FormGrid, FormActions, ErrorBox, inputStyle } from './FormFields'
+import { Field, FormGrid, FormActions, ErrorBox, NumberInput, Checkbox, Notice, inputStyle } from './FormFields'
 
+/**
+ * Corrections to a position's static data. Purchases and sales go through
+ * Record; this is for fixing a name, the exchange, a mistyped average, or
+ * filling in the FX rate a pre-ledger position was bought at.
+ */
 export default function EditPositionModal({
   holding,
   onClose,
@@ -13,110 +23,140 @@ export default function EditPositionModal({
   onClose: () => void
   onSaved: () => void
 }) {
+  const { activeProfile } = useProfile()
   const [form, setForm] = useState({
-    symbol: holding.symbol,
     name: holding.name,
     shares: String(holding.shares),
     avg_price: String(holding.avg_price),
-    currency: holding.currency,
+    avg_fx_czk: holding.avg_fx_czk != null ? String(holding.avg_fx_czk) : '',
     exchange: holding.exchange ?? '',
     purchase_date: holding.purchase_date ?? '',
     is_dividend_payer: holding.is_dividend_payer,
+    manual_price: holding.manual_price != null ? String(holding.manual_price) : '',
+    manual_price_date: holding.manual_price_date ?? '',
   })
   const [saving, setSaving] = useState(false)
+  const [lookingUp, setLookingUp] = useState(false)
   const [error, setError] = useState('')
+  const isCZK = normalizeCurrencyCode(holding.currency) === 'CZK'
 
-  const set = (k: string, v: string | boolean) => setForm(f => ({ ...f, [k]: v }))
+  const set = <K extends keyof typeof form>(k: K, v: (typeof form)[K]) => setForm(f => ({ ...f, [k]: v }))
+
+  const lookUpRate = async () => {
+    if (!form.purchase_date) { setError('Enter the purchase date first.'); return }
+    setLookingUp(true)
+    const r = await historicalRate(holding.currency, form.purchase_date)
+    setLookingUp(false)
+    if (r == null) { setError('No ECB rate available for that date — enter it by hand.'); return }
+    setError('')
+    set('avg_fx_czk', String(Number(r.toFixed(6))))
+  }
 
   const handleSubmit = async () => {
-    if (!form.name || !form.shares || !form.avg_price) {
-      setError('All required fields must be filled.')
+    const shares = parseDecimal(form.shares)
+    const price  = parseDecimal(form.avg_price)
+    const fx     = form.avg_fx_czk.trim() ? parseDecimal(form.avg_fx_czk) : null
+    if (!form.name.trim()) { setError('Name is required.'); return }
+    // A zero average price is real: RSUs or shares received for free.
+    if (shares == null || shares <= 0 || price == null || price < 0) {
+      setError('Shares must be positive and the average price zero or more.')
       return
     }
-    const shares = parseFloat(form.shares)
-    const price  = parseFloat(form.avg_price)
-    if (!isFinite(shares) || shares <= 0 || !isFinite(price) || price <= 0) {
-      setError('Shares and price must be positive numbers.')
+    const manual = form.manual_price.trim() ? parseDecimal(form.manual_price) : null
+    if (form.manual_price.trim() && (manual == null || manual < 0)) {
+      setError('The manual price must be zero or more (or left empty).')
+      return
+    }
+    if (form.avg_fx_czk.trim() && (fx == null || fx <= 0)) {
+      setError('The purchase FX rate must be a positive number (or left empty).')
       return
     }
 
     setSaving(true)
-    // `symbol` is deliberately not updated. holding_lots, dividends_received,
-    // dividend_projections, asset_metadata and transactions all key on the
-    // ticker *text*, so a rename here would silently detach every one of them:
-    // realized P&L would lose its cost basis and the dividend log would orphan.
-    const { error: err } = await supabase.from('holdings').update({
+    // `symbol` and `currency` are deliberately not editable: lots, dividends,
+    // projections, metadata and ledger rows key on the ticker text, and the
+    // average cost is expressed in the currency — changing either would detach
+    // or silently re-denominate that history.
+    const { error: err } = await updateScoped('holdings', holding.id, activeProfile?.id, {
       name: form.name.trim(),
       shares,
       avg_price: price,
-      currency: form.currency,
+      avg_fx_czk: isCZK ? 1 : fx,
       exchange: form.exchange.trim() || null,
       purchase_date: form.purchase_date || null,
       is_dividend_payer: form.is_dividend_payer,
+      manual_price: manual,
+      // A new price without a new date is today's price, not the old date's.
+      manual_price_date: manual == null ? null
+        : form.manual_price_date && (manual === holding.manual_price || form.manual_price_date !== (holding.manual_price_date ?? ''))
+          ? form.manual_price_date : todayISO(),
       updated_at: new Date().toISOString(),
-    }).eq('id', holding.id)
+    })
     setSaving(false)
-    if (err) { setError(err.message); return }
+    if (err) { setError(err); return }
     onSaved(); onClose()
   }
 
-  const costBasis = form.shares && form.avg_price
-    ? parseFloat(form.shares) * parseFloat(form.avg_price) : null
+  const s = parseDecimal(form.shares), p = parseDecimal(form.avg_price)
+  const costBasis = s != null && p != null ? s * p : null
 
   return (
-    <Modal
-      title="Edit position"
-      subtitle={`${holding.symbol} · ${holding.name}`}
-      onClose={onClose}
-    >
+    <Modal title="Edit position" subtitle={`${holding.symbol} · ${holding.name}`} onClose={onClose}>
+      <Notice tone="gray">
+        To record a purchase or sale use <strong>Record</strong> — it keeps the ledger and the lot history in step.
+        Use this form to correct data.
+      </Notice>
       <ErrorBox msg={error} />
       <FormGrid>
-        <Field label="Ticker symbol">
-          <input
-            style={{ ...inputStyle, opacity: 0.6, cursor: 'not-allowed' }}
-            value={form.symbol}
-            readOnly
-            disabled
-            title="The ticker keys this position's lots, dividends, projections and transactions. Delete and re-add the position to change it."
-          />
+        <Field label="Ticker" hint="Fixed: history is keyed on it.">
+          <input style={{ ...inputStyle, opacity: 0.6 }} value={holding.symbol} readOnly disabled />
         </Field>
-        <Field label="Currency">
-          <select style={inputStyle} value={form.currency} onChange={e => set('currency', e.target.value)}>
-            <option>USD</option><option>EUR</option><option>CZK</option><option>GBP</option>
-          </select>
+        <Field label="Currency" hint="Fixed: the average cost is in this currency.">
+          <input style={{ ...inputStyle, opacity: 0.6 }} value={holding.currency} readOnly disabled />
         </Field>
         <Field label="Company name" span="2">
           <input style={inputStyle} value={form.name} onChange={e => set('name', e.target.value)} />
         </Field>
         <Field label="Shares held">
-          <input style={inputStyle} type="number" value={form.shares} onChange={e => set('shares', e.target.value)} />
+          <NumberInput value={form.shares} onChange={v => set('shares', v)} />
         </Field>
         <Field label="Avg price per share">
-          <input style={inputStyle} type="number" value={form.avg_price} onChange={e => set('avg_price', e.target.value)} />
-        </Field>
-        <Field label="Exchange">
-          <input style={inputStyle} value={form.exchange} onChange={e => set('exchange', e.target.value)} />
+          <NumberInput value={form.avg_price} onChange={v => set('avg_price', v)} suffix={holding.currency} />
         </Field>
         <Field label="Purchase date">
           <input style={inputStyle} type="date" value={form.purchase_date} onChange={e => set('purchase_date', e.target.value)} />
         </Field>
+        {!isCZK && (
+          <Field
+            label={`Avg purchase rate (CZK/${normalizeCurrencyCode(holding.currency)})`}
+            hint={<>
+              The rate your cost was paid at. Empty = today&apos;s rate is used and the currency part of your P&amp;L is hidden.{' '}
+              <button type="button" onClick={lookUpRate} disabled={lookingUp} style={{
+                background: 'none', border: 'none', color: 'var(--blue)', cursor: 'pointer', padding: 0, fontSize: 10, textDecoration: 'underline',
+              }}>{lookingUp ? 'Looking up…' : 'Use ECB rate on purchase date'}</button>
+            </>}
+          >
+            <NumberInput value={form.avg_fx_czk} onChange={v => set('avg_fx_czk', v)} placeholder="e.g. 23,45" />
+          </Field>
+        )}
+        <Field label="Exchange" hint="Decides which listing is priced, e.g. AEB = Amsterdam, SBF = Paris, IBIS2 = Xetra.">
+          <input style={inputStyle} value={form.exchange} onChange={e => set('exchange', e.target.value)} />
+        </Field>
+        <Field label="Manual price" hint="Only used when no live quote arrives (delisted or unquoted ticker). Empty = value at cost.">
+          <NumberInput value={form.manual_price} onChange={v => set('manual_price', v)} suffix={holding.currency} placeholder="—" />
+        </Field>
+        <Field label="Manual price date">
+          <input style={inputStyle} type="date" value={form.manual_price_date} onChange={e => set('manual_price_date', e.target.value)} />
+        </Field>
         <Field label="" span="2">
-          <label style={{ display: 'flex', alignItems: 'center', gap: 9, cursor: 'pointer' }}>
-            <input
-              type="checkbox"
-              checked={form.is_dividend_payer}
-              onChange={e => set('is_dividend_payer', e.target.checked)}
-              style={{ width: 14, height: 14, accentColor: 'var(--green)', cursor: 'pointer' }}
-            />
-            <span style={{ fontSize: 12, color: 'var(--text2)' }}>Dividend payer</span>
-          </label>
+          <Checkbox checked={form.is_dividend_payer} onChange={v => set('is_dividend_payer', v)} label="Pays dividends" />
         </Field>
       </FormGrid>
 
-      {costBasis !== null && !isNaN(costBasis) && (
+      {costBasis != null && (
         <div style={{ marginTop: 14, padding: '10px 14px', background: 'var(--bg3)', borderRadius: 7, fontSize: 11, color: 'var(--text3)' }}>
-          Total cost basis: <span style={{ color: 'var(--text)', fontWeight: 500 }}>
-            {costBasis.toLocaleString(undefined, { maximumFractionDigits: 2 })} {form.currency}
+          Total cost basis: <span className="num" style={{ color: 'var(--text)', fontWeight: 500 }}>
+            {costBasis.toLocaleString('cs-CZ', { maximumFractionDigits: 2 })} {holding.currency}
           </span>
         </div>
       )}

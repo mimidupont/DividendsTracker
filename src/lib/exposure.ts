@@ -15,6 +15,8 @@ export interface CurrencyExposure {
   eurLocal: number
   /** Value held in CZK-denominated assets, in CZK. */
   czkLocal: number
+  /** Value held in GBP-denominated assets, in GBP. */
+  gbpLocal: number
   /** Everything else, already converted to CZK — too small to track per currency. */
   otherCZK: number
 }
@@ -29,13 +31,14 @@ export function currencyExposure(
   positions: Position[],
   fx: Record<string, number>
 ): CurrencyExposure {
-  const out: CurrencyExposure = { usdLocal: 0, eurLocal: 0, czkLocal: 0, otherCZK: 0 }
+  const out: CurrencyExposure = { usdLocal: 0, eurLocal: 0, czkLocal: 0, gbpLocal: 0, otherCZK: 0 }
 
   for (const p of positions) {
     switch (p.currency.toUpperCase()) {
       case 'USD': out.usdLocal += p.valueLocal; break
       case 'EUR': out.eurLocal += p.valueLocal; break
       case 'CZK': out.czkLocal += p.valueLocal; break
+      case 'GBP': out.gbpLocal += p.valueLocal; break
       default:    out.otherCZK += toCZK(p.valueLocal, p.currency, fx); break
     }
   }

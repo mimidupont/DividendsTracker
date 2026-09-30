@@ -6,7 +6,7 @@ import { useAppData } from '@/hooks/useAppData'
 import { useFx } from '@/hooks/useFx'
 import { useMarketData } from '@/hooks/useMarketData'
 import { useCryptoPrices } from '@/hooks/useCryptoPrices'
-import { buildPositions, totalsByClass, type AssetClass } from '@/lib/portfolio'
+import { buildPositions, investableByClass, type AssetClass } from '@/lib/portfolio'
 import { runMonteCarlo, DEFAULT_ASSUMPTIONS, probabilityByYear, type McResult, type MarketAssumptionInput } from '@/lib/montecarlo'
 import { DEFAULT_PLAN, effectiveAnnualExpenses, fiNumber } from '@/lib/fire'
 import { ASSET_CLASS_LABELS } from '@/lib/risk'
@@ -52,16 +52,24 @@ export default function ProjectionPage() {
   const target = fiNumber(expenses.annualCZK, plan.swr_pct)
   const monthlyContribution = contribution ?? plan.monthly_contribution_czk
 
-  const startByClass = useMemo(() => {
-    const totals = totalsByClass(positions)
+  // The same pot /fire measures: investable net worth (primary residence and
+  // its mortgage in or out together, per the plan). Property is simulated
+  // gross and its mortgage held as a fixed debt, so a fall in the flat's price
+  // hits equity with the leverage it really has.
+  const { startByClass, debtCZK } = useMemo(() => {
+    const { byClass, debtCZK } = investableByClass(positions, {
+      includePrimaryResidence: plan.include_primary_residence,
+      includeProperty: plan.include_property_in_fi,
+    })
     const out: Partial<Record<AssetClass, number>> = {}
-    for (const k of Object.keys(totals) as AssetClass[]) {
-      if (totals[k] > 0) out[k] = totals[k]
+    for (const k of Object.keys(byClass) as AssetClass[]) {
+      if (byClass[k] > 0) out[k] = byClass[k]
     }
-    return out
-  }, [positions])
+    return { startByClass: out, debtCZK }
+  }, [positions, plan.include_primary_residence, plan.include_property_in_fi])
 
-  const startTotal = Object.values(startByClass).reduce((s, v) => s + (v ?? 0), 0)
+  const startGross = Object.values(startByClass).reduce((s, v) => s + (v ?? 0), 0)
+  const startTotal = startGross - debtCZK
 
   // Stored assumptions override the defaults when present
   useEffect(() => {
@@ -81,7 +89,7 @@ export default function ProjectionPage() {
     : null
 
   const run = () => {
-    if (startTotal <= 0) return
+    if (startGross <= 0) return
     setRunning(true)
     // Yield to the browser so the button's loading state paints before the
     // simulation blocks. 2000 × 240 months is fast enough not to need a worker,
@@ -90,6 +98,7 @@ export default function ProjectionPage() {
       try {
         setResult(runMonteCarlo({
           startValueByClass: startByClass,
+          debtCZK,
           monthlyContributionCZK: monthlyContribution,
           contributionGrowthPct: contributionGrowth / 100,
           years, simulations: sims, assumptions, seed,
@@ -155,7 +164,7 @@ export default function ProjectionPage() {
   if (startTotal <= 0) {
     return (
       <PageShell>
-        <PageHeader title="Projection" subtitle="Monte Carlo simulation" />
+        <PageHeader eyebrow="Planning" title="Monte Carlo" subtitle="Simulated range of outcomes" />
         <EmptyState icon="◠" title="Nothing to project"
           body="Add holdings, cash, crypto or property first — the simulation starts from what you actually own." />
       </PageShell>
@@ -165,8 +174,9 @@ export default function ProjectionPage() {
   return (
     <PageShell maxWidth={1100}>
       <PageHeader
-        title="Projection"
-        subtitle={`Monte Carlo from ${fmtCZK(startTotal)} · real (after-inflation) returns · seed ${seed}`}
+        eyebrow="Planning"
+        title="Monte Carlo"
+        subtitle={`From investable net worth ${fmtCZK(startTotal)}${debtCZK > 0 ? ` (property gross, ${fmtCZK(debtCZK)} mortgage held constant)` : ''} · real returns (arithmetic means) · seed ${seed}`}
         actions={
           <button onClick={run} disabled={running} style={btnStyle('primary')}>
             {running ? 'Simulating…' : '↻ Re-run'}
@@ -230,9 +240,9 @@ export default function ProjectionPage() {
             <ResponsiveContainer width="100%" height={280}>
               <AreaChart data={chartData} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
-                <XAxis dataKey="year" tick={{ fontSize: 9, fill: 'var(--text3)' }}
+                <XAxis dataKey="year" tick={{ fontSize: 11, fill: 'var(--text3)' }}
                   tickFormatter={y => `${y}y`} axisLine={false} tickLine={false} />
-                <YAxis tick={{ fontSize: 9, fill: 'var(--text3)' }} width={64}
+                <YAxis tick={{ fontSize: 11, fill: 'var(--text3)' }} width={64}
                   tickFormatter={n => `${(n / 1_000_000).toFixed(1)}M`} axisLine={false} tickLine={false} />
                 <Tooltip
                   formatter={(v: number, name: string) => [fmtCZK(v), name]}
@@ -241,7 +251,7 @@ export default function ProjectionPage() {
                 />
                 {target != null && (
                   <ReferenceLine y={target} stroke="var(--green)" strokeDasharray="4 4"
-                    label={{ value: 'FI number', fontSize: 9, fill: 'var(--green)', position: 'insideTopRight' }} />
+                    label={{ value: 'FI number', fontSize: 11, fill: 'var(--green)', position: 'insideTopRight' }} />
                 )}
                 {/* Stacked bands produce the fan; the p5 base is transparent */}
                 <Area type="monotone" dataKey="p5" stackId="1" stroke="none" fill="transparent" name="p5" />
@@ -288,9 +298,9 @@ export default function ProjectionPage() {
             <ResponsiveContainer width="100%" height={180}>
               <BarChart data={histogram} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
-                <XAxis dataKey="value" tick={{ fontSize: 9, fill: 'var(--text3)' }}
+                <XAxis dataKey="value" tick={{ fontSize: 11, fill: 'var(--text3)' }}
                   tickFormatter={n => `${(n / 1_000_000).toFixed(1)}M`} />
-                <YAxis tick={{ fontSize: 9, fill: 'var(--text3)' }} width={40} />
+                <YAxis tick={{ fontSize: 11, fill: 'var(--text3)' }} width={40} />
                 <Tooltip
                   formatter={(v: number) => [`${v} runs`, 'count']}
                   labelFormatter={(v: number) => fmtCZK(v)}

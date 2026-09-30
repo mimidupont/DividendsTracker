@@ -468,86 +468,673 @@ create index if not exists idx_market_assumptions_profile on market_assumptions(
 
 
 
--- ── supabase/migrations/010_bonds.sql ──
--- 010_bonds.sql — fixed income (government & corporate bonds)
+-- ============================================================
+-- 009_add_holding_lot (also in supabase/migrations/)
+-- ============================================================
+
+-- 009_add_holding_lot.sql — atomic "add lot" for the holdings page
 -- Idempotent: safe to re-run.
 --
--- A bond is not a holding with a funny name. It has a nominal you get back on a
--- fixed date, a price quoted as a percentage of that nominal, and interest that
--- accrues every day between coupons — none of which the `holdings` table can
--- express. Modelling a French OAT as a share would report its price (≈ 92) as a
--- currency amount and its coupon as a dividend yield on the wrong base.
+-- Adding a lot is two dependent writes: recalculate the position's weighted
+-- average, then record the lot. Done as separate requests from the browser, a
+-- failure on the second leaves the position already moved with no lot behind
+-- it — the shares are there but the history that explains them is not.
+--
+-- Wrapping both in a function makes them one statement, so either both land or
+-- neither does.
 
-create table if not exists bonds (
-  id            uuid primary key default gen_random_uuid(),
-  profile_id    uuid not null references profiles(id) on delete cascade,
+create or replace function add_holding_lot(
+  p_holding_id   uuid,
+  p_profile_id   uuid,
+  p_shares       numeric,
+  p_price        numeric,
+  p_purchase_date date default null,
+  p_notes        text default null
+)
+returns holdings
+language plpgsql
+as $$
+declare
+  v_holding holdings;
+begin
+  if p_shares is null or p_shares <= 0 then
+    raise exception 'shares must be positive';
+  end if;
+  if p_price is null or p_price <= 0 then
+    raise exception 'price must be positive';
+  end if;
 
-  -- Identity
-  name          text not null,                       -- 'OAT 3.00% 25 May 2054'
-  issuer        text not null default '',            -- 'République Française (AFT)'
-  isin          text,                                -- 'FR001400UKX0'
-  bond_type     text not null default 'government',  -- government | corporate | municipal | supranational | inflation_linked
-  country       text,                                -- ISO-2, 'FR'
-  currency      text not null default 'EUR',
+  -- Lock the row so two concurrent adds cannot both read the old average and
+  -- write back a figure that ignores the other.
+  select * into v_holding
+  from holdings
+  where id = p_holding_id and profile_id = p_profile_id
+  for update;
 
-  -- Size. `face_value` is the nominal of ONE unit (an OAT is quoted per €1 of
-  -- nominal); `quantity` is how many units are held. Nominal held is the product.
-  face_value    numeric not null default 1,
-  quantity      numeric not null default 0,
+  if not found then
+    raise exception 'holding % not found for this profile', p_holding_id;
+  end if;
 
-  -- Prices are CLEAN, as a percentage of par: 92.35 means 92.35%, not €92.35.
-  -- Keeping them in percent is what makes the value independent of face_value.
-  purchase_price_pct numeric not null default 100,
-  current_price_pct  numeric,            -- null → valued at cost, and the UI says so
+  update holdings
+  set shares = v_holding.shares + p_shares,
+      avg_price = (v_holding.shares * v_holding.avg_price + p_shares * p_price)
+                  / (v_holding.shares + p_shares),
+      updated_at = now()
+  where id = p_holding_id
+  returning * into v_holding;
 
-  -- Coupon. Rate is a decimal fraction: 3% is 0.03.
-  coupon_rate       numeric not null default 0,
-  coupons_per_year  int not null default 1,          -- OAT pays annually
-  day_count         text not null default 'ACT/ACT', -- ACT/ACT | ACT/365 | 30/360
+  insert into holding_lots (holding_id, symbol, shares, purchase_price, purchase_date, notes, profile_id)
+  values (p_holding_id, v_holding.symbol, p_shares, p_price, p_purchase_date, p_notes, p_profile_id);
 
-  -- Dates
-  issue_date    date,
-  maturity_date date not null,
-  purchase_date date,
+  return v_holding;
+end;
+$$;
 
-  -- Accrued interest paid to the seller at purchase (coupon couru). Part of what
-  -- the position cost, so leaving it out overstates the gain.
-  accrued_at_purchase numeric not null default 0,
 
-  -- Withholding on coupons at source, as a decimal fraction.
-  withholding_tax_pct numeric not null default 0,
+-- ============================================================
+-- 010_frozen_fx (also in supabase/migrations/)
+-- ============================================================
 
-  -- Inflation-linked issues (OAT€i / OATi) carry an indexation coefficient that
-  -- scales both the nominal repaid and every coupon.
-  is_inflation_linked boolean not null default false,
-  index_ratio         numeric not null default 1,
+-- 010_frozen_fx.sql — freeze the CZK rate on every historical money row
+-- Idempotent: safe to re-run. Adds columns only; nothing is dropped or rewritten.
+--
+-- Until now cost basis, dividends and interest were converted to CZK at
+-- *today's* rate, so a US position bought at 23.50 CZK/USD and still at the
+-- same dollar price showed zero P&L after the koruna strengthened, and every
+-- past dividend was re-priced each morning. The rate on the day money moved is
+-- stored with the row from now on; rows without one fall back to today's rate
+-- and the UI labels them.
 
-  liquidity_tier text,
-  notes          text,
-  is_active      boolean not null default true,
-  created_at     timestamptz default now(),
-  updated_at     timestamptz default now()
+-- CZK per 1 unit of the lot's currency (major unit: GBP, not GBp) on the purchase date.
+alter table holding_lots          add column if not exists fx_rate_czk numeric;
+-- Cost-weighted average of the lots' rates, i.e. CZK per unit of `currency`
+-- at which the position's cost was actually paid.
+alter table holdings              add column if not exists avg_fx_czk numeric;
+-- CZK per USD at purchase (crypto cost is kept in USD).
+alter table crypto_holdings       add column if not exists avg_fx_czk numeric;
+-- CZK per unit of the payment's currency on the payment date.
+alter table dividends_received    add column if not exists fx_rate_czk numeric;
+alter table bank_interest_received add column if not exists fx_rate_czk numeric;
+
+-- A term deposit defaulted to 'instant' liquidity, which hid its maturity from
+-- the runway calculation. New rows get no default; the app derives the tier
+-- from the account type and maturity date instead.
+alter table bank_accounts alter column liquidity_tier drop default;
+
+-- Snapshots record how many positions were valued at cost, so partial days can
+-- be spotted (and are no longer written at all by the app — see README).
+alter table portfolio_snapshots add column if not exists unpriced_count integer default 0;
+
+-- add_holding_lot now also freezes the lot's FX rate and blends it into the
+-- position's average rate. The old 6-argument version is replaced so PostgREST
+-- has exactly one candidate to call.
+drop function if exists add_holding_lot(uuid, uuid, numeric, numeric, date, text);
+
+create or replace function add_holding_lot(
+  p_holding_id    uuid,
+  p_profile_id    uuid,
+  p_shares        numeric,
+  p_price         numeric,
+  p_purchase_date date default null,
+  p_notes         text default null,
+  p_fx_rate_czk   numeric default null
+)
+returns holdings
+language plpgsql
+as $$
+declare
+  v_holding holdings;
+  v_old_cost numeric;
+  v_new_cost numeric;
+begin
+  if p_shares is null or p_shares <= 0 then
+    raise exception 'shares must be positive';
+  end if;
+  if p_price is null or p_price <= 0 then
+    raise exception 'price must be positive';
+  end if;
+  if p_fx_rate_czk is not null and p_fx_rate_czk <= 0 then
+    raise exception 'fx rate must be positive';
+  end if;
+
+  select * into v_holding
+  from holdings
+  where id = p_holding_id and profile_id = p_profile_id
+  for update;
+
+  if not found then
+    raise exception 'holding % not found for this profile', p_holding_id;
+  end if;
+
+  v_old_cost := v_holding.shares * v_holding.avg_price;
+  v_new_cost := p_shares * p_price;
+
+  update holdings
+  set shares = v_holding.shares + p_shares,
+      avg_price = (v_old_cost + v_new_cost) / (v_holding.shares + p_shares),
+      -- The blended rate is only knowable when both sides have one; an unknown
+      -- old rate stays unknown rather than being overwritten by the new lot's.
+      avg_fx_czk = case
+        when p_fx_rate_czk is null then v_holding.avg_fx_czk
+        when v_holding.shares <= 0 then p_fx_rate_czk
+        when v_holding.avg_fx_czk is null then null
+        else (v_old_cost * v_holding.avg_fx_czk + v_new_cost * p_fx_rate_czk) / (v_old_cost + v_new_cost)
+      end,
+      updated_at = now()
+  where id = p_holding_id and profile_id = p_profile_id
+  returning * into v_holding;
+
+  insert into holding_lots (holding_id, symbol, shares, purchase_price, purchase_date, notes, profile_id, fx_rate_czk)
+  values (p_holding_id, v_holding.symbol, p_shares, p_price, p_purchase_date, p_notes, p_profile_id, p_fx_rate_czk);
+
+  return v_holding;
+end;
+$$;
+
+-- GBP exposure is tracked separately so FX attribution can split it (it was
+-- lumped into "other", whose currency effect is invisible).
+alter table portfolio_snapshots add column if not exists exposure_gbp_local numeric default 0;
+
+
+-- ============================================================
+-- 011_bonds (also in supabase/migrations/)
+-- ============================================================
+
+-- 011_bonds.sql — bonds & fixed income as an asset class
+-- Idempotent: safe to re-run. Adds a table and columns; the only thing
+-- replaced is the transactions.asset_class CHECK, widened to allow 'bond'.
+
+create table if not exists bond_holdings (
+  id                        uuid primary key default gen_random_uuid(),
+  profile_id                uuid not null references profiles(id) on delete cascade,
+  isin                      text not null,
+  name                      text not null,
+  issuer_type               text not null default 'government'
+                            check (issuer_type in ('government','corporate','municipal','savings')),
+  currency                  text not null default 'CZK',
+  -- Nominal of ONE bond, in `currency`
+  face_value                numeric not null check (face_value > 0),
+  -- Number of bonds held
+  quantity                  numeric not null default 0 check (quantity >= 0),
+  -- Decimal fraction: 4.5% is 0.045
+  coupon_rate               numeric not null default 0 check (coupon_rate >= 0),
+  -- Coupons per year; 0 = zero-coupon
+  coupon_freq               integer not null default 1 check (coupon_freq in (0,1,2,4,12)),
+  coupon_type               text not null default 'fixed'
+                            check (coupon_type in ('fixed','floating','inflation','reinvest')),
+  day_count                 text not null default 'ACT/ACT'
+                            check (day_count in ('ACT/ACT','ACT/365','30E/360')),
+  issue_date                date,
+  maturity_date             date not null,
+  purchase_date             date,
+  -- Clean price paid, % of par (98.5 = 98.5 %)
+  purchase_clean_price_pct  numeric,
+  -- CZK per unit of `currency` on the purchase date
+  purchase_fx_czk           numeric,
+  -- Last known clean price, % of par. Null → valued at purchase price / par.
+  clean_price_pct           numeric,
+  price_date                date,
+  -- Czech government savings bonds (Dluhopisy Republiky) are redeemable at par
+  redeemable_early          boolean not null default false,
+  liquidity_tier            text,
+  notes                     text,
+  is_active                 boolean not null default true,
+  created_at                timestamptz default now(),
+  updated_at                timestamptz default now(),
+  unique (profile_id, isin)
 );
+create index if not exists idx_bond_holdings_profile on bond_holdings(profile_id);
 
-create index if not exists idx_bonds_profile on bonds(profile_id);
-create index if not exists idx_bonds_maturity on bonds(profile_id, maturity_date);
+-- Bond ETFs are held as ordinary holdings; tagging them lets them count as
+-- fixed income (rate shocks, bond volatility) instead of equity.
+alter table asset_metadata add column if not exists asset_type text;
 
--- Coupons actually received, so realised income is a record rather than a model.
-create table if not exists bond_coupons_received (
-  id            uuid primary key default gen_random_uuid(),
-  profile_id    uuid not null references profiles(id) on delete cascade,
-  bond_id       uuid not null references bonds(id) on delete cascade,
-  payment_date  date not null,
-  gross_amount  numeric not null,
-  tax_withheld  numeric not null default 0,
-  net_amount    numeric not null,
-  currency      text not null default 'EUR',
-  notes         text,
-  created_at    timestamptz default now()
-);
-
-create index if not exists idx_bond_coupons_profile_date
-  on bond_coupons_received(profile_id, payment_date desc);
-
--- Bonds get their own column on the daily snapshot, like every other class.
+-- Snapshot history gets its own bond bucket.
 alter table portfolio_snapshots add column if not exists bonds_czk numeric default 0;
+
+-- The ledger can now record bond buys, sells and coupons.
+alter table transactions drop constraint if exists transactions_asset_class_check;
+alter table transactions add constraint transactions_asset_class_check
+  check (asset_class in ('stock','cash','crypto','realestate','bond','none'));
+
+
+-- ============================================================
+-- 012_record_event (also in supabase/migrations/)
+-- ============================================================
+
+-- 012_record_event.sql — one atomic write for every money movement
+-- Idempotent: safe to re-run (create or replace).
+--
+-- Buying shares, logging a dividend or changing a bank balance used to update
+-- the asset table only; the transaction ledger — which the benchmark, returns
+-- and realized P&L depend on — had to be re-entered by hand in a second form.
+-- The two drifted apart. record_event() writes the ledger row AND applies the
+-- side-effect (position, lot, dividend row, bank balance) in one statement, so
+-- they cannot disagree and a failure leaves nothing half-done.
+--
+-- Event shape (jsonb), common fields:
+--   kind          'buy' | 'sell' | 'dividend' | 'coupon' | 'interest'
+--                 | 'deposit' | 'withdrawal' | 'fee'
+--   asset_class   'stock' | 'crypto' | 'bond' | 'cash'
+--   date          'YYYY-MM-DD'
+--   currency      ISO code of the amounts below
+--   fx_rate_czk   CZK per 1 unit of currency on `date` (required, > 0)
+--   fee, tax      optional, in `currency`
+--   notes         optional
+--   cash_account_id  optional: settle against this bank account (same currency)
+-- Per kind:
+--   stock buy/sell:  symbol, name (new positions), quantity, price, exchange
+--   crypto buy/sell: coin_id, symbol, name, quantity, price  (currency must be USD)
+--   bond buy/sell:   bond_id, quantity, price_pct (clean, % of par), accrued (whole trade)
+--   dividend:        symbol, gross, tax, ex_date, amount_per_share, shares_held,
+--                    drip_shares, drip_price   (DRIP also adds a lot + a buy row)
+--   coupon:          bond_id, gross, tax
+--   interest:        account_id, gross, tax
+--   deposit/withdrawal/fee: account_id, amount (positive)
+--   split (stock):   symbol, quantity = ratio (4 for a 4-for-1 split, 0.1 for 1-for-10)
+
+-- Stock splits are recorded in the ledger so cost basis and the time test
+-- follow the shares through them.
+alter table transactions drop constraint if exists transactions_type_check;
+alter table transactions add constraint transactions_type_check
+  check (type in ('buy','sell','deposit','withdrawal','dividend','interest','rent','fee','tax',
+                  'transfer','adjustment','split'));
+
+create or replace function record_event(p_profile_id uuid, p_event jsonb)
+returns jsonb
+language plpgsql
+as $$
+declare
+  v_kind     text    := p_event->>'kind';
+  v_class    text    := coalesce(p_event->>'asset_class', 'none');
+  v_date     date    := (p_event->>'date')::date;
+  v_ccy      text    := upper(coalesce(p_event->>'currency', 'CZK'));
+  v_fx       numeric := (p_event->>'fx_rate_czk')::numeric;
+  v_fee      numeric := coalesce((p_event->>'fee')::numeric, 0);
+  v_tax      numeric := coalesce((p_event->>'tax')::numeric, 0);
+  v_notes    text    := nullif(p_event->>'notes', '');
+  v_qty      numeric := (p_event->>'quantity')::numeric;
+  v_price    numeric := (p_event->>'price')::numeric;
+  v_symbol   text    := nullif(upper(trim(coalesce(p_event->>'symbol', ''))), '');
+  v_cash_acc uuid    := nullif(p_event->>'cash_account_id', '')::uuid;
+  v_asset_id uuid;
+  v_amount   numeric;          -- signed ledger amount in v_ccy
+  v_cash_delta numeric := 0;   -- change to the settling bank account
+  v_external boolean := false;
+  v_txn_type text;
+  v_holding  holdings;
+  v_crypto   crypto_holdings;
+  v_bond     bond_holdings;
+  v_acc      bank_accounts;
+  v_lot_price numeric;
+  v_old_cost numeric;
+  v_new_cost numeric;
+  v_gross    numeric;
+  v_drip_shares numeric;
+  v_drip_price  numeric;
+  v_txn_id   uuid;
+begin
+  if p_profile_id is null then raise exception 'profile is required'; end if;
+  if v_date is null then raise exception 'date is required'; end if;
+  if v_fx is null or v_fx <= 0 then raise exception 'fx_rate_czk must be positive'; end if;
+  if v_ccy = 'CZK' and v_fx <> 1 then raise exception 'fx_rate_czk must be 1 for CZK'; end if;
+  if v_fee < 0 or v_tax < 0 then raise exception 'fee and tax cannot be negative'; end if;
+
+  -- ── Stocks & ETFs ──────────────────────────────────────────────────────────
+  if v_class = 'stock' and v_kind in ('buy', 'sell') then
+    if v_symbol is null then raise exception 'symbol is required'; end if;
+    if v_qty is null or v_qty <= 0 or v_price is null or v_price <= 0 then
+      raise exception 'quantity and price must be positive';
+    end if;
+
+    select * into v_holding from holdings
+    where profile_id = p_profile_id and upper(symbol) = v_symbol
+    for update;
+
+    if v_kind = 'buy' then
+      if not found then
+        insert into holdings (profile_id, symbol, name, shares, avg_price, currency, exchange,
+                              purchase_date, is_dividend_payer, avg_fx_czk)
+        values (p_profile_id, v_symbol, coalesce(nullif(p_event->>'name', ''), v_symbol), 0, v_price,
+                v_ccy, nullif(p_event->>'exchange', ''), v_date,
+                coalesce((p_event->>'is_dividend_payer')::boolean, true), v_fx)
+        returning * into v_holding;
+      elsif upper(v_holding.currency) <> v_ccy then
+        raise exception 'this position is booked in %, not %', v_holding.currency, v_ccy;
+      end if;
+
+      -- Fees are part of the acquisition cost (Czech convention).
+      v_lot_price := v_price + v_fee / v_qty;
+      v_old_cost  := v_holding.shares * v_holding.avg_price;
+      v_new_cost  := v_qty * v_lot_price;
+
+      update holdings set
+        shares     = v_holding.shares + v_qty,
+        avg_price  = (v_old_cost + v_new_cost) / (v_holding.shares + v_qty),
+        avg_fx_czk = case
+          when v_holding.shares <= 0 then v_fx
+          when v_holding.avg_fx_czk is null then null
+          else (v_old_cost * v_holding.avg_fx_czk + v_new_cost * v_fx) / (v_old_cost + v_new_cost)
+        end,
+        purchase_date = coalesce(v_holding.purchase_date, v_date),
+        updated_at = now()
+      where id = v_holding.id
+      returning * into v_holding;
+
+      insert into holding_lots (profile_id, holding_id, symbol, shares, purchase_price, purchase_date, notes, fx_rate_czk)
+      values (p_profile_id, v_holding.id, v_holding.symbol, v_qty, v_lot_price, v_date, v_notes, v_fx);
+
+      v_amount := -(v_qty * v_price);
+      v_cash_delta := v_amount - v_fee;
+    else
+      if not found then raise exception 'no % position to sell', v_symbol; end if;
+      if v_qty > v_holding.shares + 1e-9 then
+        raise exception 'cannot sell % — only % held', v_qty, v_holding.shares;
+      end if;
+      if upper(v_holding.currency) <> v_ccy then
+        raise exception 'this position is booked in %, not %', v_holding.currency, v_ccy;
+      end if;
+      -- Average cost and its FX rate are unchanged by a sale; the position is
+      -- kept at zero shares so its lots and history stay attached.
+      update holdings set
+        shares = greatest(0, v_holding.shares - v_qty),
+        updated_at = now()
+      where id = v_holding.id;
+      v_amount := v_qty * v_price;
+      v_cash_delta := v_amount - v_fee - v_tax;
+    end if;
+    v_asset_id := v_holding.id;
+    v_txn_type := v_kind;
+
+  -- ── Stock split: shares × ratio, prices ÷ ratio, value unchanged ──────────
+  elsif v_class = 'stock' and v_kind = 'split' then
+    if v_symbol is null then raise exception 'symbol is required'; end if;
+    if v_qty is null or v_qty <= 0 then raise exception 'split ratio must be positive'; end if;
+    select * into v_holding from holdings
+    where profile_id = p_profile_id and upper(symbol) = v_symbol
+    for update;
+    if not found then raise exception 'no % position to split', v_symbol; end if;
+    update holdings set shares = shares * v_qty, avg_price = avg_price / v_qty, updated_at = now()
+    where id = v_holding.id;
+    update holding_lots set shares = shares * v_qty, purchase_price = purchase_price / v_qty
+    where holding_id = v_holding.id and profile_id = p_profile_id;
+    v_asset_id := v_holding.id;
+    v_amount := 0;
+    v_ccy := upper(v_holding.currency);
+    v_fx := coalesce(v_holding.avg_fx_czk, 1);
+    v_txn_type := 'split';
+
+  -- ── Crypto (priced in USD) ─────────────────────────────────────────────────
+  elsif v_class = 'crypto' and v_kind in ('buy', 'sell') then
+    if v_ccy <> 'USD' then raise exception 'crypto trades are recorded in USD'; end if;
+    if v_qty is null or v_qty <= 0 or v_price is null or v_price <= 0 then
+      raise exception 'quantity and price must be positive';
+    end if;
+    select * into v_crypto from crypto_holdings
+    where profile_id = p_profile_id and coin_id = p_event->>'coin_id'
+    order by created_at limit 1
+    for update;
+
+    if v_kind = 'buy' then
+      if not found then
+        insert into crypto_holdings (profile_id, coin_id, symbol, name, amount, avg_cost_usd, purchase_date, avg_fx_czk)
+        values (p_profile_id, p_event->>'coin_id', coalesce(v_symbol, upper(p_event->>'coin_id')),
+                coalesce(nullif(p_event->>'name', ''), p_event->>'coin_id'), 0, v_price, v_date, v_fx)
+        returning * into v_crypto;
+      end if;
+      v_lot_price := v_price + v_fee / v_qty;
+      v_old_cost  := v_crypto.amount * v_crypto.avg_cost_usd;
+      v_new_cost  := v_qty * v_lot_price;
+      update crypto_holdings set
+        amount       = v_crypto.amount + v_qty,
+        avg_cost_usd = (v_old_cost + v_new_cost) / (v_crypto.amount + v_qty),
+        avg_fx_czk   = case
+          when v_crypto.amount <= 0 then v_fx
+          when v_crypto.avg_fx_czk is null then null
+          else (v_old_cost * v_crypto.avg_fx_czk + v_new_cost * v_fx) / (v_old_cost + v_new_cost)
+        end,
+        updated_at = now()
+      where id = v_crypto.id;
+      v_amount := -(v_qty * v_price);
+      v_cash_delta := v_amount - v_fee;
+    else
+      if not found then raise exception 'no % holding to sell', p_event->>'coin_id'; end if;
+      if v_qty > v_crypto.amount + 1e-12 then
+        raise exception 'cannot sell % — only % held', v_qty, v_crypto.amount;
+      end if;
+      update crypto_holdings set amount = greatest(0, v_crypto.amount - v_qty), updated_at = now()
+      where id = v_crypto.id;
+      v_amount := v_qty * v_price;
+      v_cash_delta := v_amount - v_fee - v_tax;
+    end if;
+    v_asset_id := v_crypto.id;
+    v_symbol   := v_crypto.coin_id;
+    v_txn_type := v_kind;
+
+  -- ── Bonds ──────────────────────────────────────────────────────────────────
+  elsif v_class = 'bond' and v_kind in ('buy', 'sell', 'coupon') then
+    select * into v_bond from bond_holdings
+    where id = (p_event->>'bond_id')::uuid and profile_id = p_profile_id
+    for update;
+    if not found then raise exception 'bond not found for this profile'; end if;
+    if upper(v_bond.currency) <> v_ccy then
+      raise exception 'this bond is denominated in %, not %', v_bond.currency, v_ccy;
+    end if;
+    v_symbol := v_bond.isin;
+    v_asset_id := v_bond.id;
+
+    if v_kind = 'coupon' then
+      v_gross := (p_event->>'gross')::numeric;
+      if v_gross is null or v_gross <= 0 then raise exception 'gross coupon must be positive'; end if;
+      v_amount := v_gross;
+      v_cash_delta := v_gross - v_tax;
+      v_txn_type := 'interest';
+      -- A reinvesting savings bond pays its coupon in new bonds.
+      if v_bond.coupon_type = 'reinvest' then
+        update bond_holdings set quantity = quantity + (v_gross - v_tax) / face_value, updated_at = now()
+        where id = v_bond.id;
+        v_cash_delta := 0;
+      end if;
+    else
+      v_price := (p_event->>'price_pct')::numeric;
+      if v_qty is null or v_qty <= 0 or v_price is null or v_price <= 0 then
+        raise exception 'quantity and price must be positive';
+      end if;
+      -- Clean price × par, plus accrued interest (AÚV) paid or received.
+      v_amount := v_qty * v_bond.face_value * v_price / 100
+                  + coalesce((p_event->>'accrued')::numeric, 0);
+      if v_kind = 'buy' then
+        update bond_holdings set
+          purchase_clean_price_pct = case when v_bond.quantity <= 0 or v_bond.purchase_clean_price_pct is null
+            then v_price
+            else (v_bond.quantity * v_bond.purchase_clean_price_pct + v_qty * v_price) / (v_bond.quantity + v_qty) end,
+          purchase_fx_czk = case when v_bond.quantity <= 0 then v_fx
+            when v_bond.purchase_fx_czk is null then null
+            else (v_bond.quantity * v_bond.purchase_fx_czk + v_qty * v_fx) / (v_bond.quantity + v_qty) end,
+          quantity = v_bond.quantity + v_qty,
+          purchase_date = coalesce(v_bond.purchase_date, v_date),
+          updated_at = now()
+        where id = v_bond.id;
+        v_amount := -v_amount;
+        v_cash_delta := v_amount - v_fee;
+      else
+        if v_qty > v_bond.quantity + 1e-9 then
+          raise exception 'cannot sell % — only % held', v_qty, v_bond.quantity;
+        end if;
+        update bond_holdings set quantity = greatest(0, v_bond.quantity - v_qty), updated_at = now()
+        where id = v_bond.id;
+        v_cash_delta := v_amount - v_fee - v_tax;
+      end if;
+      v_txn_type := v_kind;
+    end if;
+
+  -- ── Dividends (optionally reinvested) ──────────────────────────────────────
+  elsif v_kind = 'dividend' then
+    if v_symbol is null then raise exception 'symbol is required'; end if;
+    v_gross := (p_event->>'gross')::numeric;
+    if v_gross is null or v_gross <= 0 then raise exception 'gross dividend must be positive'; end if;
+
+    select * into v_holding from holdings
+    where profile_id = p_profile_id and upper(symbol) = v_symbol
+    for update;
+
+    insert into dividends_received (profile_id, symbol, payment_date, ex_date, amount_per_share,
+      shares_held, gross_amount, withholding_tax, currency, drip_shares_added, drip_price, notes, fx_rate_czk)
+    values (p_profile_id, v_symbol, v_date, nullif(p_event->>'ex_date', '')::date,
+      coalesce((p_event->>'amount_per_share')::numeric, 0),
+      coalesce((p_event->>'shares_held')::numeric, v_holding.shares, 0),
+      v_gross, v_tax, v_ccy,
+      nullif((p_event->>'drip_shares')::numeric, 0), (p_event->>'drip_price')::numeric, v_notes, v_fx);
+
+    v_amount := v_gross;
+    v_cash_delta := v_gross - v_tax;
+    v_txn_type := 'dividend';
+    v_class := 'stock';
+    v_asset_id := v_holding.id;
+
+    v_drip_shares := (p_event->>'drip_shares')::numeric;
+    v_drip_price  := (p_event->>'drip_price')::numeric;
+    if v_drip_shares is not null and v_drip_shares > 0 then
+      if v_holding.id is null then raise exception 'no % position to reinvest into', v_symbol; end if;
+      if v_drip_price is null or v_drip_price <= 0 then raise exception 'drip_price must be positive'; end if;
+      -- drip_price is in the holding's currency; the lot carries its own rate.
+      v_old_cost := v_holding.shares * v_holding.avg_price;
+      v_new_cost := v_drip_shares * v_drip_price;
+      update holdings set
+        shares = v_holding.shares + v_drip_shares,
+        avg_price = (v_old_cost + v_new_cost) / (v_holding.shares + v_drip_shares),
+        avg_fx_czk = case
+          when v_holding.avg_fx_czk is null or (p_event->>'drip_fx_rate_czk') is null then v_holding.avg_fx_czk
+          else (v_old_cost * v_holding.avg_fx_czk + v_new_cost * (p_event->>'drip_fx_rate_czk')::numeric)
+               / (v_old_cost + v_new_cost)
+        end,
+        updated_at = now()
+      where id = v_holding.id;
+      insert into holding_lots (profile_id, holding_id, symbol, shares, purchase_price, purchase_date, notes, fx_rate_czk)
+      values (p_profile_id, v_holding.id, v_holding.symbol, v_drip_shares, v_drip_price, v_date, 'DRIP',
+              (p_event->>'drip_fx_rate_czk')::numeric);
+      -- The reinvestment is a purchase in its own right: it gets its own
+      -- ledger row so realized P&L and the time test know when these shares
+      -- were acquired.
+      insert into transactions (profile_id, txn_date, type, asset_class, symbol, asset_id, quantity, price,
+        amount, fee, tax, currency, fx_rate_czk, is_external, notes)
+      values (p_profile_id, v_date, 'buy', 'stock', v_holding.symbol, v_holding.id, v_drip_shares, v_drip_price,
+        -(v_drip_shares * v_drip_price), 0, 0, upper(v_holding.currency),
+        coalesce((p_event->>'drip_fx_rate_czk')::numeric, case when upper(v_holding.currency) = v_ccy then v_fx else null end, 1),
+        false, 'DRIP reinvestment');
+      v_cash_delta := 0;  -- reinvested, not paid out
+    end if;
+
+  -- ── Cash: interest, deposits, withdrawals, fees ────────────────────────────
+  elsif v_kind in ('interest', 'deposit', 'withdrawal', 'fee') then
+    select * into v_acc from bank_accounts
+    where id = (p_event->>'account_id')::uuid and profile_id = p_profile_id
+    for update;
+    if not found then raise exception 'account not found for this profile'; end if;
+    if upper(v_acc.currency) <> v_ccy then
+      raise exception 'this account is in %, not %', v_acc.currency, v_ccy;
+    end if;
+    v_class := 'cash';
+    v_asset_id := v_acc.id;
+
+    if v_kind = 'interest' then
+      v_gross := (p_event->>'gross')::numeric;
+      if v_gross is null or v_gross <= 0 then raise exception 'gross interest must be positive'; end if;
+      insert into bank_interest_received (profile_id, account_id, payment_date, gross_amount, tax_withheld, currency, notes, fx_rate_czk)
+      values (p_profile_id, v_acc.id, v_date, v_gross, v_tax, v_ccy, v_notes, v_fx);
+      v_amount := v_gross;
+      v_txn_type := 'interest';
+      update bank_accounts set balance = balance + v_gross - v_tax, updated_at = now() where id = v_acc.id;
+    else
+      v_amount := (p_event->>'amount')::numeric;
+      if v_amount is null or v_amount <= 0 then raise exception 'amount must be positive'; end if;
+      if v_kind = 'deposit' then
+        v_external := true;
+      else
+        v_amount := -v_amount;
+        v_external := v_kind = 'withdrawal';
+      end if;
+      v_txn_type := v_kind;
+      update bank_accounts set balance = balance + v_amount, updated_at = now() where id = v_acc.id;
+    end if;
+    v_cash_acc := null;  -- already applied to the account itself
+
+  else
+    raise exception 'unsupported event: % %', v_class, v_kind;
+  end if;
+
+  -- ── Optional settlement against a bank account ─────────────────────────────
+  if v_cash_acc is not null and v_cash_delta <> 0 then
+    select * into v_acc from bank_accounts
+    where id = v_cash_acc and profile_id = p_profile_id
+    for update;
+    if not found then raise exception 'settlement account not found for this profile'; end if;
+    if upper(v_acc.currency) <> v_ccy then
+      raise exception 'settlement account is in %, trade is in %', v_acc.currency, v_ccy;
+    end if;
+    update bank_accounts set balance = balance + v_cash_delta, updated_at = now() where id = v_acc.id;
+  end if;
+
+  insert into transactions (profile_id, txn_date, type, asset_class, symbol, asset_id, quantity, price,
+    amount, fee, tax, currency, fx_rate_czk, is_external, counterparty_account_id, notes)
+  values (p_profile_id, v_date, v_txn_type, v_class, v_symbol, v_asset_id,
+    case when v_kind in ('buy', 'sell', 'split') then v_qty end,
+    case when v_kind in ('buy', 'sell') then v_price end,
+    v_amount, v_fee, v_tax, v_ccy, v_fx, v_external, v_cash_acc, v_notes)
+  returning id into v_txn_id;
+
+  return jsonb_build_object('transaction_id', v_txn_id, 'asset_id', v_asset_id);
+end;
+$$;
+
+
+-- ============================================================
+-- 013_property_details (also in supabase/migrations/)
+-- ============================================================
+
+-- 013_property_details.sql — valuation date and running costs for property
+-- Idempotent: safe to re-run. Adds columns only.
+--
+-- A property's current_value is an estimate the user typed at some point; the
+-- UI now says how old it is. Running costs (maintenance, insurance, property
+-- tax, service charges) turn gross rent into a net yield.
+
+alter table real_estate add column if not exists valuation_date date;
+-- Annual running costs at 100 % ownership, in the property's currency.
+alter table real_estate add column if not exists annual_costs numeric not null default 0;
+
+-- ── 014 bank_interest_received.profile_id (older installs) ──
+
+alter table bank_interest_received
+  add column if not exists profile_id uuid references profiles(id) on delete cascade;
+
+update bank_interest_received i
+   set profile_id = b.profile_id
+  from bank_accounts b
+ where i.profile_id is null and i.account_id = b.id;
+
+-- Only enforce NOT NULL once every row has a profile (rows with no account can't be placed).
+do $$
+begin
+  if not exists (select 1 from bank_interest_received where profile_id is null) then
+    alter table bank_interest_received alter column profile_id set not null;
+  else
+    raise notice 'bank_interest_received has rows with no account/profile - profile_id left nullable; fix those rows and re-run.';
+  end if;
+end $$;
+
+create index if not exists bank_interest_profile_idx on bank_interest_received (profile_id);
+
+notify pgrst, 'reload schema';
+
+-- 015_manual_price.sql — a price the user enters when no quote source has one
+-- Idempotent: safe to re-run. Adds columns only.
+--
+-- A delisted or thinly-covered ticker (e.g. SKLZ) never gets a live quote, so
+-- it was valued at cost forever and blocked every daily snapshot. A manual
+-- price, with the date it was taken, is used only when no live quote arrives;
+-- the UI labels it "manual" and flags it once it is more than 30 days old.
+
+alter table holdings add column if not exists manual_price numeric
+  check (manual_price is null or manual_price >= 0);
+alter table holdings add column if not exists manual_price_date date;

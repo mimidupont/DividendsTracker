@@ -1,4 +1,5 @@
 'use client'
+import { ErrorBox } from '@/components/FormFields'
 import { useEffect, useMemo, useState } from 'react'
 import Badge from '@/components/Badge'
 import { PageShell, PageHeader, LoadingShell, EmptyState, MetricCards, Panel, orDash, DASH } from '@/components/PageShell'
@@ -13,7 +14,7 @@ import { applyScenario, SCENARIO_PRESETS, waterfall, type Shocks } from '@/lib/s
 import { DEFAULT_PLAN, effectiveAnnualExpenses } from '@/lib/fire'
 import { ASSET_CLASS_LABELS } from '@/lib/risk'
 import { supabase } from '@/lib/supabase'
-import { fmtCZK } from '@/lib/fx'
+import { fmtCZK, fmtSignedCZK } from '@/lib/fx'
 import { tdR, tdL, th, btnStyle, inputStyle } from '@/lib/ui'
 
 /**
@@ -48,6 +49,7 @@ export default function ScenariosPage() {
   const [activePreset, setActivePreset] = useState<string | null>(SCENARIO_PRESETS[0].name)
   const [name, setName] = useState('')
   const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
 
   const symbolKey = data.holdings.map(h => h.symbol).join(',')
   const coinKey = data.cryptoHoldings.map(c => c.coin_id).join(',')
@@ -91,7 +93,7 @@ export default function ScenariosPage() {
         profile_id: activeProfile.id, name: name.trim(),
         description: null, shocks, is_preset: false,
       }])
-      if (error) { alert(`Could not save: ${error.message}`); return }
+      if (error) { setSaveError(`Could not save: ${error.message}`); return }
       setName('')
       data.reload()
     } finally {
@@ -117,22 +119,24 @@ export default function ScenariosPage() {
   return (
     <PageShell maxWidth={1100}>
       <PageHeader
-        title="Scenarios"
-        subtitle="Stress tests against your actual positions — mortgages do not shrink when property falls"
+        eyebrow="Planning"
+        title="Stress tests"
+        subtitle="Shocks applied to your actual positions — mortgages do not shrink when property falls, bonds move by duration"
       />
+      {saveError && <ErrorBox msg={saveError} />}
 
       <SetupNotice tables={data.missingTables.filter(t => t === 'scenarios')} />
 
       {/* Presets */}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 16 }}>
         {SCENARIO_PRESETS.map(p => (
-          <button key={p.name} onClick={() => applyPreset(p.name, p.shocks)} title={p.description}
+          <button key={p.name} type="button" aria-pressed={activePreset === p.name} onClick={() => applyPreset(p.name, p.shocks)} title={p.description}
             style={{
               padding: '7px 14px', borderRadius: 6, cursor: 'pointer', fontSize: 12,
-              background: activePreset === p.name ? 'var(--red-bg)' : 'var(--bg2)',
-              border: `1px solid ${activePreset === p.name ? 'var(--red-bd)' : 'var(--border2)'}`,
-              color: activePreset === p.name ? 'var(--red)' : 'var(--text2)',
-              fontFamily: "'Geist', sans-serif",
+              background: activePreset === p.name ? 'var(--bg4)' : 'var(--bg2)',
+              border: `1px solid ${activePreset === p.name ? 'var(--border3)' : 'var(--border2)'}`,
+              color: activePreset === p.name ? 'var(--text)' : 'var(--text2)',
+              fontFamily: "'Inter', sans-serif",
             }}>{p.name}</button>
         ))}
         <button onClick={() => { setActivePreset(null); setShocks({}) }} style={{
@@ -173,71 +177,69 @@ export default function ScenariosPage() {
 
       {/* Sliders */}
       <Panel title="Shock dimensions">
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 18 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 18 }}>
           {SHOCK_SLIDERS.map(s => {
             const raw = shocks[s.key] ?? 0
             return (
-              <div key={String(s.key)}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+              <label key={String(s.key)} style={{ display: 'block' }}>
+                <span style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
                   <span style={{ fontSize: 11, color: 'var(--text3)' }}>{s.label}</span>
-                  <span style={{
-                    fontSize: 11, fontWeight: 600, fontFamily: "'DM Mono', monospace",
-                    color: raw < 0 ? 'var(--red)' : raw > 0 ? 'var(--green)' : 'var(--text3)',
-                  }}>
-                    {raw > 0 ? '+' : ''}{(raw * 100).toFixed(0)}%
+                  <span className="num" style={{ fontSize: 11, fontWeight: 600 }}>
+                    {raw > 0 ? '+' : raw < 0 ? '−' : ''}{Math.abs(raw * 100).toFixed(0)} %
                   </span>
-                </div>
+                </span>
                 <input type="range" min={s.min} max={s.max} step={s.step} value={raw * 100}
                   onChange={e => setShock(s.key, parseFloat(e.target.value))}
-                  style={{ width: '100%', accentColor: raw < 0 ? 'var(--red)' : 'var(--green)' }} />
-              </div>
+                  style={{ width: '100%', accentColor: 'var(--slate)' }} />
+              </label>
             )
           })}
-          {/* Bond yields. Kept out of SHOCK_SLIDERS because it is a shift in
-              basis points, not a percentage change — the shared slider divides
-              its value by 100, which would silently turn 200bp into 2bp. */}
-          <div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
-              <span style={{ fontSize: 11, color: 'var(--text3)' }}>Bond yields</span>
-              <span style={{
-                fontSize: 11, fontWeight: 600, fontFamily: "'DM Mono', monospace",
-                // A yield *rise* cuts bond prices, so the colours are inverted
-                // relative to the asset sliders above.
-                color: (shocks.rates_bps ?? 0) > 0 ? 'var(--red)' : (shocks.rates_bps ?? 0) < 0 ? 'var(--green)' : 'var(--text3)',
-              }}>
-                {(shocks.rates_bps ?? 0) > 0 ? '+' : ''}{(shocks.rates_bps ?? 0).toFixed(0)}bp
-              </span>
-            </div>
-            <input
-              type="range" min={-300} max={500} step={25}
-              value={shocks.rates_bps ?? 0}
-              onChange={e => {
-                setActivePreset(null)
-                setShocks(prev => ({ ...prev, rates_bps: parseFloat(e.target.value) }))
-              }}
-              style={{ width: '100%', accentColor: (shocks.rates_bps ?? 0) > 0 ? 'var(--red)' : 'var(--green)' }}
-            />
-          </div>
-
+          {/* Bond yields: a parallel shift in basis points, applied through duration */}
+          {(() => {
+            const bp = shocks.rates_bp ?? 0
+            return (
+              <label style={{ display: 'block' }}>
+                <span style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+                  <span style={{ fontSize: 11, color: 'var(--text3)' }}>Bond yields</span>
+                  <span className="num" style={{ fontSize: 11, fontWeight: 600 }}>{bp > 0 ? '+' : bp < 0 ? '−' : ''}{Math.abs(bp)} bp</span>
+                </span>
+                <input type="range" min={-300} max={400} step={25} value={bp}
+                  onChange={e => { setActivePreset(null); setShocks(s => ({ ...s, rates_bp: parseFloat(e.target.value) })) }}
+                  style={{ width: '100%', accentColor: 'var(--slate)' }} />
+              </label>
+            )
+          })()}
+          {/* Income interruption */}
+          {(() => {
+            const m = shocks.income_loss_months ?? 0
+            return (
+              <label style={{ display: 'block' }}>
+                <span style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+                  <span style={{ fontSize: 11, color: 'var(--text3)' }}>Months without income</span>
+                  <span className="num" style={{ fontSize: 11, fontWeight: 600 }}>{m}</span>
+                </span>
+                <input type="range" min={0} max={24} step={1} value={m}
+                  onChange={e => { setActivePreset(null); setShocks(s => ({ ...s, income_loss_months: parseFloat(e.target.value) })) }}
+                  style={{ width: '100%', accentColor: 'var(--slate)' }} />
+              </label>
+            )
+          })()}
           {/* FX shocks */}
-          {['USD', 'EUR'].map(ccy => {
+          {['USD', 'EUR', 'GBP'].map(ccy => {
             const raw = shocks.fx?.[ccy] ?? 0
             return (
-              <div key={ccy}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+              <label key={ccy} style={{ display: 'block' }}>
+                <span style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
                   <span style={{ fontSize: 11, color: 'var(--text3)' }}>{ccy} vs CZK</span>
-                  <span style={{
-                    fontSize: 11, fontWeight: 600, fontFamily: "'DM Mono', monospace",
-                    color: raw < 0 ? 'var(--red)' : raw > 0 ? 'var(--green)' : 'var(--text3)',
-                  }}>{raw > 0 ? '+' : ''}{(raw * 100).toFixed(0)}%</span>
-                </div>
+                  <span className="num" style={{ fontSize: 11, fontWeight: 600 }}>{raw > 0 ? '+' : raw < 0 ? '−' : ''}{Math.abs(raw * 100).toFixed(0)} %</span>
+                </span>
                 <input type="range" min={-30} max={30} step={1} value={raw * 100}
                   onChange={e => {
                     setActivePreset(null)
                     setShocks(s => ({ ...s, fx: { ...(s.fx ?? {}), [ccy]: parseFloat(e.target.value) / 100 } }))
                   }}
-                  style={{ width: '100%', accentColor: raw < 0 ? 'var(--red)' : 'var(--green)' }} />
-              </div>
+                  style={{ width: '100%', accentColor: 'var(--slate)' }} />
+              </label>
             )
           })}
         </div>
@@ -274,8 +276,8 @@ export default function ScenariosPage() {
                 <div key={s.label} style={{ marginBottom: 10 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, marginBottom: 4 }}>
                     <span style={{ color: 'var(--text2)' }}>{s.label}</span>
-                    <span style={{ fontFamily: "'DM Mono', monospace", color: s.delta >= 0 ? 'var(--green)' : 'var(--red)' }}>
-                      {s.delta >= 0 ? '+' : ''}{fmtCZK(s.delta)}
+                    <span className="num" style={{ color: s.delta >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                      {fmtSignedCZK(s.delta)}
                     </span>
                   </div>
                   <div style={{ height: 6, background: 'var(--bg3)', borderRadius: 3, overflow: 'hidden' }}>

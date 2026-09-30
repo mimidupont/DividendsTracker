@@ -1,7 +1,8 @@
 'use client'
 import { useEffect, useMemo, useState } from 'react'
-import Sidebar from '@/components/Sidebar'
-import { toCZK, fmtCZK } from '@/lib/fx'
+import Link from 'next/link'
+import { PageShell, PageHeader, LoadingShell, EmptyState, Panel } from '@/components/PageShell'
+import { fmtCZK, fmtSignedCZK, fmtShare, fmtPct, trendGlyph, fmtAxisCZK } from '@/lib/fx'
 import { todayISO, addDays, fmtISODateShort, yearOf } from '@/lib/date'
 import { useFx } from '@/hooks/useFx'
 import { useMarketData } from '@/hooks/useMarketData'
@@ -9,11 +10,17 @@ import { useCryptoPrices } from '@/hooks/useCryptoPrices'
 import { useAppData } from '@/hooks/useAppData'
 import { useProfile } from '@/lib/profile'
 import { usePortfolioSnapshots } from '@/hooks/usePortfolioSnapshots'
-import { positionsMetrics, portfolioTotals, buildPositions, unconvertibleCurrencies } from '@/lib/portfolio'
-import { currencyExposure } from '@/lib/exposure'
-import { valueBond } from '@/lib/bonds'
+import {
+  positionsMetrics, portfolioTotals, buildPositions, unconvertibleCurrencies,
+  totalsByClass, netWorthCZK, incomeByClass, investedCostAndValue, type AssetClass,
+} from '@/lib/portfolio'
+import { snapshotValues, snapshotBlockers, isValuedAtCost } from '@/lib/snapshot'
 import { contributionsVsGrowth, externalFlows } from '@/lib/transactions'
+import { attentionItems } from '@/lib/alerts'
+import { ASSET_CLASS_LABELS, ASSET_CLASS_COLORS } from '@/lib/risk'
+import { signColor, btnSecondary } from '@/lib/ui'
 import RunwayCard from '@/components/RunwayCard'
+import RecordModal from '@/components/RecordModal'
 import { DEFAULT_PLAN, effectiveAnnualExpenses } from '@/lib/fire'
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -25,13 +32,6 @@ function greeting() {
   return h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening'
 }
 
-interface AssetBlock {
-  label: string
-  value: number
-  color: string
-  href: string
-}
-
 type PLWindow = '7d' | '30d' | 'ytd'
 
 const PL_WINDOWS: { key: PLWindow; label: string; days: number | 'ytd' }[] = [
@@ -40,11 +40,23 @@ const PL_WINDOWS: { key: PLWindow; label: string; days: number | 'ytd' }[] = [
   { key: 'ytd', label: 'YTD',     days: 'ytd' },
 ]
 
+const CLASS_HREF: Record<AssetClass, string> = {
+  stock: '/holdings', etf: '/holdings', bond: '/bonds', cash: '/cash', crypto: '/crypto', realestate: '/realestate',
+}
+/** Order and grouping of the class cards (stocks and ETFs shown together). */
+const CARD_CLASSES: { key: string; label: string; classes: AssetClass[]; color: string; href: string }[] = [
+  { key: 'equity', label: 'Stocks & ETFs', classes: ['stock', 'etf'], color: ASSET_CLASS_COLORS.stock, href: '/holdings' },
+  { key: 'bond', label: 'Bonds', classes: ['bond'], color: ASSET_CLASS_COLORS.bond, href: '/bonds' },
+  { key: 'cash', label: 'Cash & savings', classes: ['cash'], color: ASSET_CLASS_COLORS.cash, href: '/cash' },
+  { key: 'crypto', label: 'Crypto', classes: ['crypto'], color: ASSET_CLASS_COLORS.crypto, href: '/crypto' },
+  { key: 'realestate', label: 'Real estate (equity)', classes: ['realestate'], color: ASSET_CLASS_COLORS.realestate, href: '/realestate' },
+]
+
 export default function Dashboard() {
   const appData = useAppData()
   const {
-    holdings, projections, dividendsReceived,
-    bankAccounts, cryptoHoldings, realEstate, transactions, bonds, loading, error,
+    holdings, projections, bankAccounts, cryptoHoldings, realEstate, bondHoldings,
+    transactions, dividendsReceived, loading, error,
   } = appData
 
   const { activeProfile } = useProfile()
@@ -54,8 +66,8 @@ export default function Dashboard() {
   const { snapshots, saveSnapshot, getPLSummary, error: snapshotError } = usePortfolioSnapshots()
 
   const [plWindow, setPlWindow] = useState<PLWindow>('30d')
+  const [recording, setRecording] = useState(false)
 
-  // Kick off market + crypto fetches when data arrives.
   // Keyed on the symbol list, not its length: swapping profiles can keep the
   // count identical while every ticker changes.
   const symbolKey = holdings.map(h => h.symbol).join(',')
@@ -71,610 +83,448 @@ export default function Dashboard() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [coinKey])
 
-  // ── Asset values ──────────────────────────────────────────────────────────
+  const today = todayISO()
+
+  // ── One position model for every figure on this page ─────────────────────
   const positions = useMemo(
+    () => buildPositions(appData, fx, market, cryptoPrices, today),
+    [appData, fx, market, cryptoPrices, today]
+  )
+  const stockMetrics = useMemo(
     () => positionsMetrics(holdings, market, fx, projections),
     [holdings, market, fx, projections]
   )
-  const stockTotals   = portfolioTotals(positions)
-  const stockValueCZK = stockTotals.marketCZK
-  const stockCostCZK  = stockTotals.costCZK
+  const stockTotals = portfolioTotals(stockMetrics)
+  const byClass = totalsByClass(positions)
+  const incomeClass = incomeByClass(positions)
+  const totalNetWorth = netWorthCZK(positions)
+  const invested = investedCostAndValue(positions)
+  const totalGainCZK = invested.valueCZK - invested.costCZK
+  const totalIncome = Object.values(incomeClass).reduce((a, b) => a + b, 0)
+  const fxProblems = useMemo(() => unconvertibleCurrencies(positions, fx), [positions, fx])
+  const blockers = useMemo(() => snapshotBlockers(positions), [positions])
 
-  const cashValueCZK = bankAccounts.reduce((s, a) =>
-    s + toCZK(a.balance, a.currency, fx), 0)
-
-  const cryptoValueCZK = cryptoHoldings.reduce((s, c) => {
-    const priceUSD = cryptoPrices.getPrice(c.coin_id, c.avg_cost_usd)
-    return s + toCZK(priceUSD * c.amount, 'USD', fx)
-  }, 0)
-  const cryptoCostCZK = cryptoHoldings.reduce((s, c) =>
-    s + toCZK(c.avg_cost_usd * c.amount, 'USD', fx), 0)
-
-  // Bonds are valued dirty — clean price plus accrued interest — because the
-  // accrued portion is money already earned and paid on the next coupon date.
-  const bondValuations = useMemo(() => bonds.map(b => valueBond(b)), [bonds])
-  const bondValueCZK = bondValuations.reduce((s, v) =>
-    s + toCZK(v.dirtyValue, v.bond.currency, fx), 0)
-  const bondCostCZK = bondValuations.reduce((s, v) =>
-    s + toCZK(v.costValue, v.bond.currency, fx), 0)
-
-  // Ownership share applies to the debt as well as the asset — counting 100% of
-  // a mortgage against a 50%-owned property understated equity by half the loan.
-  const realEstateGrossCZK = realEstate.reduce((s, p) =>
-    s + toCZK(p.current_value * (p.ownership_pct / 100), p.currency, fx), 0)
-  const mortgageCZK = realEstate.reduce((s, p) =>
-    s + toCZK(p.mortgage_balance * (p.ownership_pct / 100), p.currency, fx), 0)
-  const realEstateEquityCZK = realEstateGrossCZK - mortgageCZK
-  const realEstateCostCZK = realEstate.reduce((s, p) =>
-    s + toCZK(p.purchase_price * (p.ownership_pct / 100), p.currency, fx), 0)
-
-  const totalNetWorth =
-    stockValueCZK + bondValueCZK + cashValueCZK + cryptoValueCZK + realEstateEquityCZK
-  // Cash is excluded from both sides: it has no cost basis, and including it
-  // dilutes the return percentage without contributing any gain.
-  const investedCZK = stockCostCZK + bondCostCZK + cryptoCostCZK + realEstateCostCZK
-  const investedValueCZK = stockValueCZK + bondValueCZK + cryptoValueCZK + realEstateGrossCZK
-  const totalGainCZK = investedValueCZK - investedCZK
-
-  // ── Save today's snapshot once every asset class has priced ───────────────
-  // Waiting for crypto too: saving as soon as equities landed recorded a net
-  // worth with crypto still valued at cost.
-  const cryptoReady = cryptoHoldings.length === 0 || cryptoPrices.state === 'done'
-  const pricesReady = holdings.length === 0 || market.state === 'done'
-
-  // Every position, normalised — also the basis for the per-currency exposure
-  // recorded on the snapshot, which is what makes FX attribution possible later.
-  const allPositions = useMemo(
-    () => buildPositions(appData, fx, market, cryptoPrices),
-    [appData, fx, market, cryptoPrices]
-  )
-  const exposure = useMemo(() => currencyExposure(allPositions, fx), [allPositions, fx])
-
-  // Cash, crypto and property go through bare toCZK calls, which leave an
-  // unknown currency unconverted. Collect them across every class so the banner
-  // above can say the total is wrong rather than showing it as if it were fine.
-  const fxProblems = useMemo(
-    () => unconvertibleCurrencies(allPositions, fx),
-    [allPositions, fx]
-  )
-
+  // ── Save today's snapshot once every priced position has a live price ────
+  // Readiness is by coverage, not a shared "done" flag: after a profile switch
+  // the flag could still say "done" for the previous profile's tickers while
+  // the new ones were valued at cost.
+  const hasAnything = positions.length > 0
+  const ready = !loading && !error && fxLive && !fxLoading &&
+    market.state !== 'loading' && cryptoPrices.state !== 'loading' &&
+    blockers.length === 0 && hasAnything && appData.profileId === activeProfile?.id
+  const values = useMemo(() => snapshotValues(positions, fx), [positions, fx])
   useEffect(() => {
-    if (!loading && !error && fxLive && pricesReady && cryptoReady && totalNetWorth > 0) {
-      saveSnapshot({
-        total_value_czk: totalNetWorth,
-        stocks_czk:      stockValueCZK,
-        bonds_czk:       bondValueCZK,
-        cash_czk:        cashValueCZK,
-        crypto_czk:      cryptoValueCZK,
-        realestate_czk:  realEstateEquityCZK,
-        fx_usd: fx['USD'],
-        fx_eur: fx['EUR'],
-        fx_gbp: fx['GBP'],
-        exposure_usd_local: exposure.usdLocal,
-        exposure_eur_local: exposure.eurLocal,
-        exposure_czk_local: exposure.czkLocal,
-        exposure_other_czk: exposure.otherCZK,
-      })
-    }
+    if (ready) saveSnapshot(values, appData.profileId)
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading, error, fxLive, pricesReady, cryptoReady, totalNetWorth, exposure])
+  }, [ready, values.total_value_czk])
 
-  // ── Income ─────────────────────────────────────────────────────────────────
-  const divIncomeCZK = stockTotals.annualDivCZK
-  const interestIncomeCZK = bankAccounts.reduce((s, a) =>
-    s + toCZK(a.balance * a.interest_rate, a.currency, fx), 0)
-  const rentalIncomeCZK = realEstate.reduce((s, p) =>
-    s + toCZK(p.monthly_rent * 12 * (p.ownership_pct / 100), p.currency, fx), 0)
-  const stakingIncomeCZK = cryptoHoldings.reduce((s, c) => {
-    const priceUSD = cryptoPrices.getPrice(c.coin_id, c.avg_cost_usd)
-    return s + toCZK(priceUSD * c.amount * c.staking_apy, 'USD', fx)
-  }, 0)
-  // Coupons net of withholding — the gross figure is not what reaches the
-  // account, and this total feeds the FIRE and runway views.
-  const couponIncomeCZK = bondValuations.reduce((s, v) =>
-    s + toCZK(v.annualCouponNet, v.bond.currency, fx), 0)
-  const totalAnnualIncome =
-    divIncomeCZK + couponIncomeCZK + interestIncomeCZK + rentalIncomeCZK + stakingIncomeCZK
-
-  const assetBlocks: AssetBlock[] = [
-    { label: 'Stocks & ETFs',  value: stockValueCZK,       color: 'var(--green)',  href: '/holdings' },
-    { label: 'Bonds',          value: bondValueCZK,         color: 'var(--blue)',   href: '/bonds' },
-    { label: 'Cash & Savings', value: cashValueCZK,         color: 'var(--blue)',   href: '/cash' },
-    { label: 'Crypto',         value: cryptoValueCZK,       color: 'var(--purple)', href: '/crypto' },
-    { label: 'Real Estate',    value: realEstateEquityCZK,  color: 'var(--teal)',   href: '/realestate' },
-  ]
-
-  // Splits the net-worth curve into money added and money earned. Needs a
-  // transaction ledger — without one it stays empty rather than guessing.
-  const growthSplit = useMemo(
-    () => contributionsVsGrowth(transactions, snapshots),
-    [transactions, snapshots]
+  // ── P&L windows: deposits and withdrawals taken out ──────────────────────
+  const flows = useMemo(() => externalFlows(transactions), [transactions])
+  const selectedWindow = PL_WINDOWS.find(w => w.key === plWindow)!
+  const summaries = useMemo(
+    () => Object.fromEntries(PL_WINDOWS.map(w => [w.key, getPLSummary(totalNetWorth, w.days, flows)])),
+    [getPLSummary, totalNetWorth, flows]
   )
-  const latestSplit = growthSplit.length > 0
-    ? growthSplit[growthSplit.length - 1]
-    : { contributed: 0, growth: 0, date: '', value: 0 }
+  const plSummary = summaries[plWindow]
+  const flowAware = flows.length > 0
+
+  const cutoff = selectedWindow.days === 'ytd'
+    ? `${today.slice(0, 4)}-01-01`
+    : addDays(today, -(selectedWindow.days as number))
+  const chartData = [
+    ...snapshots.filter(s => s.snapshot_date >= cutoff && s.snapshot_date < today)
+      .map(s => ({ date: s.snapshot_date, value: s.total_value_czk })),
+    ...(hasAnything ? [{ date: today, value: totalNetWorth }] : []),
+  ]
+  const referenceValue = chartData.length > 0 ? chartData[0].value : null
+  const chartStroke = (plSummary.pl ?? 0) < 0 ? 'var(--red)' : 'var(--green)'
+
+  const growthSplit = useMemo(() => contributionsVsGrowth(transactions, snapshots), [transactions, snapshots])
+  const latestSplit = growthSplit.length > 0 ? growthSplit[growthSplit.length - 1] : null
 
   const dashboardExpenses = effectiveAnnualExpenses(
     { ...DEFAULT_PLAN, ...(appData.financialPlan ?? {}) }, appData.expenseLog)
 
-  const today = todayISO()
-  const CURRENT_YEAR = yearOf(today)
   const ytdDivCZK = dividendsReceived
-    .filter(d => yearOf(d.payment_date) === CURRENT_YEAR)
-    .reduce((s, d) => s + toCZK(d.gross_amount, d.currency, fx), 0)
+    .filter(d => yearOf(d.payment_date) === yearOf(today))
+    .reduce((s, d) => s + (d.gross_amount - (d.withholding_tax ?? 0)) * (d.fx_rate_czk ?? fx[d.currency.toUpperCase()] ?? 1), 0)
 
-  // ── P&L chart data ─────────────────────────────────────────────────────────
-  const selectedWindow = PL_WINDOWS.find(w => w.key === plWindow)!
-  const plSummary = totalNetWorth > 0
-    ? getPLSummary(totalNetWorth, selectedWindow.days)
-    : { pl: 0, plPct: null, label: '', fromDate: null, fromValue: null }
+  const alerts = useMemo(() => attentionItems({
+    positions, accounts: bankAccounts, bonds: bondHoldings, holdings,
+    metadata: appData.assetMetadata, targets: appData.allocationTargets,
+    costFxUnknown: stockTotals.costFxUnknown, snapshotBlockedBy: hasAnything ? blockers : [], today,
+  }), [positions, bankAccounts, bondHoldings, holdings, appData.assetMetadata, appData.allocationTargets, stockTotals.costFxUnknown, blockers, hasAnything, today])
 
-  // Build chart data: historical snapshots + today
-  const cutoff = selectedWindow.days === 'ytd'
-    ? `${CURRENT_YEAR}-01-01`
-    : addDays(today, -(selectedWindow.days as number))
+  const cards = CARD_CLASSES.map(c => {
+    const ps = positions.filter(p => c.classes.includes(p.assetClass))
+    const value = ps.reduce((s, p) => s + p.valueCZK, 0)
+    const withCost = ps.filter(p => !p.isLiability && p.assetClass !== 'cash')
+    const cost = withCost.reduce((s, p) => s + p.costCZK, 0)
+    const gross = withCost.reduce((s, p) => s + p.valueCZK, 0)
+    return {
+      ...c, value, count: ps.filter(p => !p.isLiability).length,
+      pl: c.key === 'cash' || cost <= 0 ? null : gross - cost,
+      plPct: c.key === 'cash' || cost <= 0 ? null : ((gross - cost) / cost) * 100,
+      atCost: ps.filter(isValuedAtCost).length,
+    }
+  }).filter(c => c.count > 0 || c.key === 'equity' || c.key === 'cash')
 
-  const chartSnapshots = snapshots.filter(s => s.snapshot_date >= cutoff)
+  const mix = (Object.keys(byClass) as AssetClass[])
+    .map(k => ({ key: k, value: byClass[k] }))
+    .filter(m => m.value > 0)
+  const mixTotal = mix.reduce((s, m) => s + m.value, 0)
 
-  // Add today's live value if not already in snapshots
-  const todayInSnapshots = chartSnapshots.some(s => s.snapshot_date === today)
-  const chartData = [
-    ...chartSnapshots.map(s => ({
-      date: s.snapshot_date,
-      value: s.total_value_czk,
-      isToday: s.snapshot_date === today,
-    })),
-    ...(!todayInSnapshots && totalNetWorth > 0 ? [{
-      date: today,
-      value: totalNetWorth,
-      isToday: true,
-    }] : []),
-  ].sort((a, b) => a.date.localeCompare(b.date))
+  if (loading) return <LoadingShell label="Loading wealth data…" />
 
-  // Reference line = first value in the window
-  const referenceValue = chartData.length > 0 ? chartData[0].value : null
+  const header = (
+    <PageHeader
+      eyebrow={new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}
+      title={`${greeting()}${activeProfile ? `, ${activeProfile.display_name}` : ''}`}
+      actions={<>
+        <button type="button" onClick={refreshFx} disabled={fxLoading} style={btnSecondary}>
+          {fxLoading ? '⟳' : '↻'} FX
+        </button>
+        <button type="button"
+          onClick={() => market.refresh(holdings.map(h => h.symbol), true)}
+          disabled={market.state === 'loading'}
+          style={btnSecondary}
+        >
+          {market.state === 'loading' ? '⟳ Fetching…' : '↻ Prices'}
+        </button>
+      </>}
+    />
+  )
 
-  const plPositive = plSummary.pl >= 0
-  const plColor = plPositive ? 'var(--green)' : 'var(--red)'
-
-  const fmtAxisDate = fmtISODateShort
-
-  const ChartTooltip = ({ active, payload, label }: any) => {
-    if (!active || !payload?.length) return null
-    const val: number = payload[0].value
-    const ref = referenceValue ?? val
-    const diff = val - ref
-    const diffPct = ref > 0 ? (diff / ref) * 100 : 0
+  if (!hasAnything && !error) {
     return (
-      <div style={{
-        background: 'var(--bg2)', border: '1px solid var(--border2)',
-        borderRadius: 8, padding: '10px 14px', fontSize: 11,
-        boxShadow: '0 4px 12px rgba(0,0,0,0.08)',
-      }}>
-        <div style={{ color: 'var(--text3)', marginBottom: 4 }}>{fmtAxisDate(label)}</div>
-        <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 13, fontWeight: 600 }}>{fmtCZK(val)}</div>
-        <div style={{ color: diff >= 0 ? 'var(--green)' : 'var(--red)', marginTop: 2 }}>
-          {diff >= 0 ? '+' : ''}{fmtCZK(diff)} ({diffPct >= 0 ? '+' : ''}{diffPct.toFixed(2)}%)
-        </div>
-      </div>
+      <PageShell>
+        {header}
+        <EmptyState
+          icon="◈"
+          title="Nothing tracked yet"
+          body={<>Record your first purchase, or add a bank account, bond, coin or property. Everything
+            you add is valued in CZK and shows up here as net worth.</>}
+          action={<button type="button" onClick={() => setRecording(true)} style={{ ...btnSecondary, background: 'var(--green-bg)', borderColor: 'var(--green-bd)', color: 'var(--green)' }}>+ Record a transaction</button>}
+        />
+        {recording && <RecordModal onClose={() => setRecording(false)} />}
+      </PageShell>
     )
   }
 
-  if (loading) return (
-    <div style={{ display: 'flex' }}>
-      <Sidebar />
-      <main style={{ marginLeft: 'var(--sidebar-w)', flex: 1, padding: 40, color: 'var(--text3)' }}>
-        Loading wealth data…
-      </main>
-    </div>
-  )
-
   return (
-    <div style={{ display: 'flex' }}>
-      <Sidebar />
-      <main style={{ marginLeft: 'var(--sidebar-w)', flex: 1, padding: '32px 40px', maxWidth: 1200 }}>
+    <PageShell>
+      {header}
 
-        {/* Header */}
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 32 }}>
-          <div>
-            <div style={{ fontSize: 11, color: 'var(--text4)', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 6 }}>
-              {new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}
-            </div>
-            <h1 style={{ fontFamily: "'Syne', sans-serif", fontSize: 28, fontWeight: 700, letterSpacing: '-0.02em', lineHeight: 1.1 }}>
-              {greeting()}
-              {activeProfile && <>, <span style={{ color: 'var(--green)' }}>{activeProfile.display_name}</span></>}
-            </h1>
-          </div>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button onClick={refreshFx} disabled={fxLoading} style={btnSecondary}>
-              {fxLoading ? '⟳' : '↻'} FX rates
-              {fxTs && <span style={{ color: 'var(--green)', marginLeft: 6 }}>{fxTs}</span>}
-              {!fxLoading && !fxLive && <span style={{ color: 'var(--amber)', marginLeft: 6 }}>fallback</span>}
-            </button>
-            <button
-              onClick={() => market.refresh(holdings.map(h => h.symbol), true)}
-              disabled={market.state === 'loading'}
-              style={btnSecondary}
-            >
-              {market.state === 'loading' ? '⟳ Fetching…' : '↻ Prices'}
-            </button>
-          </div>
-        </div>
-
-        {/* Anything that would make the totals below wrong is stated, not hidden */}
-        {(error || !fxLive || market.state === 'error' || fxProblems.length > 0 || snapshotError) && (
-          <div style={{
-            background: 'var(--amber-bg)', border: '1px solid var(--amber-bd)',
-            color: 'var(--amber)', borderRadius: 10, padding: '10px 14px',
-            marginBottom: 16, fontSize: 11, lineHeight: 1.6,
-          }}>
-            {error && <div>⚠ Some data could not be loaded — totals are incomplete: {error}</div>}
-            {snapshotError && <div>⚠ Snapshot history unavailable, so the P&amp;L windows below have nothing to compare against: {snapshotError}</div>}
-            {!fxLive && <div>⚠ Live FX unavailable — CZK values use fallback rates and are approximate.</div>}
-            {market.state === 'error' && <div>⚠ Live prices unavailable — positions are valued at cost. {market.errorMsg}</div>}
-            {fxProblems.length > 0 && (
-              <div>
-                ⚠ No CZK rate for {fxProblems.join(', ')} — holdings in{' '}
-                {fxProblems.length === 1 ? 'that currency is' : 'those currencies are'} counted
-                into net worth <strong>unconverted</strong>, so the total below is wrong by
-                whatever the real rate is.
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Net Worth Hero */}
-        <div style={{
-          background: 'var(--bg2)', border: '1px solid var(--border)',
-          borderRadius: 16, padding: '32px 36px', marginBottom: 20,
-          position: 'relative', overflow: 'hidden',
+      {/* Anything that would make the totals below wrong is stated, not hidden */}
+      {(error || !fxLive || market.state === 'error' || fxProblems.length > 0 || snapshotError) && (
+        <div role="alert" style={{
+          background: 'var(--amber-bg)', border: '1px solid var(--amber-bd)',
+          color: 'var(--amber)', borderRadius: 10, padding: '10px 14px',
+          marginBottom: 16, fontSize: 11, lineHeight: 1.6,
         }}>
-          <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 1, background: 'linear-gradient(90deg, var(--green) 0%, var(--blue) 40%, var(--purple) 70%, var(--teal) 100%)', opacity: 0.6 }} />
-
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 40 }}>
+          {error && <div>⚠ Some data could not be loaded — totals are incomplete: {error}</div>}
+          {snapshotError && <div>⚠ Snapshot history unavailable, so the P&amp;L windows below have nothing to compare against: {snapshotError}</div>}
+          {!fxLive && <div>⚠ Live FX unavailable — CZK values use fallback rates and are approximate.</div>}
+          {market.state === 'error' && <div>⚠ Live prices unavailable — positions are valued at cost. {market.errorMsg}</div>}
+          {fxProblems.length > 0 && (
             <div>
-              <div style={{ fontSize: 10, letterSpacing: '0.12em', textTransform: 'uppercase', color: 'var(--text3)', marginBottom: 8, fontWeight: 500 }}>Total Net Worth</div>
-              <div style={{ fontFamily: "'Syne', sans-serif", fontSize: 42, fontWeight: 700, letterSpacing: '-0.03em', lineHeight: 1 }}>
-                {fmtCZK(totalNetWorth)}
-              </div>
-              <div style={{ marginTop: 10, display: 'flex', gap: 16 }}>
-                <div style={{ fontSize: 11, color: totalGainCZK >= 0 ? 'var(--green)' : 'var(--red)' }}>
-                  {totalGainCZK >= 0 ? '▲' : '▼'} {totalGainCZK >= 0 ? '+' : ''}{fmtCZK(totalGainCZK)} total gain
-                </div>
-                <div style={{ fontSize: 11, color: 'var(--text4)' }}>
-                  {investedCZK > 0 ? `${((totalGainCZK / investedCZK) * 100).toFixed(1)}% on invested` : ''}
-                </div>
-              </div>
-            </div>
-
-            <div>
-              <div style={{ fontSize: 10, letterSpacing: '0.12em', textTransform: 'uppercase', color: 'var(--text3)', marginBottom: 8, fontWeight: 500 }}>Est. Annual Income</div>
-              <div style={{ fontFamily: "'Syne', sans-serif", fontSize: 42, fontWeight: 700, letterSpacing: '-0.03em', lineHeight: 1, color: 'var(--amber)' }}>
-                {fmtCZK(totalAnnualIncome)}
-              </div>
-              <div style={{ marginTop: 10, display: 'flex', gap: 16, flexWrap: 'wrap' }}>
-                <span style={{ fontSize: 11, color: 'var(--green)' }}>Dividends {fmtCZK(divIncomeCZK)}</span>
-                <span style={{ fontSize: 11, color: 'var(--blue)' }}>Interest {fmtCZK(interestIncomeCZK)}</span>
-                {rentalIncomeCZK > 0 && <span style={{ fontSize: 11, color: 'var(--teal)' }}>Rent {fmtCZK(rentalIncomeCZK)}</span>}
-                {stakingIncomeCZK > 0 && <span style={{ fontSize: 11, color: 'var(--purple)' }}>Staking {fmtCZK(stakingIncomeCZK)}</span>}
-              </div>
-            </div>
-          </div>
-
-          {/* Asset allocation bar */}
-          <div style={{ marginTop: 28 }}>
-            <div style={{ display: 'flex', gap: 2, height: 6, borderRadius: 4, overflow: 'hidden' }}>
-              {assetBlocks.filter(a => a.value > 0).map(a => (
-                <div key={a.label} style={{ flex: a.value, background: a.color, opacity: 0.8, transition: 'flex 0.6s ease' }} />
-              ))}
-            </div>
-            <div style={{ display: 'flex', gap: 20, marginTop: 10 }}>
-              {assetBlocks.filter(a => a.value > 0).map(a => (
-                <div key={a.label} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <div style={{ width: 6, height: 6, borderRadius: 2, background: a.color }} />
-                  <span style={{ fontSize: 10, color: 'var(--text3)' }}>{a.label}</span>
-                  <span style={{ fontSize: 10, color: 'var(--text4)', fontFamily: "'DM Mono', monospace" }}>
-                    {totalNetWorth > 0 ? ((a.value / totalNetWorth) * 100).toFixed(0) : 0}%
-                  </span>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        {/* ── P&L Evolution Chart ─────────────────────────────────────────── */}
-        <div style={{
-          background: 'var(--bg2)', border: '1px solid var(--border)',
-          borderRadius: 16, padding: '24px 28px', marginBottom: 20,
-        }}>
-          {/* Header row */}
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 20 }}>
-            <div>
-              <div style={{ fontSize: 10, letterSpacing: '0.12em', textTransform: 'uppercase', color: 'var(--text3)', fontWeight: 500, marginBottom: 6 }}>
-                Portfolio P&amp;L
-              </div>
-              {/* P&L summary for selected window */}
-              <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
-                <span style={{
-                  fontFamily: "'Syne', sans-serif", fontSize: 28, fontWeight: 700,
-                  letterSpacing: '-0.02em', color: plColor,
-                }}>
-                  {plSummary.pl >= 0 ? '+' : ''}{fmtCZK(plSummary.pl)}
-                </span>
-                {plSummary.plPct !== null && (
-                  <span style={{ fontSize: 14, color: plColor, fontFamily: "'DM Mono', monospace" }}>
-                    {plSummary.plPct >= 0 ? '+' : ''}{plSummary.plPct.toFixed(2)}%
-                  </span>
-                )}
-              </div>
-              {plSummary.fromDate && (
-                <div style={{ fontSize: 11, color: 'var(--text4)', marginTop: 2 }}>
-                  vs {fmtAxisDate(plSummary.fromDate)}
-                  {plSummary.fromValue && (
-                    <span style={{ marginLeft: 6 }}>({fmtCZK(plSummary.fromValue)})</span>
-                  )}
-                </div>
-              )}
-              {snapshots.length === 0 && (
-                <div style={{ fontSize: 11, color: 'var(--amber)', marginTop: 4 }}>
-                  ⓘ History builds daily — check back tomorrow for trend data
-                </div>
-              )}
-            </div>
-
-            {/* Window selector */}
-            <div style={{ display: 'flex', border: '1px solid var(--border2)', borderRadius: 8, overflow: 'hidden' }}>
-              {PL_WINDOWS.map(w => (
-                <button key={w.key} onClick={() => setPlWindow(w.key)} style={{
-                  padding: '6px 16px', border: 'none', cursor: 'pointer',
-                  fontSize: 12, fontFamily: "'Inter', sans-serif",
-                  background: plWindow === w.key ? (plPositive ? 'var(--green-bg)' : 'var(--red-bg)') : 'var(--bg)',
-                  color: plWindow === w.key ? plColor : 'var(--text3)',
-                  borderRight: w.key !== 'ytd' ? '1px solid var(--border2)' : 'none',
-                  fontWeight: plWindow === w.key ? 500 : 400,
-                  transition: 'background 0.15s',
-                }}>
-                  {w.label}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* P&L period cards */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10, marginBottom: 20 }}>
-            {PL_WINDOWS.map(w => {
-              const summary = totalNetWorth > 0 ? getPLSummary(totalNetWorth, w.days) : { pl: 0, plPct: null }
-              const positive = summary.pl >= 0
-              const color = positive ? 'var(--green)' : 'var(--red)'
-              const bg    = positive ? 'var(--green-bg)' : 'var(--red-bg)'
-              const bd    = positive ? 'var(--green-bd)' : 'var(--red-bd)'
-              const isActive = plWindow === w.key
-              return (
-                <button
-                  key={w.key}
-                  onClick={() => setPlWindow(w.key)}
-                  style={{
-                    padding: '12px 16px', borderRadius: 10, cursor: 'pointer', textAlign: 'left',
-                    background: isActive ? bg : 'var(--bg3)',
-                    border: `1px solid ${isActive ? bd : 'var(--border)'}`,
-                    transition: 'all 0.15s',
-                    fontFamily: "'Inter', sans-serif",
-                  }}
-                >
-                  <div style={{ fontSize: 9, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--text4)', marginBottom: 5, fontWeight: 500 }}>
-                    {w.label}
-                  </div>
-                  <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 14, fontWeight: 600, color: isActive ? color : (positive ? 'var(--green)' : 'var(--red)') }}>
-                    {summary.pl >= 0 ? '+' : ''}{fmtCZK(summary.pl, 0)}
-                  </div>
-                  {summary.plPct !== null && (
-                    <div style={{ fontSize: 10, color: 'var(--text3)', marginTop: 2 }}>
-                      {summary.plPct >= 0 ? '+' : ''}{summary.plPct.toFixed(2)}%
-                    </div>
-                  )}
-                  {summary.plPct === null && (
-                    <div style={{ fontSize: 10, color: 'var(--text4)', marginTop: 2 }}>no data yet</div>
-                  )}
-                </button>
-              )
-            })}
-          </div>
-
-          {/* Area chart */}
-          {chartData.length >= 2 ? (
-            <ResponsiveContainer width="100%" height={180}>
-              <AreaChart data={chartData} margin={{ top: 4, right: 4, left: 0, bottom: 0 }}>
-                <defs>
-                  <linearGradient id="plGradient" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%"  stopColor={plPositive ? '#1a7a3a' : '#dc2626'} stopOpacity={0.15} />
-                    <stop offset="95%" stopColor={plPositive ? '#1a7a3a' : '#dc2626'} stopOpacity={0} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
-                <XAxis
-                  dataKey="date"
-                  tickFormatter={fmtAxisDate}
-                  tick={{ fontSize: 10, fill: 'var(--text4)' }}
-                  axisLine={false}
-                  tickLine={false}
-                  interval="preserveStartEnd"
-                />
-                <YAxis
-                  tickFormatter={n => `${(n / 1000).toFixed(0)}k`}
-                  tick={{ fontSize: 10, fill: 'var(--text4)' }}
-                  axisLine={false}
-                  tickLine={false}
-                  width={44}
-                  domain={['auto', 'auto']}
-                />
-                <Tooltip content={<ChartTooltip />} />
-                {referenceValue != null && (
-                  <ReferenceLine
-                    y={referenceValue}
-                    stroke="var(--border2)"
-                    strokeDasharray="4 4"
-                  />
-                )}
-                <Area
-                  type="monotone"
-                  dataKey="value"
-                  stroke={plPositive ? 'var(--green)' : 'var(--red)'}
-                  strokeWidth={2}
-                  fill="url(#plGradient)"
-                  dot={false}
-                  activeDot={{ r: 4, fill: plPositive ? 'var(--green)' : 'var(--red)', strokeWidth: 0 }}
-                />
-              </AreaChart>
-            </ResponsiveContainer>
-          ) : (
-            <div style={{
-              height: 180, display: 'flex', alignItems: 'center', justifyContent: 'center',
-              color: 'var(--text4)', fontSize: 12, flexDirection: 'column', gap: 6,
-              background: 'var(--bg3)', borderRadius: 10,
-            }}>
-              <div style={{ fontSize: 20, opacity: 0.4 }}>◎</div>
-              <div>Chart builds as daily snapshots accumulate</div>
-              <div style={{ fontSize: 11, color: 'var(--text4)' }}>
-                {snapshots.length === 0
-                  ? 'First snapshot saved today — come back tomorrow'
-                  : `${snapshots.length} snapshot${snapshots.length > 1 ? 's' : ''} saved — need at least 2 to show a trend`}
-              </div>
+              ⚠ No CZK rate for {fxProblems.join(', ')} — those holdings are counted into net worth
+              <strong> unconverted</strong>, so the total below is wrong by whatever the real rate is.
             </div>
           )}
         </div>
+      )}
 
-        {/* Asset class cards */}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 14, marginBottom: 20 }}>
-          {assetBlocks.map((a, i) => {
-            const pct = totalNetWorth > 0 ? (a.value / totalNetWorth) * 100 : 0
-            const gains = i === 0 ? stockValueCZK - stockCostCZK : null
-            return (
-              <a key={a.label} href={a.href} style={{ textDecoration: 'none' }}>
-                <div style={{
-                  background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 12,
-                  padding: '18px 20px', cursor: 'pointer', position: 'relative', overflow: 'hidden',
-                }}>
-                  <div style={{ position: 'absolute', bottom: 0, left: 0, height: 3, width: `${pct}%`, background: a.color, opacity: 0.7, borderRadius: '0 2px 0 0', transition: 'width 0.6s ease' }} />
-                  <div style={{ fontSize: 9, letterSpacing: '0.12em', textTransform: 'uppercase', color: a.color, marginBottom: 10, fontWeight: 600, opacity: 0.9 }}>{a.label}</div>
-                  <div style={{ fontFamily: "'Syne', sans-serif", fontSize: 20, fontWeight: 700, letterSpacing: '-0.02em', color: 'var(--text)', marginBottom: 4 }}>{fmtCZK(a.value)}</div>
-                  <div style={{ fontSize: 10, color: 'var(--text4)' }}>
-                    {pct.toFixed(1)}% of portfolio
-                    {gains !== null && gains !== 0 && (
-                      <span style={{ marginLeft: 8, color: gains >= 0 ? 'var(--green)' : 'var(--red)' }}>
-                        {gains >= 0 ? '+' : ''}{fmtCZK(gains)} P&L
-                      </span>
-                    )}
-                  </div>
+      {/* ── Hero + attention ─────────────────────────────────────────────── */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 14, marginBottom: 14 }}>
+        <section aria-label="Net worth" style={{
+          background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 14, padding: '26px 28px',
+          gridColumn: alerts.length > 0 ? undefined : '1 / -1',
+        }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 28 }}>
+            <div>
+              <div style={labelCaps}>Net worth</div>
+              <div className="num" style={{ fontFamily: "'Instrument Serif', serif", fontSize: 40, lineHeight: 1.05 }}>
+                {fmtCZK(totalNetWorth)}
+              </div>
+              <div style={{ marginTop: 8, fontSize: 11, color: signColor(totalGainCZK) }}>
+                {trendGlyph(totalGainCZK)} {fmtSignedCZK(totalGainCZK)} unrealised
+                <span style={{ color: 'var(--text3)', marginLeft: 6 }}>
+                  {invested.costCZK > 0 ? `${fmtPct((totalGainCZK / invested.costCZK) * 100, 1)} on invested` : ''}
+                </span>
+              </div>
+              {stockTotals.fxPLCZK !== 0 && (
+                <div style={{ marginTop: 2, fontSize: 11, color: 'var(--text3)' }}>
+                  of which currency: <span style={{ color: signColor(stockTotals.fxPLCZK) }}>{fmtSignedCZK(stockTotals.fxPLCZK)}</span>
                 </div>
-              </a>
+              )}
+              <div style={{ marginTop: 8, fontSize: 10, color: 'var(--text3)' }}>
+                Prices {market.fetchedAt ? new Date(market.fetchedAt).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) : '—'}
+                {' · '}FX {fxLive ? (fxTs ?? '—') : <span style={{ color: 'var(--amber)' }}>fallback</span>}
+                {blockers.length > 0 && <> · <span style={{ color: 'var(--amber)' }}>{blockers.length} at cost</span></>}
+              </div>
+            </div>
+            <div>
+              <div style={labelCaps}>Est. annual income <span style={{ textTransform: 'none', letterSpacing: 0 }}>(gross)</span></div>
+              <div className="num" style={{ fontFamily: "'Instrument Serif', serif", fontSize: 40, lineHeight: 1.05, color: 'var(--c-income)' }}>
+                {fmtCZK(totalIncome)}
+              </div>
+              <div style={{ marginTop: 8, fontSize: 11, color: 'var(--text3)' }}>
+                {fmtCZK(totalIncome / 12)} a month
+                {stockTotals.incomeUnknown.length > 0 && (
+                  <span style={{ color: 'var(--amber)' }}> · excludes {stockTotals.incomeUnknown.join(', ')} (unknown)</span>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Asset mix */}
+          {mixTotal > 0 && (
+            <div style={{ marginTop: 22 }}>
+              <div role="img" aria-label={`Asset mix: ${mix.map(m => `${ASSET_CLASS_LABELS[m.key]} ${((m.value / mixTotal) * 100).toFixed(0)}%`).join(', ')}`}
+                style={{ display: 'flex', gap: 2, height: 6, borderRadius: 4, overflow: 'hidden' }}>
+                {mix.map(m => <div key={m.key} style={{ flex: m.value, background: ASSET_CLASS_COLORS[m.key] }} />)}
+              </div>
+              <div style={{ display: 'flex', gap: 16, marginTop: 10, flexWrap: 'wrap' }}>
+                {mix.map(m => (
+                  <Link key={m.key} href={CLASS_HREF[m.key]} style={{ display: 'flex', alignItems: 'center', gap: 6, textDecoration: 'none' }}>
+                    <span aria-hidden="true" style={{ width: 8, height: 8, borderRadius: 2, background: ASSET_CLASS_COLORS[m.key] }} />
+                    <span style={{ fontSize: 11, color: 'var(--text2)' }}>{ASSET_CLASS_LABELS[m.key]}</span>
+                    <span className="num" style={{ fontSize: 11, color: 'var(--text3)' }}>{fmtShare((m.value / mixTotal) * 100, 0)}</span>
+                  </Link>
+                ))}
+                <span style={{ fontSize: 10, color: 'var(--text3)' }}>of gross assets</span>
+              </div>
+            </div>
+          )}
+        </section>
+
+        {alerts.length > 0 && (
+          <Panel title={`Needs attention (${alerts.length})`}>
+            <ul style={{ listStyle: 'none', display: 'grid', gap: 8 }}>
+              {alerts.map(a => (
+                <li key={a.id} style={{ fontSize: 12, lineHeight: 1.5, display: 'flex', gap: 8 }}>
+                  <span aria-hidden="true" style={{ color: a.level === 'warn' ? 'var(--amber)' : 'var(--blue)' }}>{a.level === 'warn' ? '⚠' : 'ⓘ'}</span>
+                  <span style={{ color: 'var(--text2)' }}>
+                    {a.text}{' '}
+                    <Link href={a.href} style={{ color: 'var(--blue)', whiteSpace: 'nowrap' }}>{a.action ?? 'Open'} →</Link>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </Panel>
+        )}
+      </div>
+
+      {/* ── Performance ──────────────────────────────────────────────────── */}
+      <Panel
+        title={flowAware ? 'Performance · deposits excluded' : 'Change in net worth'}
+        right={
+          <div role="group" aria-label="Window" style={{ display: 'flex', border: '1px solid var(--border2)', borderRadius: 8, overflow: 'hidden' }}>
+            {PL_WINDOWS.map(w => (
+              <button key={w.key} type="button" aria-pressed={plWindow === w.key} onClick={() => setPlWindow(w.key)} style={{
+                padding: '5px 14px', border: 'none', cursor: 'pointer', fontSize: 12,
+                background: plWindow === w.key ? 'var(--bg4)' : 'var(--bg2)',
+                color: plWindow === w.key ? 'var(--text)' : 'var(--text3)',
+                borderRight: w.key !== 'ytd' ? '1px solid var(--border2)' : 'none',
+                fontWeight: plWindow === w.key ? 500 : 400,
+              }}>{w.label}</button>
+            ))}
+          </div>
+        }
+      >
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 10, marginBottom: 16 }}>
+          {PL_WINDOWS.map(w => {
+            const s = summaries[w.key]
+            const active = plWindow === w.key
+            return (
+              <button key={w.key} type="button" aria-pressed={active} onClick={() => setPlWindow(w.key)} style={{
+                padding: '12px 16px', borderRadius: 10, cursor: 'pointer', textAlign: 'left',
+                background: active ? 'var(--bg3)' : 'var(--bg2)',
+                border: `1px solid ${active ? 'var(--border3)' : 'var(--border)'}`,
+              }}>
+                <div style={{ ...labelCaps, marginBottom: 5 }}>{w.label}</div>
+                <div className="num" style={{ fontSize: 15, fontWeight: 600, color: signColor(s.pl) }}>
+                  {s.pl == null ? '—' : `${trendGlyph(s.pl)} ${fmtSignedCZK(s.pl)}`}
+                </div>
+                <div style={{ fontSize: 10, color: 'var(--text3)', marginTop: 2 }}>
+                  {s.pl == null ? 'no history yet' : `${fmtPct(s.plPct)}${flowAware && s.flowsCZK !== 0 ? ` · ${fmtSignedCZK(s.flowsCZK)} paid in` : ''}`}
+                </div>
+              </button>
             )
           })}
         </div>
 
-        {/* Contributions vs growth — answers "did I earn this, or did I pay it in?" */}
-        {growthSplit.length >= 2 && (
-          <div style={{
-            background: 'var(--bg2)', border: '1px solid var(--border)',
-            borderRadius: 12, padding: '20px 22px', marginBottom: 20,
-          }}>
-            <div style={{ fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--text3)', fontWeight: 600, marginBottom: 14 }}>
-              Since {fmtISODateShort(growthSplit[0].date)}
-            </div>
-            <div style={{ display: 'flex', gap: 32, flexWrap: 'wrap', marginBottom: 14 }}>
-              <div>
-                <div style={{ fontSize: 10, color: 'var(--text4)', marginBottom: 4 }}>Total change</div>
-                <div style={{ fontFamily: "'Syne', sans-serif", fontSize: 22, fontWeight: 700, color: latestSplit.contributed + latestSplit.growth >= 0 ? 'var(--green)' : 'var(--red)' }}>
-                  {fmtCZK(latestSplit.contributed + latestSplit.growth)}
-                </div>
-              </div>
-              <div>
-                <div style={{ fontSize: 10, color: 'var(--text4)', marginBottom: 4 }}>You contributed</div>
-                <div style={{ fontFamily: "'Syne', sans-serif", fontSize: 22, fontWeight: 700, color: 'var(--blue)' }}>
-                  {fmtCZK(latestSplit.contributed)}
-                </div>
-              </div>
-              <div>
-                <div style={{ fontSize: 10, color: 'var(--text4)', marginBottom: 4 }}>The market earned</div>
-                <div style={{ fontFamily: "'Syne', sans-serif", fontSize: 22, fontWeight: 700, color: latestSplit.growth >= 0 ? 'var(--green)' : 'var(--red)' }}>
-                  {fmtCZK(latestSplit.growth)}
-                </div>
-              </div>
-            </div>
-            <div style={{ display: 'flex', height: 8, borderRadius: 4, overflow: 'hidden', background: 'var(--bg4)' }}>
-              <div style={{ flex: Math.max(0, latestSplit.contributed), background: 'var(--blue)', opacity: 0.8 }} />
-              <div style={{ flex: Math.max(0, latestSplit.growth), background: 'var(--green)', opacity: 0.8 }} />
-            </div>
+        {plSummary.fromDate && (
+          <div style={{ fontSize: 11, color: 'var(--text3)', marginBottom: 8 }}>
+            vs {fmtISODateShort(plSummary.fromDate)} ({fmtCZK(plSummary.fromValue)})
+            {!flowAware && ' · includes any money you paid in — record deposits to separate them'}
           </div>
         )}
 
-        {/* Bottom row */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
-          {/* Income breakdown */}
-          <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 12, padding: '20px 22px' }}>
-            <div style={{ fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--text3)', fontWeight: 600, marginBottom: 16 }}>Income streams</div>
-            {[
-              { label: 'Stock dividends', value: divIncomeCZK,      sub: `YTD received: ${fmtCZK(ytdDivCZK)}`, color: 'var(--green)',  pct: totalAnnualIncome > 0 ? divIncomeCZK / totalAnnualIncome : 0 },
-              { label: 'Bank interest',   value: interestIncomeCZK, sub: `${bankAccounts.length} accounts`,       color: 'var(--blue)',   pct: totalAnnualIncome > 0 ? interestIncomeCZK / totalAnnualIncome : 0 },
-              { label: 'Rental income',   value: rentalIncomeCZK,   sub: `${realEstate.filter(p => p.monthly_rent > 0).length} properties`, color: 'var(--teal)', pct: totalAnnualIncome > 0 ? rentalIncomeCZK / totalAnnualIncome : 0 },
-              { label: 'Crypto staking',  value: stakingIncomeCZK,  sub: `${cryptoHoldings.filter(c => c.staking_apy > 0).length} assets`, color: 'var(--purple)', pct: totalAnnualIncome > 0 ? stakingIncomeCZK / totalAnnualIncome : 0 },
-            ].map(s => (
-              <div key={s.label} style={{ marginBottom: 14 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
-                  <div>
-                    <span style={{ fontSize: 12, color: 'var(--text)' }}>{s.label}</span>
-                    <span style={{ fontSize: 10, color: 'var(--text4)', marginLeft: 8 }}>{s.sub}</span>
-                  </div>
-                  <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: s.value > 0 ? s.color : 'var(--text4)' }}>
-                    {s.value > 0 ? fmtCZK(s.value) : '—'}
-                  </span>
-                </div>
-                <div style={{ height: 3, background: 'var(--bg4)', borderRadius: 2, overflow: 'hidden' }}>
-                  <div style={{ height: '100%', width: `${s.pct * 100}%`, background: s.color, borderRadius: 2, opacity: 0.7, transition: 'width 0.5s ease' }} />
-                </div>
-              </div>
-            ))}
-            <div style={{ marginTop: 8, paddingTop: 12, borderTop: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between' }}>
-              <span style={{ fontSize: 11, color: 'var(--text3)' }}>Total annual</span>
-              <span style={{ fontFamily: "'Syne', sans-serif", fontSize: 16, fontWeight: 700, color: 'var(--amber)' }}>{fmtCZK(totalAnnualIncome)}</span>
+        {chartData.length >= 2 ? (
+          <div role="img" aria-label={`Net worth over ${selectedWindow.label}: from ${fmtCZK(chartData[0].value)} to ${fmtCZK(chartData[chartData.length - 1].value)}`}>
+            <ResponsiveContainer width="100%" height={180}>
+              <AreaChart data={chartData} margin={{ top: 4, right: 4, left: 0, bottom: 0 }}>
+                <defs>
+                  <linearGradient id="plGradient" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor={chartStroke} stopOpacity={0.15} />
+                    <stop offset="95%" stopColor={chartStroke} stopOpacity={0} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+                <XAxis dataKey="date" tickFormatter={fmtISODateShort} tick={{ fontSize: 11, fill: 'var(--text3)' }}
+                  axisLine={false} tickLine={false} interval="preserveStartEnd" />
+                <YAxis tickFormatter={fmtAxisCZK} tick={{ fontSize: 11, fill: 'var(--text3)' }}
+                  axisLine={false} tickLine={false} width={70} domain={['auto', 'auto']} />
+                <Tooltip content={<ChartTooltip reference={referenceValue} />} />
+                {referenceValue != null && <ReferenceLine y={referenceValue} stroke="var(--border3)" strokeDasharray="4 4" />}
+                <Area type="monotone" dataKey="value" stroke={chartStroke} strokeWidth={2}
+                  fill="url(#plGradient)" dot={false} activeDot={{ r: 4, fill: chartStroke, strokeWidth: 0 }} />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        ) : (
+          <div style={{
+            height: 140, display: 'flex', alignItems: 'center', justifyContent: 'center',
+            color: 'var(--text3)', fontSize: 12, flexDirection: 'column', gap: 6,
+            background: 'var(--bg3)', borderRadius: 10,
+          }}>
+            <div>History builds one point a day</div>
+            <div style={{ fontSize: 11 }}>
+              {snapshots.length === 0 ? 'The first point is saved once every price has loaded' : `${snapshots.length} day${snapshots.length > 1 ? 's' : ''} so far — two are needed for a line`}
             </div>
           </div>
+        )}
+      </Panel>
 
-          {/* Emergency runway tile */}
-          <div style={{ display: 'grid', gap: 14 }}>
-            <RunwayCard
-              positions={allPositions}
-              monthlyExpenses={dashboardExpenses.annualCZK / 12}
-              accounts={bankAccounts}
-              compact
-            />
-          </div>
+      {/* ── Asset class cards ───────────────────────────────────────────── */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: 12, marginBottom: 14 }}>
+        {cards.map(c => {
+          const pct = mixTotal > 0 && c.value > 0 ? (c.value / totalNetWorth) * 100 : null
+          return (
+            <Link key={c.key} href={c.href} style={{ textDecoration: 'none', color: 'inherit' }}>
+              <div style={{
+                background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 12,
+                padding: '16px 18px', position: 'relative', overflow: 'hidden', height: '100%',
+              }}>
+                <div aria-hidden="true" style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 3, background: c.color }} />
+                <div style={{ ...labelCaps, color: c.color }}>{c.label}</div>
+                <div className="num" style={{ fontFamily: "'Instrument Serif', serif", fontSize: 22, marginBottom: 4 }}>
+                  {c.count === 0 ? '—' : fmtCZK(c.value)}
+                </div>
+                <div style={{ fontSize: 11, color: 'var(--text3)', lineHeight: 1.6 }}>
+                  {c.count === 0 ? 'Nothing yet — add one' : <>
+                    {pct != null && `${fmtShare(pct)} of net worth`}
+                    {c.pl != null && (
+                      <div style={{ color: signColor(c.pl) }}>{fmtSignedCZK(c.pl)} ({fmtPct(c.plPct, 1)})</div>
+                    )}
+                    {c.atCost > 0 && <div style={{ color: 'var(--amber)' }}>{c.atCost} at cost</div>}
+                  </>}
+                </div>
+              </div>
+            </Link>
+          )
+        })}
+      </div>
 
-          {/* Quick stats */}
-          <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 12, padding: '20px 22px' }}>
-            <div style={{ fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--text3)', fontWeight: 600, marginBottom: 16 }}>Portfolio snapshot</div>
+      {/* Contributions vs growth — "did I earn this, or did I pay it in?" */}
+      {latestSplit && growthSplit.length >= 2 && (
+        <Panel title={`Since ${fmtISODateShort(growthSplit[0].date)}`}>
+          <div style={{ display: 'flex', gap: 32, flexWrap: 'wrap', marginBottom: 14 }}>
             {[
-              { label: 'Yield on net worth',     value: totalNetWorth > 0 ? `${((totalAnnualIncome / totalNetWorth) * 100).toFixed(2)}%` : '—', accent: 'var(--amber)' },
-              { label: 'Monthly passive income', value: fmtCZK(totalAnnualIncome / 12, 0), accent: 'var(--amber)' },
-              { label: 'Stock P&L',              value: `${stockCostCZK > 0 ? ((stockValueCZK - stockCostCZK) / stockCostCZK * 100).toFixed(1) : 0}%`, accent: (stockValueCZK - stockCostCZK) >= 0 ? 'var(--green)' : 'var(--red)' },
-              { label: 'Real estate equity',     value: `${realEstateGrossCZK > 0 ? ((realEstateEquityCZK / realEstateGrossCZK) * 100).toFixed(0) : 0}% equity`, accent: 'var(--teal)' },
-              { label: 'Holdings', value: `${holdings.length} stocks · ${bankAccounts.length} accounts · ${cryptoHoldings.length} coins · ${realEstate.length} properties`, accent: 'var(--text3)' },
-            ].map((s, i) => (
-              <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0', borderBottom: '1px solid var(--border)' }}>
-                <span style={{ fontSize: 11, color: 'var(--text3)' }}>{s.label}</span>
-                <span style={{ fontSize: 12, fontFamily: "'DM Mono', monospace", color: s.accent }}>{s.value}</span>
+              { label: 'Total change', value: latestSplit.contributed + latestSplit.growth, color: signColor(latestSplit.contributed + latestSplit.growth), signed: true },
+              { label: 'You paid in', value: latestSplit.contributed, color: 'var(--c-cash)', signed: true },
+              { label: 'Markets earned', value: latestSplit.growth, color: signColor(latestSplit.growth), signed: true },
+            ].map(x => (
+              <div key={x.label}>
+                <div style={{ fontSize: 11, color: 'var(--text3)', marginBottom: 4 }}>{x.label}</div>
+                <div className="num" style={{ fontFamily: "'Instrument Serif', serif", fontSize: 22, color: x.color }}>{fmtSignedCZK(x.value)}</div>
               </div>
             ))}
           </div>
+          <div aria-hidden="true" style={{ display: 'flex', height: 8, borderRadius: 4, overflow: 'hidden', background: 'var(--bg4)' }}>
+            <div style={{ flex: Math.max(0, latestSplit.contributed), background: 'var(--c-cash)' }} />
+            <div style={{ flex: Math.max(0, latestSplit.growth), background: 'var(--green)' }} />
+          </div>
+        </Panel>
+      )}
+
+      {/* ── Bottom row ──────────────────────────────────────────────────── */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 14 }}>
+        <Panel title="Income streams (gross, forward)">
+          {([
+            { key: 'equity', label: 'Dividends', value: incomeClass.stock + incomeClass.etf, sub: `YTD received ${fmtCZK(ytdDivCZK)} net`, color: ASSET_CLASS_COLORS.stock },
+            { key: 'bond', label: 'Coupons', value: incomeClass.bond, sub: `${bondHoldings.length} bonds`, color: ASSET_CLASS_COLORS.bond },
+            { key: 'cash', label: 'Interest', value: incomeClass.cash, sub: `${bankAccounts.length} accounts · before 15 % tax`, color: ASSET_CLASS_COLORS.cash },
+            { key: 'realestate', label: 'Rent', value: incomeClass.realestate, sub: 'before costs', color: ASSET_CLASS_COLORS.realestate },
+            { key: 'crypto', label: 'Staking', value: incomeClass.crypto, sub: `${cryptoHoldings.filter(c => c.staking_apy > 0).length} assets`, color: ASSET_CLASS_COLORS.crypto },
+          ]).filter(s => s.value > 0 || s.key === 'equity' || s.key === 'cash').map(s => (
+            <div key={s.key} style={{ marginBottom: 12 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 4, gap: 8 }}>
+                <div>
+                  <span style={{ fontSize: 12 }}>{s.label}</span>
+                  <span style={{ fontSize: 10, color: 'var(--text3)', marginLeft: 8 }}>{s.sub}</span>
+                </div>
+                <span className="num" style={{ fontSize: 12 }}>{s.value > 0 ? fmtCZK(s.value) : '—'}</span>
+              </div>
+              <div aria-hidden="true" style={{ height: 3, background: 'var(--bg4)', borderRadius: 2, overflow: 'hidden' }}>
+                <div style={{ height: '100%', width: `${totalIncome > 0 ? (s.value / totalIncome) * 100 : 0}%`, background: s.color }} />
+              </div>
+            </div>
+          ))}
+          <div style={{ marginTop: 8, paddingTop: 10, borderTop: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between' }}>
+            <span style={{ fontSize: 11, color: 'var(--text3)' }}>Total a year</span>
+            <span className="num" style={{ fontSize: 14, fontWeight: 600 }}>{fmtCZK(totalIncome)}</span>
+          </div>
+        </Panel>
+
+        <div>
+          <RunwayCard
+            positions={positions}
+            monthlyExpenses={dashboardExpenses.annualCZK / 12}
+            accounts={bankAccounts}
+            compact
+          />
         </div>
 
-      </main>
-    </div>
+        <Panel title="At a glance">
+          {[
+            { label: 'Yield on net worth', value: totalNetWorth > 0 ? fmtShare((totalIncome / totalNetWorth) * 100, 2) : '—' },
+            { label: 'Stock & ETF P&L', value: fmtPct(stockTotals.plPct, 1), color: signColor(stockTotals.plPct) },
+            { label: 'Property equity', value: byClass.realestate !== 0 && realEstate.length > 0 ? fmtCZK(byClass.realestate) : '—' },
+            { label: 'Positions', value: `${holdings.length} stocks · ${bondHoldings.length} bonds · ${bankAccounts.length} accounts · ${cryptoHoldings.length} coins · ${realEstate.length} properties` },
+          ].map(s => (
+            <div key={s.label} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0', borderBottom: '1px solid var(--border)', gap: 12 }}>
+              <span style={{ fontSize: 11, color: 'var(--text3)' }}>{s.label}</span>
+              <span className="num" style={{ fontSize: 12, textAlign: 'right', color: s.color ?? 'var(--text)' }}>{s.value}</span>
+            </div>
+          ))}
+        </Panel>
+      </div>
+      {recording && <RecordModal onClose={() => setRecording(false)} />}
+    </PageShell>
   )
 }
 
-const btnSecondary: React.CSSProperties = {
-  padding: '7px 14px', borderRadius: 6, cursor: 'pointer',
-  background: 'var(--bg3)', border: '1px solid var(--border2)',
-  color: 'var(--text2)', fontFamily: "'Inter', sans-serif", fontSize: 12,
-  display: 'flex', alignItems: 'center', gap: 4,
+const labelCaps: React.CSSProperties = {
+  fontSize: 10, letterSpacing: '0.12em', textTransform: 'uppercase', color: 'var(--text3)', marginBottom: 8, fontWeight: 500,
+}
+
+function ChartTooltip({ active, payload, label, reference }: {
+  active?: boolean; payload?: { value: number }[]; label?: string; reference: number | null
+}) {
+  if (!active || !payload?.length || !label) return null
+  const val = payload[0].value
+  const diff = reference != null ? val - reference : null
+  return (
+    <div style={{
+      background: 'var(--bg2)', border: '1px solid var(--border2)',
+      borderRadius: 8, padding: '10px 14px', fontSize: 11, boxShadow: '0 4px 12px rgba(0,0,0,0.08)',
+    }}>
+      <div style={{ color: 'var(--text3)', marginBottom: 4 }}>{fmtISODateShort(label)}</div>
+      <div className="num" style={{ fontSize: 13, fontWeight: 600 }}>{fmtCZK(val)}</div>
+      {diff != null && <div style={{ color: signColor(diff), marginTop: 2 }}>{fmtSignedCZK(diff)} vs start</div>}
+    </div>
+  )
 }

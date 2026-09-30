@@ -1,299 +1,265 @@
 'use client'
-import { useEffect, useState } from 'react'
-import { supabase, BankAccount, BankInterestReceived } from '@/lib/supabase'
+import { useEffect, useMemo, useState } from 'react'
+import type { BankAccount } from '@/lib/supabase'
 import { useAppData } from '@/hooks/useAppData'
 import { useProfile } from '@/lib/profile'
-import Sidebar from '@/components/Sidebar'
-import { toCZK, fmtCZK, fmtDate } from '@/lib/fx'
 import { useFx } from '@/hooks/useFx'
-import { cardStyle, cardLabelStyle, tableHeader, tableHeaderLabel,
-         th, tdL, tdR, actionBtn, btnSecondary, btnPrimary,
-         inputStyle, inputLabel } from '@/lib/ui'
+import { useMarketData } from '@/hooks/useMarketData'
+import { useCryptoPrices } from '@/hooks/useCryptoPrices'
+import { PageShell, PageHeader, LoadingShell, EmptyState, MetricCards, Panel, Tabs } from '@/components/PageShell'
+import Badge from '@/components/Badge'
+import Modal from '@/components/Modal'
+import RecordModal, { type RecordPreset } from '@/components/RecordModal'
+import RunwayCard from '@/components/RunwayCard'
+import DataTable, { type Column } from '@/components/DataTable'
+import { Field, FormGrid, FormActions, ErrorBox, NumberInput, inputStyle } from '@/components/FormFields'
+import { useUndoableDelete } from '@/components/UndoToast'
+import { toCZK, fmtCZK, fmtNum, fmtShare } from '@/lib/fx'
+import { fmtISODate, todayISO, daysBetween } from '@/lib/date'
+import { buildPositions, cashTier, LIQUIDITY_TIERS } from '@/lib/portfolio'
+import { updateScoped, insertScoped } from '@/lib/db'
+import { parseDecimal, parsePercent } from '@/lib/parse'
+import { DEFAULT_PLAN, effectiveAnnualExpenses } from '@/lib/fire'
+import { CZ_INTEREST_TAX } from '@/lib/tax'
+import { btnStyle, actionBtn } from '@/lib/ui'
 
-const ACCOUNT_TYPE_LABELS: Record<string, string> = {
-  savings: 'Savings',
-  checking: 'Checking',
-  money_market: 'Money Market',
-  fixed_deposit: 'Term Deposit',
+const TYPE_LABEL: Record<BankAccount['account_type'], string> = {
+  checking: 'Current account', savings: 'Savings', money_market: 'Money market', fixed_deposit: 'Term deposit',
+}
+const TIER_LABEL: Record<string, string> = {
+  instant: 'Instant', week: 'Within a week', month: 'Within a month', year: 'Within a year', illiquid: 'Locked',
 }
 
-const ACCOUNT_TYPE_COLORS: Record<string, string> = {
-  savings: 'var(--blue)',
-  checking: 'var(--text3)',
-  money_market: 'var(--green)',
-  fixed_deposit: 'var(--amber)',
-}
-
-const emptyForm = {
-  name: '',
-  institution: '',
-  account_type: 'savings',
-  balance: '',
-  currency: 'CZK',
-  interest_rate: '',
-  notes: '',
-}
+type Tab = 'current' | 'savings' | 'interest'
 
 export default function CashPage() {
-  const { bankAccounts: accounts, loading, reload } = useAppData()
+  const app = useAppData()
+  const { bankAccounts: accounts, bankInterest, loading, reload } = app
   const { activeProfile } = useProfile()
-  const [interest, setInterest] = useState<BankInterestReceived[]>([])
-  const [showAdd, setShowAdd]   = useState(false)
-  const [editId, setEditId]     = useState<string | null>(null)
-  const [form, setForm]         = useState(emptyForm)
-  const [saving, setSaving]     = useState(false)
   const { fx, fxLoading, fxTs, refresh: refreshFx } = useFx()
+  const market = useMarketData()
+  const crypto = useCryptoPrices()
+  const [tab, setTab] = useState<Tab>('savings')
+  const [editing, setEditing] = useState<BankAccount | 'new' | null>(null)
+  const [record, setRecord] = useState<RecordPreset | null>(null)
+  const { schedule, pendingIds, toast } = useUndoableDelete()
 
+  const visible = accounts.filter(a => !pendingIds.has(a.id))
+  const current = visible.filter(a => a.account_type === 'checking')
+  const savings = visible.filter(a => a.account_type !== 'checking')
   useEffect(() => {
-    if (!activeProfile) return
-    // Scoped to the active profile — without the filter this listed every
-    // profile's interest payments under this profile's accounts.
-    supabase.from('bank_interest_received')
-      .select('*')
-      .eq('profile_id', activeProfile.id)
-      .order('payment_date', { ascending: false }).limit(20)
-      .then(({ data }) => { setInterest(data ?? []) })
-  }, [accounts, activeProfile])
+    // Open on whichever tab has something in it.
+    if (!loading && savings.length === 0 && current.length > 0) setTab('current')
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading])
 
-  const totalCZK           = accounts.reduce((s, a) => s + toCZK(a.balance, a.currency, fx), 0)
-  const annualInterestCZK  = accounts.reduce((s, a) => s + toCZK(a.balance * a.interest_rate, a.currency, fx), 0)
-  // Balance-weighted, not a plain mean: a 6% rate on Kč 5,000 does not move the
-  // portfolio's blended rate the same way as 6% on Kč 500,000.
-  const avgRate            = totalCZK > 0 ? annualInterestCZK / totalCZK : 0
+  const totalCZK          = visible.reduce((s, a) => s + toCZK(a.balance, a.currency, fx), 0)
+  const annualInterestCZK = visible.reduce((s, a) => s + toCZK(a.balance * a.interest_rate, a.currency, fx), 0)
+  // Balance-weighted: 6 % on Kč 5 000 does not move the blended rate like 6 % on Kč 500 000.
+  const avgRate = totalCZK > 0 ? annualInterestCZK / totalCZK : null
+  const today = todayISO()
 
-  const resetForm = () => { setForm(emptyForm); setEditId(null) }
+  const positions = useMemo(() => buildPositions(app, fx, market, crypto), [app, fx, market, crypto])
+  const expenses = effectiveAnnualExpenses({ ...DEFAULT_PLAN, ...(app.financialPlan ?? {}) }, app.expenseLog)
 
-  const startEdit = (a: BankAccount) => {
-    setForm({
-      name: a.name, institution: a.institution,
-      account_type: a.account_type, balance: String(a.balance),
-      currency: a.currency,
-      interest_rate: String((a.interest_rate * 100).toFixed(2)),
-      notes: a.notes ?? '',
-    })
-    setEditId(a.id)
-    setShowAdd(true)
-  }
+  const archive = (a: BankAccount) =>
+    schedule(a.id, a.name, () => updateScoped('bank_accounts', a.id, activeProfile?.id, { is_active: false }), reload)
 
-  const saveAccount = async () => {
-    if (!form.name || !form.institution || !form.balance) return
-    if (!activeProfile) return
-    setSaving(true)
-    const balance = parseFloat(form.balance)
-    if (!isFinite(balance)) { setSaving(false); alert('Balance must be a number.'); return }
+  if (loading) return <LoadingShell />
 
-    const ratePct = parseFloat(form.interest_rate)
+  const columns: Column<BankAccount>[] = [
+    { key: 'name', label: 'Account', sortValue: a => a.name, render: a => <>
+      <div style={{ fontWeight: 500 }}>{a.name}</div>
+      <div style={{ fontSize: 11, color: 'var(--text3)' }}>{a.institution}</div>
+    </> },
+    { key: 'type', label: 'Type', sortValue: a => a.account_type, render: a => <>
+      <Badge variant="gray">{TYPE_LABEL[a.account_type] ?? a.account_type}</Badge>
+      {a.maturity_date && (
+        <div style={{ fontSize: 11, color: 'var(--text3)', marginTop: 3 }}>
+          {a.account_type === 'fixed_deposit' ? 'matures' : 'fixed until'} {fmtISODate(a.maturity_date)}
+          {a.maturity_date >= today && ` (${daysBetween(today, a.maturity_date)} d)`}
+        </div>
+      )}
+    </> },
+    { key: 'access', label: 'Access', sortValue: a => LIQUIDITY_TIERS.indexOf(cashTier(a, today)), render: a => TIER_LABEL[cashTier(a, today)] },
+    { key: 'balance', label: 'Balance', numeric: true, sortValue: a => toCZK(a.balance, a.currency, fx), render: a => <>
+      <div>{fmtNum(a.balance, 2)} {a.currency}</div>
+      {a.currency !== 'CZK' && <div style={{ fontSize: 11, color: 'var(--text3)' }}>{fmtCZK(toCZK(a.balance, a.currency, fx))}</div>}
+    </> },
+    { key: 'rate', label: 'Rate', numeric: true, sortValue: a => a.interest_rate, render: a => fmtShare(a.interest_rate * 100, 2) },
+    { key: 'interest', label: 'Interest / yr (gross)', numeric: true, sortValue: a => toCZK(a.balance * a.interest_rate, a.currency, fx),
+      render: a => a.interest_rate > 0 ? fmtCZK(toCZK(a.balance * a.interest_rate, a.currency, fx)) : '—' },
+    { key: 'actions', label: '', align: 'center', render: a => (
+      <span style={{ whiteSpace: 'nowrap' }}>
+        <button type="button" aria-label={`Deposit to ${a.name}`} title="Deposit / withdraw" onClick={() => setRecord({ kind: 'deposit', accountId: a.id })} style={actionBtn}>±</button>
+        <button type="button" aria-label={`Record interest on ${a.name}`} title="Record interest" onClick={() => setRecord({ kind: 'interest', accountId: a.id })} style={{ ...actionBtn, marginLeft: 4 }}>%</button>
+        <button type="button" aria-label={`Edit ${a.name}`} title="Edit account" onClick={() => setEditing(a)} style={{ ...actionBtn, marginLeft: 4 }}>✎</button>
+        <button type="button" aria-label={`Archive ${a.name}`} title="Archive account" onClick={() => archive(a)} style={{ ...actionBtn, marginLeft: 4, color: 'var(--red)' }}>✕</button>
+      </span>
+    ) },
+  ]
+
+  const interestRows = bankInterest.map(i => ({ ...i, name: accounts.find(a => a.id === i.account_id)?.name ?? '—' }))
+
+  return (
+    <PageShell>
+      {toast}
+      {editing && <AccountModal account={editing === 'new' ? null : editing} onClose={() => setEditing(null)} onSaved={reload} />}
+      {record && <RecordModal preset={record} onClose={() => setRecord(null)} onSaved={reload} />}
+
+      <PageHeader
+        eyebrow="Assets"
+        accent="var(--c-cash)"
+        title="Cash & savings"
+        subtitle={<>Current accounts, savings and term deposits{fxTs && <> · FX {fxTs}</>}</>}
+        actions={<>
+          <button type="button" onClick={refreshFx} disabled={fxLoading} style={btnStyle('secondary')}>{fxLoading ? '⟳ FX…' : '↻ FX'}</button>
+          {visible.length > 0 && <button type="button" onClick={() => setRecord({ kind: 'deposit' })} style={btnStyle('secondary')}>± Deposit / withdraw</button>}
+          <button type="button" onClick={() => setEditing('new')} style={btnStyle('primary')}>+ Add account</button>
+        </>}
+      />
+
+      {visible.length === 0 ? (
+        <EmptyState
+          icon="▭"
+          title="No bank accounts yet"
+          body="Add your current account, savings accounts and term deposits. Term deposits with a maturity date are counted as locked money in your emergency runway until they mature."
+          action={<button type="button" onClick={() => setEditing('new')} style={btnStyle('primary')}>+ Add an account</button>}
+        />
+      ) : <>
+        <MetricCards cards={[
+          { label: 'Total cash', value: fmtCZK(totalCZK), accent: 'var(--c-cash)', note: `${visible.length} accounts` },
+          { label: 'Interest a year', value: fmtCZK(annualInterestCZK), accent: 'var(--c-income)',
+            note: `gross · ≈ ${fmtCZK(annualInterestCZK * (1 - CZ_INTEREST_TAX))} after 15 % tax` },
+          { label: 'Blended rate', value: avgRate != null ? fmtShare(avgRate * 100, 2) : '—', accent: 'var(--border3)', note: 'balance-weighted' },
+        ]} />
+
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, alignItems: 'flex-start' }}>
+          <div style={{ flex: '2 1 520px', minWidth: 0 }}>
+            <Tabs label="Accounts" value={tab} onChange={setTab} tabs={[
+              { key: 'savings', label: `Savings & term deposits (${savings.length})` },
+              { key: 'current', label: `Current accounts (${current.length})` },
+              { key: 'interest', label: `Interest log (${bankInterest.length})` },
+            ]} />
+            {tab !== 'interest' ? (
+              <Panel padded={false}>
+                {(tab === 'current' ? current : savings).length === 0
+                  ? <div style={{ padding: 24, fontSize: 12, color: 'var(--text3)', textAlign: 'center' }}>None yet.</div>
+                  : <DataTable caption={tab === 'current' ? 'Current accounts' : 'Savings accounts and term deposits'}
+                      columns={columns} rows={tab === 'current' ? current : savings} rowKey={a => a.id}
+                      initialSort={{ key: 'balance', dir: 'desc' }} />}
+              </Panel>
+            ) : (
+              <Panel padded={false}>
+                {interestRows.length === 0
+                  ? <div style={{ padding: 24, fontSize: 12, color: 'var(--text3)', textAlign: 'center' }}>
+                      No interest logged. Use % on an account to record a payment — it updates the balance too.
+                    </div>
+                  : <DataTable caption="Interest received" rowKey={r => r.id} rows={interestRows} initialSort={{ key: 'date', dir: 'desc' }} columns={[
+                      { key: 'acct', label: 'Account', sortValue: r => r.name, render: r => r.name },
+                      { key: 'date', label: 'Date', sortValue: r => r.payment_date, render: r => fmtISODate(r.payment_date) },
+                      { key: 'gross', label: 'Gross', numeric: true, sortValue: r => r.gross_amount, render: r => `${fmtNum(r.gross_amount, 2)} ${r.currency}` },
+                      { key: 'tax', label: 'Tax', numeric: true, sortValue: r => r.tax_withheld, render: r => r.tax_withheld ? `−${fmtNum(r.tax_withheld, 2)}` : '—' },
+                      { key: 'net', label: 'Net', numeric: true, sortValue: r => r.net_amount, render: r => <strong>{fmtNum(r.net_amount, 2)} {r.currency}</strong> },
+                    ]} />}
+              </Panel>
+            )}
+          </div>
+          <div style={{ flex: '1 1 280px', minWidth: 0 }}>
+            <RunwayCard positions={positions} monthlyExpenses={expenses.annualCZK / 12} accounts={visible} />
+          </div>
+        </div>
+      </>}
+    </PageShell>
+  )
+}
+
+/** Add / edit a bank account. Balance edits are corrections; money moving in or out goes through Record. */
+function AccountModal({ account, onClose, onSaved }: { account: BankAccount | null; onClose: () => void; onSaved: () => void }) {
+  const { activeProfile } = useProfile()
+  const [form, setForm] = useState({
+    name: account?.name ?? '',
+    institution: account?.institution ?? '',
+    account_type: account?.account_type ?? 'savings',
+    balance: account ? String(account.balance) : '',
+    currency: account?.currency ?? 'CZK',
+    interest_rate: account ? String(Number((account.interest_rate * 100).toFixed(3))) : '',
+    maturity_date: account?.maturity_date ?? '',
+    liquidity_tier: account?.liquidity_tier && account.liquidity_tier !== 'instant' ? account.liquidity_tier : '',
+    notes: account?.notes ?? '',
+  })
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const set = <K extends keyof typeof form>(k: K, v: (typeof form)[K]) => setForm(f => ({ ...f, [k]: v }))
+
+  const save = async () => {
+    if (!form.name.trim() || !form.institution.trim()) { setError('Name and institution are required.'); return }
+    const balance = parseDecimal(form.balance)
+    if (balance == null) { setError('Enter the balance as a number (e.g. 250 000 or 1 234,56).'); return }
+    const rate = form.interest_rate.trim() ? parsePercent(form.interest_rate) : 0
+    if (rate == null || rate < 0 || rate > 1) { setError('Interest rate must be a percentage between 0 and 100.'); return }
+    if (form.account_type === 'fixed_deposit' && !form.maturity_date) { setError('A term deposit needs a maturity date.'); return }
     const payload = {
-      name: form.name,
-      institution: form.institution,
+      name: form.name.trim(),
+      institution: form.institution.trim(),
       account_type: form.account_type,
       balance,
       currency: form.currency,
-      // Stored as a decimal fraction (4.5% → 0.045)
-      interest_rate: isFinite(ratePct) ? ratePct / 100 : 0,
-      notes: form.notes || null,
+      interest_rate: rate,
+      maturity_date: form.maturity_date || null,
+      liquidity_tier: form.liquidity_tier || null,
+      notes: form.notes.trim() || null,
       updated_at: new Date().toISOString(),
     }
-    const { error: saveErr } = editId
-      ? await supabase.from('bank_accounts').update(payload).eq('id', editId)
-      : await supabase.from('bank_accounts').insert([{ ...payload, profile_id: activeProfile.id }])
-
+    setSaving(true)
+    const { error: err } = account
+      ? await updateScoped('bank_accounts', account.id, activeProfile?.id, payload)
+      : await insertScoped('bank_accounts', activeProfile?.id, [payload])
     setSaving(false)
-    if (saveErr) { alert(`Could not save account: ${saveErr.message}`); return }
-    setShowAdd(false)
-    resetForm()
-    reload()
+    if (err) { setError(err); return }
+    onSaved(); onClose()
   }
 
-  if (loading) return (
-    <div style={{ display: 'flex' }}>
-      <Sidebar />
-      <main style={{ marginLeft: 'var(--sidebar-w)', flex: 1, padding: 40, color: 'var(--text3)' }}>Loading…</main>
-    </div>
-  )
-
   return (
-    <div style={{ display: 'flex' }}>
-      <Sidebar />
-      <main style={{ marginLeft: 'var(--sidebar-w)', flex: 1, padding: '32px 40px', maxWidth: 1100 }}>
-
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 28 }}>
-          <div>
-            <div style={{ fontSize: 10, letterSpacing: '0.12em', textTransform: 'uppercase', color: 'var(--blue)', marginBottom: 4, fontWeight: 600 }}>Cash & Savings</div>
-            <h1 style={{ fontFamily: "'Syne', sans-serif", fontSize: 26, fontWeight: 700, letterSpacing: '-0.02em' }}>Bank Accounts</h1>
-          </div>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button onClick={refreshFx} disabled={fxLoading} style={btnSecondary}>{fxLoading ? '⟳' : '↻'} FX {fxTs && <span style={{ color: 'var(--green)', marginLeft: 4 }}>{fxTs}</span>}</button>
-            <button onClick={() => { resetForm(); setShowAdd(true) }} style={btnPrimary('var(--blue)', 'var(--blue-bd)', 'var(--blue-bg)')}>+ Add account</button>
-          </div>
-        </div>
-
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 20 }}>
-          {[
-            { label: 'Total cash',       value: fmtCZK(totalCZK),               accent: 'var(--blue)',  note: `${accounts.length} accounts` },
-            { label: 'Annual interest',  value: fmtCZK(annualInterestCZK),       accent: 'var(--amber)', note: `Blended rate ${(avgRate * 100).toFixed(2)}%` },
-            { label: 'Monthly interest', value: fmtCZK(annualInterestCZK / 12, 0), accent: 'var(--green)', note: 'Est. passive income' },
-          ].map((m, i) => (
-            <div key={i} style={{ ...cardStyle, borderTop: `2px solid ${m.accent}` }}>
-              <div style={cardLabelStyle}>{m.label}</div>
-              <div style={{ fontFamily: "'Syne', sans-serif", fontSize: 22, fontWeight: 700, letterSpacing: '-0.02em', marginBottom: 4 }}>{m.value}</div>
-              <div style={{ fontSize: 10, color: 'var(--text4)' }}>{m.note}</div>
-            </div>
-          ))}
-        </div>
-
-        <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 12, overflow: 'hidden', marginBottom: 16 }}>
-          <div style={tableHeader}><span style={tableHeaderLabel}>Account overview</span></div>
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-            <thead>
-              <tr>
-                {['Account', 'Type', 'Balance', 'Rate', 'Est. annual interest', 'CCY', ''].map((h, i) => (
-                  <th key={h} style={{ ...th, textAlign: i <= 1 ? 'left' : 'right' }}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {accounts.map(a => {
-                const balCZK    = toCZK(a.balance, a.currency, fx)
-                const annualCZK = toCZK(a.balance * a.interest_rate, a.currency, fx)
-                const typeColor = ACCOUNT_TYPE_COLORS[a.account_type] ?? 'var(--text3)'
-                return (
-                  <tr key={a.id}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg3)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = '')}
-                  >
-                    <td style={tdL}>
-                      <div style={{ fontWeight: 500, fontSize: 13 }}>{a.name}</div>
-                      <div style={{ fontSize: 10, color: 'var(--text4)' }}>{a.institution}</div>
-                    </td>
-                    <td style={tdL}>
-                      <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: typeColor + '18', color: typeColor, border: `1px solid ${typeColor}30` }}>
-                        {ACCOUNT_TYPE_LABELS[a.account_type] ?? a.account_type}
-                      </span>
-                    </td>
-                    <td style={tdR}>
-                      <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 13 }}>{a.balance.toLocaleString('cs-CZ')}</div>
-                      <div style={{ fontSize: 10, color: 'var(--text4)' }}>{fmtCZK(balCZK)}</div>
-                    </td>
-                    <td style={{ ...tdR, color: a.interest_rate > 0.04 ? 'var(--green)' : a.interest_rate > 0.02 ? 'var(--amber)' : 'var(--text3)', fontFamily: "'DM Mono', monospace" }}>
-                      {(a.interest_rate * 100).toFixed(2)}%
-                    </td>
-                    <td style={{ ...tdR, color: 'var(--amber)', fontFamily: "'DM Mono', monospace" }}>
-                      {annualCZK > 0 ? `~${fmtCZK(annualCZK)}` : '—'}
-                    </td>
-                    <td style={tdR}>
-                      <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: 'var(--bg4)', color: 'var(--text3)', border: '1px solid var(--border)' }}>
-                        {a.currency}
-                      </span>
-                    </td>
-                    <td style={{ padding: '9px 14px', borderBottom: '1px solid var(--border)', whiteSpace: 'nowrap' }}>
-                      <button title="Edit account" onClick={() => startEdit(a)} style={actionBtn}>✎</button>
-                      <button title="Delete account" onClick={async () => {
-                        if (!confirm(`Delete "${a.name}"?`)) return
-                        await supabase.from('bank_accounts').update({ is_active: false }).eq('id', a.id)
-                        reload()
-                      }} style={{ ...actionBtn, marginLeft: 4, color: 'var(--red)' }}>✕</button>
-                    </td>
-                  </tr>
-                )
-              })}
-            </tbody>
-            <tfoot>
-              <tr style={{ background: 'var(--bg3)' }}>
-                <td colSpan={2} style={{ padding: '10px 14px', fontSize: 12, fontWeight: 600, borderTop: '1px solid var(--border)' }}>Total</td>
-                <td style={{ ...tdR, borderTop: '1px solid var(--border)', fontFamily: "'DM Mono', monospace", fontWeight: 600 }}>{fmtCZK(totalCZK)}</td>
-                <td style={{ ...tdR, borderTop: '1px solid var(--border)', fontFamily: "'DM Mono', monospace" }}>{(avgRate * 100).toFixed(2)}%</td>
-                <td style={{ ...tdR, borderTop: '1px solid var(--border)', fontFamily: "'DM Mono', monospace", color: 'var(--amber)', fontWeight: 600 }}>~{fmtCZK(annualInterestCZK)}</td>
-                <td colSpan={2} style={{ borderTop: '1px solid var(--border)' }} />
-              </tr>
-            </tfoot>
-          </table>
-        </div>
-
-        {showAdd && (
-          <div style={{ background: 'var(--bg2)', border: '1px solid var(--blue-bd)', borderRadius: 12, padding: '24px 28px', marginBottom: 16 }}>
-            <div style={{ fontFamily: "'Syne', sans-serif", fontSize: 16, fontWeight: 600, marginBottom: 18 }}>
-              {editId ? 'Edit account' : 'Add bank account'}
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
-              {[
-                { label: 'Account name', key: 'name',        placeholder: 'e.g. Spořicí účet' },
-                { label: 'Institution',  key: 'institution', placeholder: 'e.g. Raiffeisen Bank' },
-              ].map(f => (
-                <div key={f.key}>
-                  <div style={inputLabel}>{f.label}</div>
-                  <input style={inputStyle} placeholder={f.placeholder} value={(form as any)[f.key]} onChange={e => setForm(p => ({ ...p, [f.key]: e.target.value }))} />
-                </div>
-              ))}
-              <div>
-                <div style={inputLabel}>Account type</div>
-                <select style={inputStyle} value={form.account_type} onChange={e => setForm(p => ({ ...p, account_type: e.target.value }))}>
-                  <option value="savings">Savings</option>
-                  <option value="checking">Checking</option>
-                  <option value="money_market">Money Market</option>
-                  <option value="fixed_deposit">Term Deposit</option>
-                </select>
-              </div>
-              <div>
-                <div style={inputLabel}>Currency</div>
-                <select style={inputStyle} value={form.currency} onChange={e => setForm(p => ({ ...p, currency: e.target.value }))}>
-                  <option>CZK</option><option>EUR</option><option>USD</option><option>GBP</option>
-                </select>
-              </div>
-              <div>
-                <div style={inputLabel}>Balance</div>
-                <input style={inputStyle} type="number" placeholder="250000" value={form.balance} onChange={e => setForm(p => ({ ...p, balance: e.target.value }))} />
-              </div>
-              <div>
-                <div style={inputLabel}>Interest rate (%)</div>
-                <input style={inputStyle} type="number" step="0.1" placeholder="4.5" value={form.interest_rate} onChange={e => setForm(p => ({ ...p, interest_rate: e.target.value }))} />
-              </div>
-              <div style={{ gridColumn: '1/-1' }}>
-                <div style={inputLabel}>Notes (optional)</div>
-                <input style={inputStyle} placeholder="e.g. Fixed until Dec 2025" value={form.notes} onChange={e => setForm(p => ({ ...p, notes: e.target.value }))} />
-              </div>
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 18 }}>
-              <button onClick={() => { setShowAdd(false); resetForm() }} style={btnSecondary}>Cancel</button>
-              <button onClick={saveAccount} disabled={saving} style={btnPrimary('var(--blue)', 'var(--blue-bd)', 'var(--blue-bg)')}>
-                {saving ? 'Saving…' : editId ? 'Save changes' : 'Add account'}
-              </button>
-            </div>
-          </div>
+    <Modal title={account ? 'Edit account' : 'Add account'} onClose={onClose} width={520}>
+      <ErrorBox msg={error} />
+      <FormGrid>
+        <Field label="Account name"><input style={inputStyle} value={form.name} placeholder="Spořicí účet" onChange={e => set('name', e.target.value)} /></Field>
+        <Field label="Institution"><input style={inputStyle} value={form.institution} placeholder="Fio banka" onChange={e => set('institution', e.target.value)} /></Field>
+        <Field label="Type">
+          <select style={inputStyle} value={form.account_type} onChange={e => set('account_type', e.target.value as BankAccount['account_type'])}>
+            <option value="checking">Current account</option>
+            <option value="savings">Savings</option>
+            <option value="money_market">Money market</option>
+            <option value="fixed_deposit">Term deposit</option>
+          </select>
+        </Field>
+        <Field label="Currency">
+          <select style={inputStyle} value={form.currency} onChange={e => set('currency', e.target.value)} disabled={!!account}>
+            <option>CZK</option><option>EUR</option><option>USD</option><option>GBP</option><option>CHF</option>
+          </select>
+        </Field>
+        <Field label="Balance" hint={account ? 'Corrections only — record deposits and withdrawals with ±.' : undefined}>
+          <NumberInput value={form.balance} onChange={v => set('balance', v)} placeholder="250 000" suffix={form.currency} />
+        </Field>
+        <Field label="Interest rate (% p.a.)">
+          <NumberInput value={form.interest_rate} onChange={v => set('interest_rate', v)} placeholder="4,5" suffix="%" />
+        </Field>
+        {(form.account_type === 'fixed_deposit' || form.account_type === 'savings') && (
+          <Field label={form.account_type === 'fixed_deposit' ? 'Maturity date' : 'Rate fixed until (optional)'}
+            hint={form.account_type === 'fixed_deposit' ? 'Money is counted as locked until then.' : undefined}>
+            <input style={inputStyle} type="date" value={form.maturity_date} onChange={e => set('maturity_date', e.target.value)} />
+          </Field>
         )}
-
-        {interest.length > 0 && (
-          <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 12, overflow: 'hidden' }}>
-            <div style={tableHeader}><span style={tableHeaderLabel}>Interest received</span></div>
-            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-              <thead>
-                <tr>
-                  {['Account', 'Date', 'Gross', 'Tax', 'Net'].map((h, i) => (
-                    <th key={h} style={{ ...th, textAlign: i === 0 ? 'left' : 'right' }}>{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {interest.map(i => {
-                  const acct = accounts.find(a => a.id === i.account_id)
-                  return (
-                    <tr key={i.id}
-                      onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg3)')}
-                      onMouseLeave={e => (e.currentTarget.style.background = '')}
-                    >
-                      <td style={tdL}>{acct?.name ?? '—'}</td>
-                      <td style={tdR}>{fmtDate(i.payment_date)}</td>
-                      <td style={{ ...tdR, color: 'var(--green)', fontFamily: "'DM Mono', monospace" }}>+{i.gross_amount.toFixed(2)} {i.currency}</td>
-                      <td style={{ ...tdR, color: 'var(--red)', fontFamily: "'DM Mono', monospace" }}>−{i.tax_withheld.toFixed(2)}</td>
-                      <td style={{ ...tdR, fontFamily: "'DM Mono', monospace", fontWeight: 500 }}>{i.net_amount.toFixed(2)} {i.currency}</td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </main>
-    </div>
+        <Field label="Access (optional override)" hint="Leave on automatic unless the bank's notice period differs.">
+          <select style={inputStyle} value={form.liquidity_tier} onChange={e => set('liquidity_tier', e.target.value)}>
+            <option value="">Automatic</option>
+            {LIQUIDITY_TIERS.map(t => <option key={t} value={t}>{TIER_LABEL[t]}</option>)}
+          </select>
+        </Field>
+        <Field label="Notes (optional)" span="2"><input style={inputStyle} value={form.notes} onChange={e => set('notes', e.target.value)} /></Field>
+      </FormGrid>
+      <FormActions onCancel={onClose} onSubmit={save} label={account ? 'Save changes' : 'Add account'} saving={saving} />
+    </Modal>
   )
 }

@@ -82,8 +82,14 @@ describe('realizedPL', () => {
       expect(lots[0].passesTimeTest).toBe(false)
     })
 
-    it('passes exactly on the third anniversary', () => {
+    // §4(1)(w) ZDP: the holding period must *exceed* three years.
+    it('fails on the third anniversary itself', () => {
       const lots = realizedPL([buy('2021-01-01', 1, 100), sell('2024-01-01', 1, 200)])
+      expect(lots[0].passesTimeTest).toBe(false)
+    })
+
+    it('passes the day after the third anniversary', () => {
+      const lots = realizedPL([buy('2021-01-01', 1, 100), sell('2024-01-02', 1, 200)])
       expect(lots[0].passesTimeTest).toBe(true)
     })
 
@@ -94,9 +100,27 @@ describe('realizedPL', () => {
       expect(lots[0].passesTimeTest).toBe(false)
     })
 
-    it('treats 29 Feb + 3 years as 1 March', () => {
-      const lots = realizedPL([buy('2020-02-29', 1, 100), sell('2023-03-01', 1, 200)])
-      expect(lots[0].passesTimeTest).toBe(true)
+    it('treats 29 Feb + 3 years as 1 March (exempt from 2 March)', () => {
+      const onAnniversary = realizedPL([buy('2020-02-29', 1, 100), sell('2023-03-01', 1, 200)])
+      expect(onAnniversary[0].passesTimeTest).toBe(false)
+      const after = realizedPL([buy('2020-02-29', 1, 100), sell('2023-03-02', 1, 200)])
+      expect(after[0].passesTimeTest).toBe(true)
+    })
+
+    it('keeps per-lot dates under average cost', () => {
+      // 10 @ $80 in 2020 and 10 @ $220 in 2025, sell 15 in 2026.
+      const lots = realizedPL([
+        buy('2020-01-15', 10, 800),
+        buy('2025-06-01', 10, 2200),
+        sell('2026-03-01', 15, 15 * 200),
+      ], 'avg')
+      expect(lots).toHaveLength(2)
+      const exempt = lots.filter(l => l.passesTimeTest)
+      const taxable = lots.filter(l => !l.passesTimeTest)
+      expect(exempt.reduce((s, l) => s + l.shares, 0)).toBe(10)
+      expect(taxable.reduce((s, l) => s + l.shares, 0)).toBe(5)
+      // Both priced at the $150 pool average.
+      for (const l of lots) expect(l.costLocal / l.shares).toBeCloseTo(150, 9)
     })
   })
 
@@ -172,5 +196,53 @@ describe('contributionsVsGrowth', () => {
     )
     expect(split[1].contributed).toBeCloseTo(100_000, 6)
     expect(split[1].growth).toBeCloseTo(150_000, 6)
+  })
+})
+
+import { backfillRows, backfillKey } from './transactions'
+
+describe('backfillRows', () => {
+  const base = {
+    holdings: [{ id: 'h1', symbol: 'AAPL', shares: 25, avg_price: 150, currency: 'USD', purchase_date: '2020-01-15' }],
+    lots: [
+      { holding_id: 'h1', symbol: 'AAPL', shares: 10, purchase_price: 80, purchase_date: '2020-01-15' },
+      { holding_id: 'h1', symbol: 'AAPL', shares: 10, purchase_price: 220, purchase_date: '2025-06-01' },
+    ],
+    dividends: [],
+    today: '2026-09-30',
+  }
+  const rates: Record<string, number> = { '2020-01-15': 22.7, '2025-06-01': 21.9 }
+
+  it('writes one buy per lot at that date\'s rate, plus the unlotted residual', () => {
+    const r = backfillRows({ ...base, existingKeys: new Set(), rateOn: (_c, d) => rates[d] ?? null })
+    expect(r.rows).toHaveLength(3)
+    expect(r.rows.map(x => x.fx_rate_czk)).toEqual([22.7, 21.9, 22.7])
+    expect(r.rows[2].quantity).toBe(5)
+  })
+
+  it('skips — never guesses — when a historical rate is missing', () => {
+    const r = backfillRows({ ...base, existingKeys: new Set(), rateOn: () => null })
+    expect(r.rows).toHaveLength(0)
+    expect(r.skipped.length).toBeGreaterThan(0)
+  })
+
+  it('is idempotent via existing keys', () => {
+    const keys = new Set([backfillKey('buy', 'AAPL', '2020-01-15', 10), backfillKey('buy', 'AAPL', '2025-06-01', 10), backfillKey('buy', 'AAPL', '2020-01-15', 5)])
+    expect(backfillRows({ ...base, existingKeys: keys, rateOn: () => 20 }).rows).toHaveLength(0)
+  })
+})
+
+describe('stock splits', () => {
+  it('carries cost and dates through a 4-for-1 split', () => {
+    const lots = realizedPL([
+      buy('2020-01-02', 10, 1000),                                          // $100/sh
+      txn({ txn_date: '2022-01-02', type: 'split', symbol: 'AAPL', quantity: 4 }),
+      sell('2024-01-03', 40, 4000),                                         // $100/post-split sh
+    ])
+    expect(lots).toHaveLength(1)
+    expect(lots[0].shares).toBe(40)
+    expect(lots[0].costLocal).toBeCloseTo(1000, 9)
+    expect(lots[0].gainLocal).toBeCloseTo(3000, 9)
+    expect(lots[0].passesTimeTest).toBe(true)
   })
 })

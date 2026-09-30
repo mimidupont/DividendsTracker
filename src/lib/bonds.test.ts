@@ -1,435 +1,128 @@
 import { describe, it, expect } from 'vitest'
 import {
-  addMonths, couponPeriod, remainingCouponDates, accrualFraction,
-  valueBond, bondTotals, solveYTM, durationAt, shockedValue, accruedInterestOn,
-  splitAllInPrice,
-  upcomingCoupons, bondNominal, parseISO, toISO,
+  addMonths, couponSchedule, couponPeriod, accruedInterest, yearFraction,
+  valueBond, yieldToMaturity, bondRisk, priceChangeForShift, futureCashFlows, annualCouponLocal,
 } from './bonds'
-import type { Bond } from './supabase'
+import type { BondHolding } from './supabase'
 
-/** A real French OAT: 3.00%, redeemed 25 May 2054, annual coupon, ACT/ACT. */
-const OAT: Bond = {
-  id: 'oat', profile_id: 'p',
-  name: 'OAT 3.00% 25/05/2054',
-  issuer: 'République Française (AFT)',
-  isin: 'FR001400UKX0',
-  bond_type: 'government',
-  country: 'FR',
-  currency: 'EUR',
-  face_value: 1,
-  quantity: 10_000,
-  purchase_price_pct: 92.5,
-  current_price_pct: 95.0,
-  coupon_rate: 0.03,
-  coupons_per_year: 1,
-  day_count: 'ACT/ACT',
-  issue_date: '2023-05-25',
-  maturity_date: '2054-05-25',
-  purchase_date: '2025-09-15',
-  accrued_at_purchase: 92.05,
-  withholding_tax_pct: 0,
-  is_inflation_linked: false,
-  index_ratio: 1,
-  liquidity_tier: null,
-  notes: null,
-  is_active: true,
-  created_at: '', updated_at: '',
-}
-
-const at = (iso: string) => parseISO(iso)!
+const bond = (p: Partial<BondHolding> = {}): BondHolding => ({
+  id: 'b1', profile_id: 'p1', isin: 'CZ0001', name: 'CZGB 4.5 2030',
+  issuer_type: 'government', currency: 'CZK',
+  face_value: 10_000, quantity: 10, coupon_rate: 0.045, coupon_freq: 1,
+  coupon_type: 'fixed', day_count: 'ACT/365',
+  issue_date: '2020-06-15', maturity_date: '2030-06-15',
+  purchase_date: '2024-01-10', purchase_clean_price_pct: 98, purchase_fx_czk: 1,
+  clean_price_pct: null, price_date: null, redeemable_early: false,
+  liquidity_tier: null, notes: null, is_active: true, created_at: '', updated_at: '',
+  ...p,
+})
 
 describe('addMonths', () => {
-  it('clamps to the end of a shorter month', () => {
-    expect(toISO(addMonths(at('2025-08-31'), 1))).toBe('2025-09-30')
-    expect(toISO(addMonths(at('2025-01-31'), 1))).toBe('2025-02-28')
-    expect(toISO(addMonths(at('2024-01-31'), 1))).toBe('2024-02-29')
-  })
-
-  it('goes backwards without drifting', () => {
-    expect(toISO(addMonths(at('2054-05-25'), -12))).toBe('2053-05-25')
-    expect(toISO(addMonths(at('2054-05-25'), -6))).toBe('2053-11-25')
+  it('pins to month end when the anchor day does not exist', () => {
+    expect(addMonths('2024-03-31', -1)).toBe('2024-02-29')
+    expect(addMonths('2023-03-31', -1)).toBe('2023-02-28')
+    expect(addMonths('2024-02-29', 1, 31)).toBe('2024-03-31')
   })
 })
 
-describe('couponPeriod', () => {
-  it('brackets the valuation date with coupon anniversaries of maturity', () => {
-    const p = couponPeriod(OAT, at('2026-01-15'))!
-    expect(toISO(p.previous)).toBe('2025-05-25')
-    expect(toISO(p.next)).toBe('2026-05-25')
+describe('couponSchedule', () => {
+  it('runs backwards from maturity to issue', () => {
+    const s = couponSchedule(bond())
+    expect(s[0]).toBe('2021-06-15')
+    expect(s[s.length - 1]).toBe('2030-06-15')
+    expect(s).toHaveLength(10)
   })
-
-  it('handles a date sitting exactly on a coupon date', () => {
-    const p = couponPeriod(OAT, at('2026-05-25'))!
-    expect(toISO(p.previous)).toBe('2026-05-25')
-    expect(toISO(p.next)).toBe('2027-05-25')
+  it('handles semi-annual coupons', () => {
+    const s = couponSchedule(bond({ coupon_freq: 2 }))
+    expect(s.slice(0, 2)).toEqual(['2020-12-15', '2021-06-15'])
   })
-
-  it('splits semi-annual bonds into six-month periods', () => {
-    const semi = { ...OAT, coupons_per_year: 2 }
-    const p = couponPeriod(semi, at('2026-01-15'))!
-    expect(toISO(p.previous)).toBe('2025-11-25')
-    expect(toISO(p.next)).toBe('2026-05-25')
+  it('is empty for a zero-coupon bond', () => {
+    expect(couponSchedule(bond({ coupon_freq: 0 }))).toEqual([])
   })
 })
 
-describe('remainingCouponDates', () => {
-  it('lists one payment per year up to and including maturity', () => {
-    const dates = remainingCouponDates(OAT, at('2053-06-01'))
-    expect(dates.map(toISO)).toEqual(['2054-05-25'])
+describe('accruedInterest', () => {
+  it('accrues ACT/365 from the last coupon', () => {
+    // 146 days after 15 Jun 2025 → 8 Nov 2025. 10 000 × 4.5 % × 146/365 = 180.
+    expect(couponPeriod(bond(), '2025-11-08')).toEqual({ start: '2025-06-15', end: '2026-06-15' })
+    expect(accruedInterest(bond(), '2025-11-08')).toBeCloseTo(180, 9)
   })
-
-  it('is empty once the bond has matured', () => {
-    expect(remainingCouponDates(OAT, at('2054-05-26'))).toEqual([])
+  it('is zero on a coupon date', () => {
+    expect(accruedInterest(bond(), '2025-06-15')).toBeCloseTo(0, 9)
   })
-
-  it('counts every remaining annual coupon', () => {
-    // 2026-05-25 through 2054-05-25 inclusive = 29 payments.
-    expect(remainingCouponDates(OAT, at('2026-01-15')).length).toBe(29)
+  it('uses ICMA actual/actual per period', () => {
+    const b = bond({ day_count: 'ACT/ACT', coupon_freq: 2 })
+    // Half-way through a 183-day period → half a semi-annual coupon (225 / 2).
+    const period = couponPeriod(b, '2025-09-14')!
+    const frac = yearFraction(period.start, '2025-09-14', 'ACT/ACT', period, 2)
+    expect(accruedInterest(b, '2025-09-14')).toBeCloseTo(10_000 * 0.045 * frac, 9)
   })
-})
-
-describe('accrualFraction', () => {
-  it('is zero on the coupon date itself', () => {
-    expect(accrualFraction(OAT, at('2026-05-25'))).toBe(0)
-  })
-
-  it('grows linearly through the period under ACT/ACT', () => {
-    // 2025-05-25 → 2026-05-25 is 365 days; 2025-11-25 is day 184.
-    expect(accrualFraction(OAT, at('2025-11-25'))).toBeCloseTo(184 / 365, 9)
-  })
-
-  it('never exceeds one period', () => {
-    expect(accrualFraction(OAT, at('2026-05-24'))).toBeLessThanOrEqual(1)
-    expect(accrualFraction(OAT, at('2026-05-24'))).toBeGreaterThan(0.99)
-  })
-
-  it('uses 30/360 when the bond says so', () => {
-    const b = { ...OAT, day_count: '30/360' as const }
-    // Half a 360-day year from 25 May to 25 Nov.
-    expect(accrualFraction(b, at('2025-11-25'))).toBeCloseTo(0.5, 9)
+  it('counts 30E/360 in 30-day months', () => {
+    expect(yearFraction('2025-01-31', '2025-03-31', '30E/360')).toBeCloseTo(60 / 360, 12)
   })
 })
 
 describe('valueBond', () => {
-  it('values the position off nominal and a percent-of-par price', () => {
-    const v = valueBond(OAT, at('2026-01-15'))
-    expect(v.nominal).toBe(10_000)
-    // 95% of 10 000 nominal — not 95 x 10 000.
-    expect(v.cleanValue).toBeCloseTo(9_500, 6)
-    expect(v.hasMarketPrice).toBe(true)
+  it('uses the market price when one is entered, plus accrued', () => {
+    const v = valueBond(bond({ clean_price_pct: 101 }), '2025-11-08')
+    expect(v.basis).toBe('market')
+    expect(v.valueLocal).toBeCloseTo(10 * (10_000 * 1.01 + 180), 6)
+    expect(v.costLocal).toBeCloseTo(10 * 10_000 * 0.98, 6)
   })
-
-  it('adds accrued interest to reach the settlement value', () => {
-    const v = valueBond(OAT, at('2025-11-25'))
-    // One annual coupon = 300 EUR; 184/365 of it has accrued.
-    expect(v.accruedInterest).toBeCloseTo(300 * (184 / 365), 6)
-    expect(v.dirtyValue).toBeCloseTo(v.cleanValue + v.accruedInterest, 9)
+  it('falls back to cost, and says so', () => {
+    const v = valueBond(bond(), '2025-11-08')
+    expect(v.basis).toBe('cost')
+    expect(v.isMarketPrice).toBe(false)
   })
-
-  it('counts the coupon couru paid at purchase as part of cost', () => {
-    const v = valueBond(OAT, at('2026-01-15'))
-    expect(v.costValue).toBeCloseTo(9_250 + 92.05, 6)
+  it('values a redeemable savings bond at par', () => {
+    expect(valueBond(bond({ redeemable_early: true }), '2025-11-08').cleanPct).toBe(100)
   })
-
-  it('separates the capital loss from the coupon accrued since purchase', () => {
-    // The real case that prompted this: bought at 102.3, now marked 101.12, and
-    // yet the position showed a gain — because 117 days of a 4.5% coupon had
-    // accrued and was being folded into one P&L number.
-    const oat41: Bond = {
-      ...OAT,
-      name: "GOVT 4.5 Apr25'41",
-      quantity: 4_000, face_value: 1,
-      coupon_rate: 0.045, coupons_per_year: 1,
-      maturity_date: '2041-04-25',
-      purchase_price_pct: 102.3,
-      current_price_pct: 101.12,
-      purchase_date: '2026-08-11',
-      accrued_at_purchase: 0,
-    }
-    const v = valueBond(oat41, at('2026-08-20'))
-
-    expect(v.cleanValue).toBeCloseTo(4_044.80, 6)
-    expect(v.cleanCostValue).toBeCloseTo(4_092.00, 6)
-    expect(v.pricePL).toBeCloseTo(-47.20, 6)
-    expect(v.accruedInterest).toBeCloseTo(180 * (117 / 365), 6)
-    expect(v.incomePL).toBeCloseTo(v.accruedInterest, 6)
-    // The two halves always reconstruct the headline figure.
-    expect(v.plValue).toBeCloseTo(v.pricePL + v.incomePL, 9)
-    expect(v.plValue).toBeCloseTo(10.50, 2)
-  })
-
-  it('flags a cost basis missing its coupon couru', () => {
-    const v = valueBond({
-      ...OAT,
-      coupon_rate: 0.045, quantity: 4_000, face_value: 1,
-      maturity_date: '2041-04-25',
-      purchase_date: '2026-08-11',
-      accrued_at_purchase: 0,
-    }, at('2026-08-20'))
-
-    // 108 days of a 180/yr coupon had accrued when the position was bought.
-    expect(v.unrecordedAccruedAtPurchase).toBeCloseTo(180 * (108 / 365), 6)
-  })
-
-  it('does not flag a bond genuinely bought on its coupon date', () => {
-    const v = valueBond({
-      ...OAT,
-      maturity_date: '2041-04-25',
-      purchase_date: '2026-04-25',
-      accrued_at_purchase: 0,
-    }, at('2026-08-20'))
-    expect(v.unrecordedAccruedAtPurchase).toBeNull()
-  })
-
-  it('does not flag a bond whose coupon couru was recorded', () => {
-    const v = valueBond({
-      ...OAT,
-      maturity_date: '2041-04-25',
-      purchase_date: '2026-08-11',
-      accrued_at_purchase: 53.26,
-    }, at('2026-08-20'))
-    expect(v.unrecordedAccruedAtPurchase).toBeNull()
-  })
-
-  it('nets the coupon couru paid out of income earned', () => {
-    const withCouru = valueBond({
-      ...OAT,
-      coupon_rate: 0.045, quantity: 4_000, face_value: 1,
-      maturity_date: '2041-04-25',
-      purchase_price_pct: 102.3, current_price_pct: 101.12,
-      purchase_date: '2026-08-11',
-      accrued_at_purchase: 53.26,
-    }, at('2026-08-20'))
-
-    // Nine days of interest earned, not four months of it.
-    expect(withCouru.incomePL).toBeCloseTo(180 * (117 / 365) - 53.26, 6)
-    expect(withCouru.plValue).toBeLessThan(0)
-  })
-
-  it('falls back to cost when no market price has been entered', () => {
-    const v = valueBond({ ...OAT, current_price_pct: null }, at('2026-01-15'))
-    expect(v.hasMarketPrice).toBe(false)
-    expect(v.cleanValue).toBeCloseTo(9_250, 6)
-    // Cost basis and mark agree, so the clean P&L is only the accrued coupon.
-    expect(v.plValue).toBeCloseTo(v.accruedInterest - 92.05, 6)
-  })
-
-  it('redeems at par once matured, whatever the last quoted price', () => {
-    const v = valueBond({ ...OAT, current_price_pct: 80 }, at('2054-06-01'))
-    expect(v.isMatured).toBe(true)
-    expect(v.cleanValue).toBeCloseTo(10_000, 6)
-    expect(v.accruedInterest).toBe(0)
-    expect(v.annualCouponGross).toBe(0)
-    expect(v.ytm).toBeNull()
-  })
-
-  it('scales nominal and coupons by the indexation ratio for an OATi', () => {
-    const oati = { ...OAT, is_inflation_linked: true, index_ratio: 1.2 }
-    expect(bondNominal(oati)).toBeCloseTo(12_000, 6)
-    const v = valueBond(oati, at('2026-01-15'))
-    expect(v.annualCouponGross).toBeCloseTo(12_000 * 0.03, 6)
-  })
-
-  it('reports coupons net of withholding', () => {
-    const taxed = { ...OAT, withholding_tax_pct: 0.3 }
-    const v = valueBond(taxed, at('2026-01-15'))
-    expect(v.annualCouponGross).toBeCloseTo(300, 6)
-    expect(v.annualCouponNet).toBeCloseTo(210, 6)
-  })
-
-  it('prices a discount bond above its coupon rate', () => {
-    const v = valueBond(OAT, at('2026-01-15'))
-    // Bought below par, so yield to maturity exceeds the 3% coupon.
-    expect(v.ytm).not.toBeNull()
-    expect(v.ytm!).toBeGreaterThan(0.03)
-    expect(v.ytm!).toBeLessThan(0.05)
-  })
-
-  it('gives a long bond a long duration', () => {
-    const v = valueBond(OAT, at('2026-01-15'))
-    expect(v.modifiedDuration).not.toBeNull()
-    // ~28 years to run at a ~3.3% yield: high teens.
-    expect(v.modifiedDuration!).toBeGreaterThan(14)
-    expect(v.modifiedDuration!).toBeLessThan(22)
+  it('values a matured bond at par with no accrual', () => {
+    const v = valueBond(bond({ clean_price_pct: 90 }), '2031-01-01')
+    expect(v.valueLocal).toBe(100_000)
   })
 })
 
-describe('solveYTM', () => {
-  it('returns the coupon rate for a bond priced exactly at par', () => {
-    // 10 annual coupons of 5 on 100 nominal, priced at 100 on a coupon date.
-    const y = solveYTM(100, 100, 5, 1, 10, 0)
-    expect(y).not.toBeNull()
-    expect(y!).toBeCloseTo(0.05, 8)
+describe('yieldToMaturity', () => {
+  it('equals the coupon for a bond priced at par on a coupon date', () => {
+    const y = yieldToMaturity(bond(), 100, '2025-06-15')!
+    expect(y).toBeCloseTo(0.045, 3)
   })
-
-  it('round-trips: the solved yield reprices the bond', () => {
-    const y = solveYTM(92.5, 100, 3, 1, 28, 0.4)!
-    const duration = durationAt(y, 100, 3, 1, 28, 0.4)
-    expect(duration).not.toBeNull()
-    expect(duration!).toBeGreaterThan(0)
+  it('is above the coupon when bought below par', () => {
+    expect(yieldToMaturity(bond(), 95, '2025-06-15')!).toBeGreaterThan(0.045)
   })
-
-  it('solves a zero-coupon bond', () => {
-    // 100 due in 10 years, bought at 55.84 → ~6%.
-    const y = solveYTM(55.839478, 100, 0, 1, 10, 0)
-    expect(y!).toBeCloseTo(0.06, 5)
-  })
-
-  it('handles a negative yield, which European govvies have genuinely traded at', () => {
-    const y = solveYTM(105, 100, 0, 1, 5, 0)
-    expect(y).not.toBeNull()
-    expect(y!).toBeLessThan(0)
-  })
-
-  it('returns null rather than a fabricated number when there is nothing to solve', () => {
-    expect(solveYTM(0, 100, 3, 1, 10, 0)).toBeNull()
-    expect(solveYTM(100, 100, 3, 1, 0, 0)).toBeNull()
+  it('is null for a matured bond', () => {
+    expect(yieldToMaturity(bond(), 100, '2031-01-01')).toBeNull()
   })
 })
 
-describe('shockedValue', () => {
-  it('falls by roughly duration x the shift', () => {
-    const v = valueBond(OAT, at('2026-01-15'))
-    const after = shockedValue(v, 100) // +100bp
-    const expected = v.dirtyValue * (1 - v.modifiedDuration! * 0.01)
-    expect(after).toBeCloseTo(expected, 6)
-    expect(after).toBeLessThan(v.dirtyValue)
+describe('bondRisk', () => {
+  it('gives a zero-coupon Macaulay duration equal to its maturity', () => {
+    const z = bond({ coupon_freq: 0, coupon_rate: 0, maturity_date: '2030-06-15' })
+    const r = bondRisk(z, 0.04, '2025-06-15')!
+    expect(r.macaulay).toBeCloseTo(daysYears('2025-06-15', '2030-06-15'), 6)
   })
-
-  it('rises when yields fall', () => {
-    const v = valueBond(OAT, at('2026-01-15'))
-    expect(shockedValue(v, -100)).toBeGreaterThan(v.dirtyValue)
-  })
-
-  it('never goes negative on an extreme shift', () => {
-    const v = valueBond(OAT, at('2026-01-15'))
-    expect(shockedValue(v, 100_000)).toBe(0)
+  it('makes prices fall when yields rise', () => {
+    const r = bondRisk(bond(), 0.045, '2025-06-15')!
+    expect(r.modified).toBeGreaterThan(3)
+    expect(priceChangeForShift(r, 0.02)).toBeLessThan(0)
+    // Convexity: a fall is smaller than the matching rise.
+    expect(Math.abs(priceChangeForShift(r, 0.02))).toBeLessThan(priceChangeForShift(r, -0.02))
   })
 })
 
-describe('bondTotals', () => {
-  const short: Bond = {
-    ...OAT, id: 'short', name: 'OAT 0.75% 25/05/2028',
-    coupon_rate: 0.0075, maturity_date: '2028-05-25',
-    quantity: 5_000, purchase_price_pct: 97, current_price_pct: 98,
-    accrued_at_purchase: 0,
-  }
-
-  it('weights duration by value, not by line count', () => {
-    const asOf = at('2026-01-15')
-    const long = valueBond(OAT, asOf)
-    const brief = valueBond(short, asOf)
-    const t = bondTotals([long, brief])
-
-    const flatMean = (long.modifiedDuration! + brief.modifiedDuration!) / 2
-    // The long line is ~2x the money, so the book sits above a flat mean.
-    expect(t.averageDuration!).toBeGreaterThan(flatMean)
-    expect(t.averageDuration!).toBeLessThan(long.modifiedDuration!)
+describe('cash flows & income', () => {
+  it('lists remaining coupons and principal', () => {
+    const cfs = futureCashFlows(bond(), '2029-01-01')
+    expect(cfs.map(c => c.date)).toEqual(['2029-06-15', '2030-06-15', '2030-06-15'])
+    expect(cfs[cfs.length - 1].isPrincipal).toBe(true)
   })
-
-  it('sums money figures across the book', () => {
-    const asOf = at('2026-01-15')
-    const vals = [valueBond(OAT, asOf), valueBond(short, asOf)]
-    const t = bondTotals(vals)
-    expect(t.dirtyValue).toBeCloseTo(vals[0].dirtyValue + vals[1].dirtyValue, 6)
-    expect(t.annualCouponGross).toBeCloseTo(300 + 37.5, 6)
-    expect(t.count).toBe(2)
-    expect(t.maturedCount).toBe(0)
-  })
-
-  it('splits the book P&L into price and income', () => {
-    const asOf = at('2026-01-15')
-    const vals = [valueBond(OAT, asOf), valueBond(short, asOf)]
-    const t = bondTotals(vals)
-    expect(t.plValue).toBeCloseTo(t.pricePL + t.incomePL, 6)
-  })
-
-  it('is all zeros for an empty book rather than NaN', () => {
-    const t = bondTotals([])
-    expect(t.dirtyValue).toBe(0)
-    expect(t.plPct).toBe(0)
-    expect(t.averageDuration).toBeNull()
-    expect(t.averageYTM).toBeNull()
+  it('stops paying income after maturity', () => {
+    expect(annualCouponLocal(bond(), '2025-01-01')).toBe(4_500)
+    expect(annualCouponLocal(bond(), '2031-01-01')).toBe(0)
   })
 })
 
-describe('upcomingCoupons', () => {
-  it('lists the next year of payments in date order', () => {
-    const semi = { ...OAT, id: 'semi', coupons_per_year: 2 }
-    const rows = upcomingCoupons([OAT, semi], 12, at('2026-01-15'))
-    expect(rows.length).toBeGreaterThan(0)
-    const dates = rows.map(r => r.date)
-    expect([...dates].sort()).toEqual(dates)
-    expect(rows.every(r => r.date > '2026-01-15' && r.date <= '2027-01-15')).toBe(true)
-  })
-
-  it('reports each payment net of withholding', () => {
-    const taxed = { ...OAT, withholding_tax_pct: 0.25 }
-    const [next] = upcomingCoupons([taxed], 12, at('2026-01-15'))
-    expect(next.grossAmount).toBeCloseTo(300, 6)
-    expect(next.netAmount).toBeCloseTo(225, 6)
-  })
-
-  it('skips matured bonds', () => {
-    expect(upcomingCoupons([OAT], 12, at('2054-06-01'))).toEqual([])
-  })
-})
-
-describe('accruedInterestOn', () => {
-  it('gives the coupon couru at an arbitrary settlement date', () => {
-    // 184 days into a 365-day period on a 300/yr coupon.
-    expect(accruedInterestOn(OAT, at('2025-11-25'))).toBeCloseTo(300 * (184 / 365), 6)
-  })
-
-  it('is zero on a coupon date and after maturity', () => {
-    expect(accruedInterestOn(OAT, at('2026-05-25'))).toBe(0)
-    expect(accruedInterestOn(OAT, at('2054-06-01'))).toBe(0)
-  })
-})
-
-describe('splitAllInPrice', () => {
-  it('splits a broker all-in price without changing what was settled', () => {
-    // The reported contract note: 4,000 nominal at an all-in 102.3, of which
-    // 53.26 was the coupon couru owed to the previous holder.
-    const split = splitAllInPrice(102.3, 4_000, 1, 53.26)!
-    expect(split.totalPaid).toBeCloseTo(4_092.00, 6)
-    expect(split.accruedAtPurchase).toBeCloseTo(53.26, 6)
-    expect(split.cleanPricePct).toBeCloseTo(100.9685, 4)
-    // The split must be cost-neutral, or it invents or destroys money.
-    expect(
-      (split.cleanPricePct / 100) * 4_000 + split.accruedAtPurchase
-    ).toBeCloseTo(split.totalPaid, 6)
-  })
-
-  it('rebuilds the reported position correctly once split', () => {
-    const split = splitAllInPrice(102.3, 4_000, 1, 53.26)!
-    const v = valueBond({
-      ...OAT,
-      quantity: 4_000, face_value: 1,
-      coupon_rate: 0.045, coupons_per_year: 1,
-      maturity_date: '2041-04-25',
-      purchase_date: '2026-08-11',
-      purchase_price_pct: split.cleanPricePct,
-      current_price_pct: 101.12,
-      accrued_at_purchase: split.accruedAtPurchase,
-    }, at('2026-08-20'))
-
-    // Total is unchanged by the split — only the attribution moves.
-    expect(v.plValue).toBeCloseTo(10.50, 2)
-    // and now points the right way on both halves: the clean price rose from
-    // 100.97 to 101.12, and nine days of coupon accrued on top.
-    expect(v.pricePL).toBeCloseTo(6.06, 2)
-    expect(v.incomePL).toBeCloseTo(4.44, 2)
-    expect(v.unrecordedAccruedAtPurchase).toBeNull()
-  })
-
-  it('leaves a clean-quoted price alone when there is no accrued to strip', () => {
-    const split = splitAllInPrice(92.5, 10_000, 1, 0)!
-    expect(split.cleanPricePct).toBeCloseTo(92.5, 9)
-  })
-
-  it('refuses a split where the accrued exceeds the payment', () => {
-    expect(splitAllInPrice(1, 100, 1, 500)).toBeNull()
-    expect(splitAllInPrice(102, 0, 1, 10)).toBeNull()
-  })
-})
+function daysYears(a: string, b: string) {
+  return (Date.parse(b) - Date.parse(a)) / 86_400_000 / 365
+}

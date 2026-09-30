@@ -19,7 +19,15 @@ export interface MarketAssumptionInput {
 }
 
 export interface McConfig {
+  /** Gross asset values by class (property gross, not net of its mortgage). */
   startValueByClass: Partial<Record<AssetClass, number>>
+  /**
+   * Debt held constant against the assets (mortgages), as a positive CZK
+   * figure. Property is simulated gross and the debt subtracted afterwards, so
+   * a 10 % fall in a 5M flat with a 3M loan is a 25 % fall in its equity — as
+   * it really is — rather than 10 % of a pre-netted 2M.
+   */
+  debtCZK?: number
   monthlyContributionCZK: number
   /** Annual raise applied to the contribution, as a fraction. */
   contributionGrowthPct: number
@@ -67,9 +75,15 @@ export interface McResult {
   simulations: number
 }
 
+/**
+ * `expectedRealReturn` is the ARITHMETIC mean annual return. The typical
+ * (median) path compounds at roughly the geometric rate μ − σ²/2, which is
+ * what /fire's deterministic projection uses — see geometricReturn().
+ */
 export const DEFAULT_ASSUMPTIONS: MarketAssumptionInput[] = [
   { assetClass: 'stock',      expectedRealReturn: 0.055, volatility: 0.16 },
   { assetClass: 'etf',        expectedRealReturn: 0.055, volatility: 0.16 },
+  { assetClass: 'bond',       expectedRealReturn: 0.01,  volatility: 0.05 },
   { assetClass: 'crypto',     expectedRealReturn: 0.08,  volatility: 0.70 },
   { assetClass: 'bond',       expectedRealReturn: 0.015, volatility: 0.06 },
   { assetClass: 'cash',       expectedRealReturn: 0.005, volatility: 0.01 },
@@ -83,6 +97,11 @@ export const DEFAULT_ASSUMPTIONS: MarketAssumptionInput[] = [
  */
 export const CORRELATIONS: Record<string, number> = {
   'stock|etf': 0.98,
+  'stock|bond': 0.1,
+  'etf|bond': 0.1,
+  'bond|crypto': 0.05,
+  'bond|realestate': 0.2,
+  'bond|cash': 0.3,
   'stock|crypto': 0.4,
   'stock|realestate': 0.3,
   'stock|cash': 0.0,
@@ -101,6 +120,10 @@ export const CORRELATIONS: Record<string, number> = {
   'crypto|cash': 0.0,
   'realestate|cash': 0.0,
 }
+
+/** Approximate geometric (compound) return from an arithmetic mean and volatility. */
+export const geometricReturn = (arithmetic: number, volatility: number): number =>
+  arithmetic - (volatility * volatility) / 2
 
 function correlationOf(a: AssetClass, b: AssetClass): number {
   if (a === b) return 1
@@ -237,6 +260,15 @@ export function runMonteCarlo(config: McConfig): McResult {
     ? config.withdrawalStartYear * 12
     : Infinity
   const monthlyWithdrawal = (config.annualWithdrawalCZK ?? 0) / 12
+  const debt = Math.max(0, config.debtCZK ?? 0)
+  // Contributions and withdrawals go through liquid classes: nobody sells a
+  // slice of their flat each month to pay the bills. Property only takes part
+  // when it is all there is.
+  const liquidIdx = classes.map((c, i) => (c !== 'realestate' ? i : -1)).filter(i => i >= 0)
+  const flowIdx = (values: number[]) => {
+    const liquid = liquidIdx.filter(i => values[i] > 0)
+    return liquid.length > 0 ? liquid : classes.map((_, i) => i)
+  }
 
   for (let s = 0; s < sims; s++) {
     const values = classes.map(c => config.startValueByClass[c] ?? 0)
@@ -244,7 +276,7 @@ export function runMonteCarlo(config: McConfig): McResult {
     let ruined = false
     let reachedYear: number | null = null
 
-    yearlyValues[0].push(values.reduce((a, b) => a + b, 0))
+    yearlyValues[0].push(values.reduce((a, b) => a + b, 0) - debt)
 
     for (let m = 1; m <= months; m++) {
       // Correlated standard normals
@@ -257,28 +289,33 @@ export function runMonteCarlo(config: McConfig): McResult {
         values[i] *= 1 + r
       }
 
-      // Contributions land proportionally to the current mix, so the portfolio
-      // keeps its shape rather than drifting into whichever class grew fastest.
-      let total = values.reduce((a, b) => a + b, 0)
+      // Contributions land proportionally to the current (liquid) mix, so the
+      // portfolio keeps its shape rather than drifting into whichever class
+      // grew fastest.
       if (m < withdrawalStartMonth && contribution > 0) {
-        if (total > 0) {
-          for (let i = 0; i < values.length; i++) values[i] += contribution * (values[i] / total)
-        } else {
-          for (let i = 0; i < values.length; i++) values[i] += contribution / values.length
+        const idx = flowIdx(values)
+        const base = idx.reduce((a, i) => a + Math.max(0, values[i]), 0)
+        for (const i of idx) {
+          values[i] += base > 0 ? contribution * (Math.max(0, values[i]) / base) : contribution / idx.length
         }
       }
 
       if (m >= withdrawalStartMonth && monthlyWithdrawal > 0) {
-        total = values.reduce((a, b) => a + b, 0)
-        if (total > 0) {
-          for (let i = 0; i < values.length; i++) {
-            values[i] = Math.max(0, values[i] - monthlyWithdrawal * (values[i] / total))
+        const idx = flowIdx(values)
+        const base = idx.reduce((a, i) => a + Math.max(0, values[i]), 0)
+        if (base > 0) {
+          for (const i of idx) {
+            values[i] = Math.max(0, values[i] - monthlyWithdrawal * (values[i] / base))
           }
         }
       }
 
-      total = values.reduce((a, b) => a + b, 0)
-      if (total <= 0) ruined = true
+      const gross = values.reduce((a, b) => a + b, 0)
+      const total = gross - debt
+      // Ruin = nothing left to draw on (withdrawals come from liquid assets).
+      if (monthlyWithdrawal > 0 && m >= withdrawalStartMonth &&
+          flowIdx(values).every(i => values[i] <= 0)) ruined = true
+      if (gross <= 0) ruined = true
 
       if (config.targetCZK != null && reachedYear == null && total >= config.targetCZK) {
         reachedYear = m / 12
@@ -291,7 +328,7 @@ export function runMonteCarlo(config: McConfig): McResult {
       }
     }
 
-    const final = values.reduce((a, b) => a + b, 0)
+    const final = values.reduce((a, b) => a + b, 0) - debt
     finalValues.push(final)
     if (ruined) ruinCount++
     if (reachedYear != null) yearReachedTarget.push(reachedYear)
@@ -327,8 +364,12 @@ export function runMonteCarlo(config: McConfig): McResult {
       : sortedFinal.filter(v => v >= config.targetCZK!).length / sims,
     probabilityOfRuin: monthlyWithdrawal > 0 ? ruinCount / sims : null,
     correlationDegraded,
-    medianYearReachingTarget: sortedReached.length > 0
-      ? percentile(sortedReached, 0.5)
+    // The median *run*: runs that never reach the target count as "never",
+    // so when fewer than half reach it there is no median year at all.
+    // Reporting the median of only the successful runs made a 35 % chance
+    // look like a 12-year plan.
+    medianYearReachingTarget: sortedReached.length >= sims / 2
+      ? sortedReached[Math.ceil(sims / 2) - 1]
       : null,
     finalDistribution: sortedFinal,
     yearlyDistribution,

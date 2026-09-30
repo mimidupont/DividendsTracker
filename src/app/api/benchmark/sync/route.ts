@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 
+/** Every outbound call is bounded: one hung scrape used to stall a whole batch. */
+const FETCH_TIMEOUT_MS = 8000
+
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
 
@@ -39,27 +42,36 @@ const CZK_SAVINGS_YEARS = 5
 interface Close { price_date: string; close: number }
 
 /**
- * Synthetic daily series for a CZK savings account, indexed to 100 on day one
- * and compounding at CZK_SAVINGS_APY. Written to the same table as real prices
- * so the shadow-portfolio maths needs no special case.
+ * Fixed start of the synthetic savings index. Anchoring to "today − 5 years"
+ * re-scaled every overlapping row on each sync while rows that fell out of the
+ * window kept the old scale, leaving a step in the series.
+ */
+const CZK_SAVINGS_EPOCH = Date.UTC(2015, 0, 1)
+
+/**
+ * Synthetic daily series for a CZK savings account, compounding at
+ * CZK_SAVINGS_APY from a fixed epoch (index 100 on 1 Jan 2015). Written to the
+ * same table as real prices so the shadow-portfolio maths needs no special case.
  */
 function czkSavingsHistory(years = CZK_SAVINGS_YEARS): Close[] {
   const daily = Math.pow(1 + CZK_SAVINGS_APY, 1 / 365)
   const out: Close[] = []
-  const start = new Date()
-  start.setUTCHours(0, 0, 0, 0)
-  start.setUTCDate(start.getUTCDate() - Math.round(years * 365))
-
-  const days = Math.round(years * 365)
-  for (let i = 0; i <= days; i++) {
-    const d = new Date(start.getTime() + i * 86_400_000)
+  const today = new Date()
+  today.setUTCHours(0, 0, 0, 0)
+  const start = Math.max(CZK_SAVINGS_EPOCH, today.getTime() - Math.round(years * 365) * 86_400_000)
+  for (let t = start; t <= today.getTime(); t += 86_400_000) {
+    const daysSinceEpoch = Math.round((t - CZK_SAVINGS_EPOCH) / 86_400_000)
     out.push({
-      price_date: d.toISOString().slice(0, 10),
-      close: 100 * Math.pow(daily, i),
+      price_date: new Date(t).toISOString().slice(0, 10),
+      close: 100 * Math.pow(daily, daysSinceEpoch),
     })
   }
   return out
 }
+
+/** Per-symbol cooldown: this route is unauthenticated and each call scrapes Yahoo. */
+const SYNC_COOLDOWN_MS = 10 * 60 * 1000
+const lastSyncAt = new Map<string, number>()
 
 /**
  * Daily closes from Yahoo's chart endpoint.
@@ -77,6 +89,7 @@ async function fetchHistory(
     `?range=${range}&interval=1d`
 
   const res = await fetch(url, {
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     headers: { 'User-Agent': UA, Accept: 'application/json' },
     next: { revalidate: 0 },
   })
@@ -85,7 +98,11 @@ async function fetchHistory(
   const data = await res.json()
   const result = data?.chart?.result?.[0]
   const timestamps: number[] = result?.timestamp ?? []
-  const closes: (number | null)[] = result?.indicators?.quote?.[0]?.close ?? []
+  // Dividend-adjusted closes, so a distributing fund (SPY) is compared on total
+  // return like your own side, which includes dividends. Falls back to the raw
+  // close when Yahoo does not supply the adjusted series.
+  const closes: (number | null)[] =
+    result?.indicators?.adjclose?.[0]?.adjclose ?? result?.indicators?.quote?.[0]?.close ?? []
   if (timestamps.length === 0) throw new Error('No history returned')
 
   const out: Close[] = []
@@ -124,6 +141,13 @@ export async function POST(req: NextRequest) {
         results[symbol] = { rows: 0, error: 'unsupported benchmark' }
         continue
       }
+
+      const last = lastSyncAt.get(symbol) ?? 0
+      if (Date.now() - last < SYNC_COOLDOWN_MS) {
+        results[symbol] = { rows: 0, error: 'synced in the last 10 minutes — skipped' }
+        continue
+      }
+      lastSyncAt.set(symbol, Date.now())
 
       try {
         // The savings benchmark is generated, not fetched — there is no market

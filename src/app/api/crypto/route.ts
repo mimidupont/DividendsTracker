@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 
+/** Every outbound call is bounded: one hung scrape used to stall a whole batch. */
+const FETCH_TIMEOUT_MS = 8000
+
 /**
  * Crypto spot prices, proxied.
  *
@@ -12,6 +15,8 @@ import { NextRequest, NextResponse } from 'next/server'
 
 const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+
+const MAX_IDS = 250
 
 /** Cache window shared by every visitor of the deployment. */
 const REVALIDATE_SECONDS = 300
@@ -41,6 +46,7 @@ async function fetchCoinGecko(ids: string[]): Promise<Record<string, CoinPrice>>
   for (let attempt = 0; attempt < 3; attempt++) {
     if (attempt > 0) await sleep(400 * attempt)
     const res = await fetch(url, {
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
       headers: { 'User-Agent': UA, Accept: 'application/json' },
       next: { revalidate: REVALIDATE_SECONDS },
     })
@@ -69,6 +75,12 @@ export async function GET(req: NextRequest) {
 
   if (ids.length === 0) {
     return NextResponse.json<CryptoResponse>({ prices: {}, fetchedAt: new Date().toISOString() })
+  }
+  // CoinGecko's own per-call cap; also stops one request fanning out without bound.
+  if (ids.length > MAX_IDS) {
+    return NextResponse.json<CryptoResponse>(
+      { prices: {}, fetchedAt: new Date().toISOString(), error: `at most ${MAX_IDS} ids per request` },
+      { status: 400 })
   }
 
   try {

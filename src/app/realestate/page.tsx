@@ -1,253 +1,227 @@
 'use client'
 import { useState } from 'react'
-import { supabase, RealEstate } from '@/lib/supabase'
+import type { RealEstate } from '@/lib/supabase'
 import { useAppData } from '@/hooks/useAppData'
 import { useProfile } from '@/lib/profile'
 import { useFx } from '@/hooks/useFx'
-import Sidebar from '@/components/Sidebar'
-import { toCZK, fmtCZK, fmtDate } from '@/lib/fx'
-import { cardStyle, cardLabelStyle, btnSecondary, btnPrimary,
-         inputStyle, inputLabel } from '@/lib/ui'
+import { PageShell, PageHeader, LoadingShell, EmptyState, MetricCards } from '@/components/PageShell'
+import Badge from '@/components/Badge'
+import Modal from '@/components/Modal'
+import { Field, FormGrid, FormActions, ErrorBox, NumberInput, Checkbox, inputStyle } from '@/components/FormFields'
+import { useUndoableDelete } from '@/components/UndoToast'
+import { toCZK, fmtCZK, fmtSignedCZK, fmtShare, fmtNum } from '@/lib/fx'
+import { fmtISODate, todayISO, daysBetween } from '@/lib/date'
+import { updateScoped, insertScoped, deleteScoped } from '@/lib/db'
+import { parseDecimal, parsePercent } from '@/lib/parse'
+import { btnStyle, actionBtn, signColor } from '@/lib/ui'
 
-const TYPE_LABELS: Record<string, string>  = { residential: 'Residential', commercial: 'Commercial', land: 'Land', reit: 'REIT' }
-const TYPE_COLORS: Record<string, string>  = { residential: 'var(--teal)', commercial: 'var(--amber)', land: 'var(--green)', reit: 'var(--blue)' }
+const TYPE_LABELS: Record<string, string> = { residential: 'Residential', commercial: 'Commercial', land: 'Land', reit: 'REIT' }
+
+/** Your share of a property, 0–1. Applied to value, cost, mortgage, rent and costs alike. */
+const share = (p: RealEstate) => (isFinite(p.ownership_pct) ? Math.min(Math.max(p.ownership_pct, 0), 100) : 100) / 100
 
 export default function RealEstatePage() {
-  const { realEstate: properties, loading, reload } = useAppData()
+  const { realEstate, loading, reload } = useAppData()
   const { activeProfile } = useProfile()
-  const [showAdd, setShowAdd] = useState(false)
   const { fx, fxLoading, fxTs, refresh: refreshFx } = useFx()
-  const [editId, setEditId]   = useState<string | null>(null)
-  const [saving, setSaving]   = useState(false)
-  const [form, setForm]       = useState({
-    name: '', property_type: 'residential', address: '',
-    purchase_price: '', current_value: '', currency: 'CZK',
-    purchase_date: '', monthly_rent: '0', mortgage_balance: '0',
-    mortgage_rate: '0', monthly_mortgage: '0', ownership_pct: '100', notes: '',
-  })
+  const [editing, setEditing] = useState<RealEstate | 'new' | null>(null)
+  const { schedule, pendingIds, toast } = useUndoableDelete()
+  const properties = realEstate.filter(p => !pendingIds.has(p.id))
+  const today = todayISO()
 
-  // Every figure below is the user's *share*. Applying ownership_pct to the
-  // asset but not to the mortgage (as before) counted the whole loan against a
-  // part-owned property and understated equity.
-  const share = (p: RealEstate) => (isFinite(p.ownership_pct) ? p.ownership_pct : 100) / 100
+  const czk = (p: RealEstate, v: number) => toCZK(v * share(p), p.currency, fx)
+  const totalValue    = properties.reduce((s, p) => s + czk(p, p.current_value), 0)
+  const totalPurchase = properties.reduce((s, p) => s + czk(p, p.purchase_price), 0)
+  const totalMortgage = properties.reduce((s, p) => s + czk(p, p.mortgage_balance), 0)
+  const totalEquity   = totalValue - totalMortgage
+  const netRent       = properties.reduce((s, p) => s + czk(p, p.monthly_rent * 12 - (p.annual_costs ?? 0)), 0)
+  const mortgageInterest = properties.reduce((s, p) => s + czk(p, p.mortgage_balance * p.mortgage_rate), 0)
 
-  const totalValueCZK    = properties.reduce((s, p) => s + toCZK(p.current_value    * share(p), p.currency, fx), 0)
-  const totalPurchaseCZK = properties.reduce((s, p) => s + toCZK(p.purchase_price   * share(p), p.currency, fx), 0)
-  const totalMortgageCZK = properties.reduce((s, p) => s + toCZK(p.mortgage_balance * share(p), p.currency, fx), 0)
-  const totalEquityCZK   = totalValueCZK - totalMortgageCZK
-  const totalRentalCZK   = properties.reduce((s, p) => s + toCZK(p.monthly_rent * 12 * share(p), p.currency, fx), 0)
-  const totalGainCZK     = totalValueCZK - totalPurchaseCZK
-
-  const saveProperty = async () => {
-    if (!form.name || !form.purchase_price || !form.current_value) return
-    if (!activeProfile) return
-    setSaving(true)
-    const ownership = parseFloat(form.ownership_pct)
-    const payload = {
-      name: form.name, property_type: form.property_type,
-      address: form.address || null,
-      purchase_price: parseFloat(form.purchase_price),
-      current_value: parseFloat(form.current_value),
-      currency: form.currency,
-      purchase_date: form.purchase_date || null,
-      monthly_rent: parseFloat(form.monthly_rent) || 0,
-      mortgage_balance: parseFloat(form.mortgage_balance) || 0,
-      mortgage_rate: parseFloat(form.mortgage_rate) / 100 || 0,
-      monthly_mortgage: parseFloat(form.monthly_mortgage) || 0,
-      // Clamped: an ownership share outside 0–100% silently distorts net worth
-      ownership_pct: isFinite(ownership) ? Math.min(Math.max(ownership, 0), 100) : 100,
-      notes: form.notes || null,
-      updated_at: new Date().toISOString(),
-    }
-    const { error: saveErr } = editId
-      ? await supabase.from('real_estate').update(payload).eq('id', editId)
-      : await supabase.from('real_estate').insert([{ ...payload, profile_id: activeProfile.id }])
-
-    setSaving(false)
-    if (saveErr) { alert(`Could not save property: ${saveErr.message}`); return }
-    setShowAdd(false)
-    setEditId(null)
-    resetForm()
-    reload()
-  }
-
-  const resetForm = () => setForm({
-    name: '', property_type: 'residential', address: '',
-    purchase_price: '', current_value: '', currency: 'CZK',
-    purchase_date: '', monthly_rent: '0', mortgage_balance: '0',
-    mortgage_rate: '0', monthly_mortgage: '0', ownership_pct: '100', notes: '',
-  })
-
-  const startEdit = (p: RealEstate) => {
-    setForm({
-      name: p.name, property_type: p.property_type, address: p.address ?? '',
-      purchase_price: String(p.purchase_price), current_value: String(p.current_value),
-      currency: p.currency, purchase_date: p.purchase_date ?? '',
-      monthly_rent: String(p.monthly_rent), mortgage_balance: String(p.mortgage_balance),
-      mortgage_rate: String(p.mortgage_rate * 100), monthly_mortgage: String(p.monthly_mortgage),
-      ownership_pct: String(p.ownership_pct), notes: p.notes ?? '',
-    })
-    setEditId(p.id)
-    setShowAdd(true)
-  }
-
-  if (loading) return (
-    <div style={{ display: 'flex' }}>
-      <Sidebar />
-      <main style={{ marginLeft: 'var(--sidebar-w)', flex: 1, padding: 40, color: 'var(--text3)' }}>Loading…</main>
-    </div>
-  )
+  if (loading) return <LoadingShell />
 
   return (
-    <div style={{ display: 'flex' }}>
-      <Sidebar />
-      <main style={{ marginLeft: 'var(--sidebar-w)', flex: 1, padding: '32px 40px', maxWidth: 1200 }}>
+    <PageShell>
+      {toast}
+      {editing && <PropertyModal property={editing === 'new' ? null : editing} onClose={() => setEditing(null)} onSaved={reload} />}
+      <PageHeader
+        eyebrow="Assets"
+        accent="var(--c-realestate)"
+        title="Real estate"
+        subtitle={<>All figures are your ownership share{fxTs && <> · FX {fxTs}</>}</>}
+        actions={<>
+          <button type="button" onClick={refreshFx} disabled={fxLoading} style={btnStyle('secondary')}>{fxLoading ? '⟳ FX…' : '↻ FX'}</button>
+          <button type="button" onClick={() => setEditing('new')} style={btnStyle('primary')}>+ Add property</button>
+        </>}
+      />
 
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 28 }}>
-          <div>
-            <div style={{ fontSize: 10, letterSpacing: '0.12em', textTransform: 'uppercase', color: 'var(--teal)', marginBottom: 4, fontWeight: 600 }}>Real Estate</div>
-            <h1 style={{ fontFamily: "'Syne', sans-serif", fontSize: 26, fontWeight: 700, letterSpacing: '-0.02em' }}>Properties</h1>
-          </div>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button onClick={refreshFx} style={btnSecondary}>{fxLoading ? '⟳' : '↻'} FX</button>
-            <button onClick={() => { resetForm(); setEditId(null); setShowAdd(true) }} style={btnPrimary('var(--teal)', 'var(--teal-bd)', 'var(--teal-bg)')}>+ Add property</button>
-          </div>
-        </div>
+      {properties.length === 0 ? (
+        <EmptyState
+          icon="⌂"
+          title="No properties yet"
+          body="Add a property with its value, mortgage and your ownership share. Mark your home as the primary residence — it is then left out of investable net worth (with its mortgage) on the FIRE page."
+          action={<button type="button" onClick={() => setEditing('new')} style={btnStyle('primary')}>+ Add a property</button>}
+        />
+      ) : <>
+        <MetricCards cards={[
+          { label: 'Equity', value: fmtCZK(totalEquity), accent: 'var(--c-realestate)', note: `value ${fmtCZK(totalValue)} − mortgages ${fmtCZK(totalMortgage)}` },
+          { label: 'Gain on purchase', value: fmtSignedCZK(totalValue - totalPurchase), color: signColor(totalValue - totalPurchase), accent: 'var(--border3)',
+            note: totalPurchase > 0 ? fmtShare(((totalValue - totalPurchase) / totalPurchase) * 100, 1) : undefined },
+          { label: 'Rent after costs', value: netRent !== 0 ? fmtCZK(netRent) : '—', accent: 'var(--c-income)',
+            note: mortgageInterest > 0 ? `mortgage interest ≈ ${fmtCZK(mortgageInterest)}/yr` : 'a year, before tax' },
+          { label: 'Loan-to-value', value: totalValue > 0 ? fmtShare((totalMortgage / totalValue) * 100, 0) : '—', accent: 'var(--border3)' },
+        ]} />
 
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 20 }}>
-          {[
-            { label: 'Market value',         value: fmtCZK(totalValueCZK),   accent: 'var(--teal)',  note: `${properties.length} properties · your share` },
-            { label: 'Net equity',            value: fmtCZK(totalEquityCZK),  accent: 'var(--green)', note: `${totalValueCZK > 0 ? ((totalEquityCZK / totalValueCZK) * 100).toFixed(0) : 0}% of value · ${totalGainCZK >= 0 ? '+' : ''}${fmtCZK(totalGainCZK)} gain` },
-            { label: 'Mortgage debt',         value: fmtCZK(totalMortgageCZK), accent: 'var(--red)',  note: 'Outstanding balance' },
-            { label: 'Annual rental income',  value: totalRentalCZK > 0 ? fmtCZK(totalRentalCZK) : '—', accent: 'var(--amber)', note: `${properties.filter(p => p.monthly_rent > 0).length} rentals` },
-          ].map((m, i) => (
-            <div key={i} style={{ ...cardStyle, borderTop: `2px solid ${m.accent}` }}>
-              <div style={cardLabelStyle}>{m.label}</div>
-              <div style={{ fontFamily: "'Syne', sans-serif", fontSize: 20, fontWeight: 700, letterSpacing: '-0.02em', marginBottom: 4 }}>{m.value}</div>
-              <div style={{ fontSize: 10, color: 'var(--text4)' }}>{m.note}</div>
-            </div>
-          ))}
-        </div>
-
-        <div style={{ display: 'grid', gap: 14, marginBottom: 16 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 14 }}>
           {properties.map(p => {
-            const pShare        = share(p)
-            const valueCZK      = toCZK(p.current_value    * pShare, p.currency, fx)
-            const purchaseCZK   = toCZK(p.purchase_price   * pShare, p.currency, fx)
-            const mortgageCZK   = toCZK(p.mortgage_balance * pShare, p.currency, fx)
-            const equityCZK     = valueCZK - mortgageCZK
-            const gainCZK       = valueCZK - purchaseCZK
-            const gainPct       = purchaseCZK > 0 ? (gainCZK / purchaseCZK) * 100 : 0
-            const monthlyRentCZK = toCZK(p.monthly_rent * pShare, p.currency, fx)
-            const ltvPct        = valueCZK > 0 ? (mortgageCZK / valueCZK) * 100 : 0
-            // Gross rental yield on the property's own value — a property-level
-            // ratio, so the ownership share cancels out of both sides.
-            const yieldPct      = p.current_value > 0 ? (p.monthly_rent * 12 / p.current_value) * 100 : 0
-            const typeColor     = TYPE_COLORS[p.property_type] ?? 'var(--teal)'
+            const value = czk(p, p.current_value)
+            const debt = czk(p, p.mortgage_balance)
+            const equity = value - debt
+            const ltv = value > 0 ? debt / value : null
+            const rentNet = czk(p, p.monthly_rent * 12 - (p.annual_costs ?? 0))
+            const interest = czk(p, p.mortgage_balance * p.mortgage_rate)
+            const age = p.valuation_date ? daysBetween(p.valuation_date, today) : null
             return (
-              <div key={p.id} style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 14, padding: '22px 26px' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 18 }}>
+              <article key={p.id} style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 12, padding: '18px 20px', position: 'relative' }}>
+                <div aria-hidden="true" style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 3, background: 'var(--c-realestate)', borderRadius: '12px 12px 0 0' }} />
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'flex-start' }}>
                   <div>
-                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 4 }}>
-                      <span style={{ fontFamily: "'Syne', sans-serif", fontSize: 17, fontWeight: 700 }}>{p.name}</span>
-                      <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: typeColor + '18', color: typeColor, border: `1px solid ${typeColor}30` }}>
-                        {TYPE_LABELS[p.property_type]}
-                      </span>
-                      {p.is_primary_residence && <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: 'var(--blue-bg)', color: 'var(--blue)', border: '1px solid var(--blue-bd)' }}>Primary</span>}
+                    <h2 style={{ fontSize: 15, fontWeight: 600 }}>{p.name}</h2>
+                    <div style={{ fontSize: 11, color: 'var(--text3)' }}>{p.address ?? TYPE_LABELS[p.property_type]}</div>
+                    <div style={{ display: 'flex', gap: 6, marginTop: 6, flexWrap: 'wrap' }}>
+                      <Badge variant="gray">{TYPE_LABELS[p.property_type]}</Badge>
+                      {p.is_primary_residence && <Badge variant="blue">Home</Badge>}
+                      {p.ownership_pct < 100 && <Badge variant="gray">You own {fmtNum(p.ownership_pct, 0)} %</Badge>}
                     </div>
-                    {p.address     && <div style={{ fontSize: 11, color: 'var(--text4)' }}>{p.address}</div>}
-                    {p.purchase_date && <div style={{ fontSize: 10, color: 'var(--text4)', marginTop: 2 }}>Purchased {fmtDate(p.purchase_date)}</div>}
                   </div>
-                  <div style={{ display: 'flex', gap: 6 }}>
-                    <button onClick={() => startEdit(p)} style={btnSecondary}>✎ Edit</button>
-                    <button onClick={async () => {
-                      if (!confirm(`Delete "${p.name}"?`)) return
-                      await supabase.from('real_estate').delete().eq('id', p.id)
-                      reload()
-                    }} style={{ ...btnSecondary, color: 'var(--red)' }}>✕</button>
-                  </div>
+                  <span style={{ whiteSpace: 'nowrap' }}>
+                    <button type="button" aria-label={`Edit ${p.name}`} onClick={() => setEditing(p)} style={actionBtn}>✎</button>
+                    <button type="button" aria-label={`Delete ${p.name}`} onClick={() =>
+                      schedule(p.id, p.name, () => deleteScoped('real_estate', p.id, activeProfile?.id), reload)}
+                      style={{ ...actionBtn, marginLeft: 4, color: 'var(--red)' }}>✕</button>
+                  </span>
                 </div>
 
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 16 }}>
-                  {[
-                    { label: 'Market value',  value: fmtCZK(valueCZK),    sub: `${p.current_value.toLocaleString()} ${p.currency}`, color: 'var(--teal)' },
-                    { label: 'Net equity',    value: fmtCZK(equityCZK),   sub: `${(100 - ltvPct).toFixed(0)}% owned`,              color: 'var(--green)' },
-                    { label: 'Capital gain',  value: (gainCZK >= 0 ? '+' : '') + fmtCZK(gainCZK), sub: `${gainPct >= 0 ? '+' : ''}${gainPct.toFixed(1)}%`, color: gainCZK >= 0 ? 'var(--green)' : 'var(--red)' },
-                    { label: 'Mortgage',      value: mortgageCZK > 0 ? fmtCZK(mortgageCZK) : '—', sub: mortgageCZK > 0 ? `${(p.mortgage_rate * 100).toFixed(2)}% rate` : 'No mortgage', color: 'var(--red)' },
-                    { label: 'Monthly rent',  value: p.monthly_rent > 0 ? fmtCZK(monthlyRentCZK) : '—', sub: p.monthly_rent > 0 ? `Yield ${yieldPct.toFixed(1)}%` : 'Owner occupied', color: 'var(--amber)' },
-                    { label: 'Ownership',     value: `${p.ownership_pct}%`, sub: `${p.currency} asset`, color: 'var(--text2)' },
-                  ].map((stat, i) => (
-                    <div key={i}>
-                      <div style={{ fontSize: 9, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--text4)', marginBottom: 4, fontWeight: 500 }}>{stat.label}</div>
-                      <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 13, fontWeight: 500, color: stat.color }}>{stat.value}</div>
-                      <div style={{ fontSize: 10, color: 'var(--text4)', marginTop: 2 }}>{stat.sub}</div>
+                <dl style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: '6px 12px', marginTop: 14, fontSize: 12 }}>
+                  <dt style={{ color: 'var(--text3)' }}>Value</dt>
+                  <dd className="num" style={{ textAlign: 'right' }}>
+                    {fmtCZK(value)}
+                    <div style={{ fontSize: 10, color: age != null && age > 365 ? 'var(--amber)' : 'var(--text3)' }}>
+                      {p.valuation_date ? `estimate · ${fmtISODate(p.valuation_date)}${age != null && age > 365 ? ` (${Math.floor(age / 30)} months old)` : ''}` : 'estimate · date unknown'}
                     </div>
-                  ))}
-                </div>
-
-                {p.mortgage_balance > 0 && (
-                  <div style={{ marginTop: 16 }}>
-                    <div style={{ height: 4, borderRadius: 2, background: 'var(--bg4)', overflow: 'hidden' }}>
-                      <div style={{ height: '100%', width: `${100 - ltvPct}%`, background: 'var(--teal)', opacity: 0.7, borderRadius: 2, transition: 'width 0.5s ease' }} />
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4, fontSize: 10, color: 'var(--text4)' }}>
-                      <span>Equity {(100 - ltvPct).toFixed(0)}%</span>
-                      <span>LTV {ltvPct.toFixed(0)}%</span>
-                    </div>
-                  </div>
-                )}
-              </div>
+                  </dd>
+                  <dt style={{ color: 'var(--text3)' }}>Mortgage</dt>
+                  <dd className="num" style={{ textAlign: 'right' }}>{debt > 0 ? `−${fmtCZK(debt)}` : '—'}
+                    {debt > 0 && <div style={{ fontSize: 10, color: 'var(--text3)' }}>{fmtShare(p.mortgage_rate * 100, 2)} · {fmtCZK(interest)} interest/yr</div>}
+                  </dd>
+                  <dt style={{ fontWeight: 600 }}>Equity</dt>
+                  <dd className="num" style={{ textAlign: 'right', fontWeight: 600 }}>{fmtCZK(equity)}</dd>
+                  <dt style={{ color: 'var(--text3)' }}>Equity / LTV</dt>
+                  <dd className="num" style={{ textAlign: 'right' }}>{ltv != null ? `${fmtShare((1 - ltv) * 100, 0)} / ${fmtShare(ltv * 100, 0)}` : '—'}</dd>
+                  {p.monthly_rent > 0 && <>
+                    <dt style={{ color: 'var(--text3)' }}>Rent after costs</dt>
+                    <dd className="num" style={{ textAlign: 'right' }}>{fmtCZK(rentNet)}/yr
+                      <div style={{ fontSize: 10, color: 'var(--text3)' }}>
+                        net yield {value > 0 ? fmtShare((rentNet / value) * 100, 2) : '—'}
+                        {interest > 0 && value > 0 && ` · ${fmtShare(((rentNet - interest) / value) * 100, 2)} after interest`}
+                      </div>
+                    </dd>
+                  </>}
+                  <dt style={{ color: 'var(--text3)' }}>Gain on purchase</dt>
+                  <dd className="num" style={{ textAlign: 'right', color: signColor(value - czk(p, p.purchase_price)) }}>{fmtSignedCZK(value - czk(p, p.purchase_price))}</dd>
+                </dl>
+              </article>
             )
           })}
         </div>
+      </>}
+    </PageShell>
+  )
+}
 
-        {showAdd && (
-          <div style={{ background: 'var(--bg2)', border: '1px solid var(--teal-bd)', borderRadius: 14, padding: '26px 30px' }}>
-            <div style={{ fontFamily: "'Syne', sans-serif", fontSize: 17, fontWeight: 700, marginBottom: 20 }}>
-              {editId ? 'Edit property' : 'Add property'}
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
-              <div style={{ gridColumn: '1/-1' }}>
-                <div style={inputLabel}>Property name</div>
-                <input style={inputStyle} placeholder="e.g. Prague Flat – Žižkov" value={form.name} onChange={e => setForm(p => ({ ...p, name: e.target.value }))} />
-              </div>
-              {[
-                { label: 'Type',             key: 'property_type', type: 'select', options: [['residential','Residential'],['commercial','Commercial'],['land','Land'],['reit','REIT']] },
-                { label: 'Currency',         key: 'currency',      type: 'select', options: [['CZK','CZK'],['EUR','EUR'],['USD','USD']] },
-                { label: 'Purchase price',   key: 'purchase_price', placeholder: '2800000', type: 'number' },
-                { label: 'Current value',    key: 'current_value',  placeholder: '3400000', type: 'number' },
-                { label: 'Monthly rent',     key: 'monthly_rent',   placeholder: '0',       type: 'number' },
-                { label: 'Mortgage balance', key: 'mortgage_balance', placeholder: '0',     type: 'number' },
-                { label: 'Mortgage rate (%)', key: 'mortgage_rate', placeholder: '0',       type: 'number' },
-                { label: 'Monthly mortgage', key: 'monthly_mortgage', placeholder: '0',     type: 'number' },
-                { label: 'Ownership (%)',    key: 'ownership_pct',  placeholder: '100',     type: 'number' },
-                { label: 'Purchase date',    key: 'purchase_date',  type: 'date' },
-              ].map((f: any) => (
-                <div key={f.key}>
-                  <div style={inputLabel}>{f.label}</div>
-                  {f.type === 'select' ? (
-                    <select style={inputStyle} value={(form as any)[f.key]} onChange={e => setForm(p => ({ ...p, [f.key]: e.target.value }))}>
-                      {f.options.map(([v, l]: string[]) => <option key={v} value={v}>{l}</option>)}
-                    </select>
-                  ) : (
-                    <input style={inputStyle} type={f.type} placeholder={f.placeholder} value={(form as any)[f.key]} onChange={e => setForm(p => ({ ...p, [f.key]: e.target.value }))} />
-                  )}
-                </div>
-              ))}
-              <div style={{ gridColumn: '1/-1' }}>
-                <div style={inputLabel}>Address (optional)</div>
-                <input style={inputStyle} placeholder="Brno-střed" value={form.address} onChange={e => setForm(p => ({ ...p, address: e.target.value }))} />
-              </div>
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 20 }}>
-              <button onClick={() => { setShowAdd(false); setEditId(null); resetForm() }} style={btnSecondary}>Cancel</button>
-              <button onClick={saveProperty} disabled={saving} style={btnPrimary('var(--teal)', 'var(--teal-bd)', 'var(--teal-bg)')}>
-                {saving ? 'Saving…' : editId ? 'Save changes' : 'Add property'}
-              </button>
-            </div>
-          </div>
-        )}
-      </main>
-    </div>
+function PropertyModal({ property, onClose, onSaved }: { property: RealEstate | null; onClose: () => void; onSaved: () => void }) {
+  const { activeProfile } = useProfile()
+  const p = property
+  const [form, setForm] = useState({
+    name: p?.name ?? '', property_type: p?.property_type ?? 'residential', address: p?.address ?? '',
+    purchase_price: p ? String(p.purchase_price) : '', current_value: p ? String(p.current_value) : '',
+    valuation_date: p?.valuation_date ?? todayISO(), currency: p?.currency ?? 'CZK', purchase_date: p?.purchase_date ?? '',
+    monthly_rent: p ? String(p.monthly_rent) : '', annual_costs: p?.annual_costs != null ? String(p.annual_costs) : '',
+    mortgage_balance: p ? String(p.mortgage_balance) : '', mortgage_rate: p ? String(Number((p.mortgage_rate * 100).toFixed(3))) : '',
+    monthly_mortgage: p ? String(p.monthly_mortgage) : '', ownership_pct: p ? String(p.ownership_pct) : '100',
+    is_primary_residence: p?.is_primary_residence ?? false, notes: p?.notes ?? '',
+  })
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const set = <K extends keyof typeof form>(k: K, v: (typeof form)[K]) => setForm(f => ({ ...f, [k]: v }))
+  const num = (s: string) => (s.trim() ? parseDecimal(s) : 0)
+
+  const save = async () => {
+    const purchase = parseDecimal(form.purchase_price), value = parseDecimal(form.current_value)
+    const ownership = parseDecimal(form.ownership_pct)
+    const rate = form.mortgage_rate.trim() ? parsePercent(form.mortgage_rate) : 0
+    const fields = [num(form.monthly_rent), num(form.annual_costs), num(form.mortgage_balance), num(form.monthly_mortgage)]
+    if (!form.name.trim()) { setError('Name is required.'); return }
+    if (purchase == null || purchase < 0 || value == null || value < 0) { setError('Purchase price and current value must be numbers.'); return }
+    if (ownership == null || ownership <= 0 || ownership > 100) { setError('Ownership must be between 0 and 100 %.'); return }
+    if (rate == null || rate < 0 || fields.some(f => f == null || f < 0)) { setError('Rent, costs and mortgage figures must be non-negative numbers.'); return }
+    const [rent, costs, balance, monthly] = fields as number[]
+    const payload: Record<string, unknown> = {
+      name: form.name.trim(), property_type: form.property_type, address: form.address.trim() || null,
+      purchase_price: purchase, current_value: value, currency: form.currency,
+      purchase_date: form.purchase_date || null, monthly_rent: rent, mortgage_balance: balance,
+      mortgage_rate: rate, monthly_mortgage: monthly, ownership_pct: ownership,
+      is_primary_residence: form.is_primary_residence, notes: form.notes.trim() || null,
+      valuation_date: form.valuation_date || null, annual_costs: costs,
+      updated_at: new Date().toISOString(),
+    }
+    setSaving(true)
+    let res = p ? await updateScoped('real_estate', p.id, activeProfile?.id, payload)
+      : await insertScoped('real_estate', activeProfile?.id, [payload])
+    // Before migration 013 the two new columns do not exist; save the rest.
+    if (res.error && /valuation_date|annual_costs/.test(res.error)) {
+      const { valuation_date: _v, annual_costs: _c, ...legacy } = payload
+      void _v; void _c
+      res = p ? await updateScoped('real_estate', p.id, activeProfile?.id, legacy)
+        : await insertScoped('real_estate', activeProfile?.id, [legacy])
+    }
+    setSaving(false)
+    if (res.error) { setError(res.error); return }
+    onSaved(); onClose()
+  }
+
+  return (
+    <Modal title={p ? 'Edit property' : 'Add property'} onClose={onClose} width={580}>
+      <ErrorBox msg={error} />
+      <FormGrid>
+        <Field label="Name"><input style={inputStyle} value={form.name} placeholder="Byt Brno" onChange={e => set('name', e.target.value)} /></Field>
+        <Field label="Type">
+          <select style={inputStyle} value={form.property_type} onChange={e => set('property_type', e.target.value as RealEstate['property_type'])}>
+            {Object.entries(TYPE_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+          </select>
+        </Field>
+        <Field label="Address (optional)" span="2"><input style={inputStyle} value={form.address} onChange={e => set('address', e.target.value)} /></Field>
+        <Field label="Purchase price (100 %)"><NumberInput value={form.purchase_price} onChange={v => set('purchase_price', v)} suffix={form.currency} /></Field>
+        <Field label="Purchase date"><input style={inputStyle} type="date" value={form.purchase_date} onChange={e => set('purchase_date', e.target.value)} /></Field>
+        <Field label="Current value (100 %)"><NumberInput value={form.current_value} onChange={v => set('current_value', v)} suffix={form.currency} /></Field>
+        <Field label="Valued on"><input style={inputStyle} type="date" value={form.valuation_date} onChange={e => set('valuation_date', e.target.value)} /></Field>
+        <Field label="Currency">
+          <select style={inputStyle} value={form.currency} onChange={e => set('currency', e.target.value)}>
+            <option>CZK</option><option>EUR</option><option>USD</option>
+          </select>
+        </Field>
+        <Field label="Your ownership"><NumberInput value={form.ownership_pct} onChange={v => set('ownership_pct', v)} suffix="%" /></Field>
+        <Field label="Monthly rent (100 %)"><NumberInput value={form.monthly_rent} onChange={v => set('monthly_rent', v)} placeholder="0" suffix={form.currency} /></Field>
+        <Field label="Running costs a year" hint="Maintenance, insurance, property tax, service charges."><NumberInput value={form.annual_costs} onChange={v => set('annual_costs', v)} placeholder="0" suffix={form.currency} /></Field>
+        <Field label="Mortgage balance (100 %)"><NumberInput value={form.mortgage_balance} onChange={v => set('mortgage_balance', v)} placeholder="0" suffix={form.currency} /></Field>
+        <Field label="Mortgage rate"><NumberInput value={form.mortgage_rate} onChange={v => set('mortgage_rate', v)} placeholder="4,9" suffix="%" /></Field>
+        <Field label="Monthly payment"><NumberInput value={form.monthly_mortgage} onChange={v => set('monthly_mortgage', v)} placeholder="0" suffix={form.currency} /></Field>
+        <Field label="" span="2">
+          <Checkbox checked={form.is_primary_residence} onChange={v => set('is_primary_residence', v)}
+            label="This is my home (primary residence) — left out of investable net worth, with its mortgage" />
+        </Field>
+        <Field label="Notes (optional)" span="2"><input style={inputStyle} value={form.notes} onChange={e => set('notes', e.target.value)} /></Field>
+      </FormGrid>
+      <FormActions onCancel={onClose} onSubmit={save} label={p ? 'Save changes' : 'Add property'} saving={saving} />
+    </Modal>
   )
 }

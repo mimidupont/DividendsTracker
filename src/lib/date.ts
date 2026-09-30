@@ -67,3 +67,21 @@ export function fmtISODateShort(iso: string): string {
   const d = parseISODate(iso)
   return d ? d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) : iso
 }
+
+/**
+ * Calendar date in a named timezone (default Europe/Prague), for server code.
+ *
+ * A server runs in UTC; the user's day starts one or two hours earlier. Code
+ * that stamps or compares calendar dates on the server must agree with the
+ * browser about which day it is.
+ */
+export function todayInZone(tz: string = process.env.SNAPSHOT_TIMEZONE || 'Europe/Prague'): string {
+  try {
+    // en-CA renders as YYYY-MM-DD.
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
+    }).format(new Date())
+  } catch {
+    return new Date().toISOString().slice(0, 10)
+  }
+}

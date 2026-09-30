@@ -34,6 +34,18 @@ export interface Holding {
   exchange: string | null
   purchase_date: string | null
   is_dividend_payer: boolean
+  /**
+   * CZK per 1 unit of `currency` (major unit) at which the cost was actually
+   * paid — the cost-weighted average of the lots' rates. Null for positions
+   * entered before migration 010; cost then falls back to today's rate.
+   */
+  avg_fx_czk?: number | null
+  /**
+   * Price in `currency` entered by hand for a ticker no provider quotes
+   * (delisted, unlisted). Used only when no live quote arrives. Migration 015.
+   */
+  manual_price?: number | null
+  manual_price_date?: string | null
   created_at: string
   updated_at: string
 }
@@ -46,6 +58,8 @@ export interface HoldingLot {
   purchase_price: number
   purchase_date: string | null
   notes: string | null
+  /** CZK per unit of the holding's currency on the purchase date (migration 010). */
+  fx_rate_czk?: number | null
   created_at: string
 }
 
@@ -63,6 +77,8 @@ export interface DividendReceived {
   drip_shares_added: number | null
   drip_price: number | null
   notes: string | null
+  /** CZK per unit of `currency` on the payment date (migration 010). */
+  fx_rate_czk?: number | null
   created_at: string
 }
 
@@ -105,6 +121,8 @@ export interface BankInterestReceived {
   net_amount: number
   currency: string
   notes: string | null
+  /** CZK per unit of `currency` on the payment date (migration 010). */
+  fx_rate_czk?: number | null
   created_at: string
 }
 
@@ -120,6 +138,51 @@ export interface CryptoHolding {
   staking_apy: number
   notes: string | null
   liquidity_tier: string | null
+  /** CZK per USD at which the cost was paid (migration 010). */
+  avg_fx_czk?: number | null
+  created_at: string
+  updated_at: string
+}
+
+// ─── Bonds (migration 011) ────────────────────────────────────────────────────
+
+export type BondIssuerType = 'government' | 'corporate' | 'municipal' | 'savings'
+/** 0 = zero-coupon. */
+export type CouponFrequency = 0 | 1 | 2 | 4 | 12
+export type CouponType = 'fixed' | 'floating' | 'inflation' | 'reinvest'
+export type DayCount = 'ACT/ACT' | 'ACT/365' | '30E/360'
+
+export interface BondHolding {
+  id: string
+  profile_id: string
+  isin: string
+  name: string
+  issuer_type: BondIssuerType
+  currency: string
+  /** Nominal value of one bond, in `currency`. */
+  face_value: number
+  /** Number of bonds held. */
+  quantity: number
+  /** Decimal fraction: 4.5% is 0.045. */
+  coupon_rate: number
+  coupon_freq: CouponFrequency
+  coupon_type: CouponType
+  day_count: DayCount
+  issue_date: string | null
+  maturity_date: string
+  purchase_date: string | null
+  /** Clean price paid, as % of par (e.g. 98.5). */
+  purchase_clean_price_pct: number | null
+  /** CZK per unit of `currency` on the purchase date. */
+  purchase_fx_czk: number | null
+  /** Last known clean price, % of par. Null → valued at purchase price / par. */
+  clean_price_pct: number | null
+  price_date: string | null
+  /** Czech government savings bonds can be redeemed early at par. */
+  redeemable_early: boolean
+  liquidity_tier: string | null
+  notes: string | null
+  is_active: boolean
   created_at: string
   updated_at: string
 }
@@ -129,8 +192,10 @@ export interface CryptoHolding {
 export type TransactionType =
   | 'buy' | 'sell' | 'deposit' | 'withdrawal'
   | 'dividend' | 'interest' | 'rent' | 'fee' | 'tax' | 'transfer' | 'adjustment'
+  /** Stock split: `quantity` is the ratio (4 = 4-for-1). */
+  | 'split'
 
-export type TxnAssetClass = 'stock' | 'cash' | 'crypto' | 'realestate' | 'none'
+export type TxnAssetClass = 'stock' | 'cash' | 'crypto' | 'realestate' | 'bond' | 'none'
 
 export interface Transaction {
   id: string
@@ -167,6 +232,8 @@ export interface AssetMetadata {
   region: string | null
   country: string | null
   liquidity_tier: string | null
+  /** 'stock' | 'etf' | 'bond_etf' | 'reit' | … (migration 011). A bond ETF counts as fixed income. */
+  asset_type?: string | null
   is_hedged: boolean
   notes: string | null
 }
@@ -317,6 +384,10 @@ export interface RealEstate {
   notes: string | null
   is_primary_residence: boolean
   liquidity_tier: string | null
+  /** When current_value was last estimated (migration 013). */
+  valuation_date?: string | null
+  /** Running costs a year at 100 % ownership — maintenance, insurance, tax (migration 013). */
+  annual_costs?: number | null
   created_at: string
   updated_at: string
 }

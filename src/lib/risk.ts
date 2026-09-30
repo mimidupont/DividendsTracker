@@ -43,7 +43,13 @@ export function topNConcentration(positions: Position[], n = 5): TopNResult {
   }
 }
 
-/** Herfindahl index: Σ wᵢ². Multiply by 10 000 for the conventional HHI points. */
+/**
+ * Herfindahl index: Σ wᵢ². Multiply by 10 000 for the conventional HHI points.
+ *
+ * Funds are scored as single positions (there is no look-through to their
+ * holdings), so a portfolio built from one broad world ETF reads as highly
+ * concentrated. `fundShare` lets the UI say so next to the number.
+ */
 export function herfindahl(positions: Position[]): number {
   const assets = assetPositions(positions)
   const sum = total(assets)
@@ -52,6 +58,14 @@ export function herfindahl(positions: Position[]): number {
     const w = p.valueCZK / sum
     return s + w * w
   }, 0)
+}
+
+/** Share of assets held in funds (ETFs, bond ETFs) — scored as one name each by herfindahl(). */
+export function fundShare(positions: Position[]): number {
+  const assets = assetPositions(positions)
+  const sum = total(assets)
+  if (sum <= 0) return 0
+  return assets.filter(p => p.isFund).reduce((s, p) => s + p.valueCZK, 0) / sum
 }
 
 /**
@@ -199,7 +213,14 @@ export const SEED_SECTORS: Record<string, { sector: string; region: string }> = 
   JPM:   { sector: 'Financials', region: 'US' },
   ERBAG: { sector: 'Financials', region: 'EU' },
   MONET: { sector: 'Financials', region: 'CZ' },
-  CSG1:  { sector: 'Financials', region: 'EU' },
+  // CSG N.V. (Czechoslovak Group) — defence manufacturer, not a bank.
+  CSG1:  { sector: 'Industrials', region: 'EU' },
+  CSG:   { sector: 'Industrials', region: 'EU' },
+  BNP:   { sector: 'Financials', region: 'EU' },
+  TTE:   { sector: 'Energy', region: 'EU' },
+  FDJU:  { sector: 'Consumer Discretionary', region: 'EU' },
+  VCT:   { sector: 'Materials', region: 'EU' },
+  HPQ:   { sector: 'Technology', region: 'US' },
   KPLT:  { sector: 'Financials', region: 'US' },
   KO:    { sector: 'Consumer Staples', region: 'US' },
   PEP:   { sector: 'Consumer Staples', region: 'US' },
@@ -218,6 +239,21 @@ export const SEED_SECTORS: Record<string, { sector: string; region: string }> = 
   PSNY:  { sector: 'Industrials', region: 'EU' },
 }
 
+/**
+ * Seed classification for a held ticker. Looks up the bare ticker, so a
+ * suffixed symbol (BNP.PA, FDJU.PA) finds its entry too.
+ */
+export function seedFor(symbol: string): { sector: string; region: string } | undefined {
+  const s = symbol.trim().toUpperCase()
+  return SEED_SECTORS[s] ?? SEED_SECTORS[s.split('.')[0]]
+}
+
 export const ASSET_CLASS_LABELS: Record<AssetClass, string> = {
   stock: 'Stocks', etf: 'ETFs', bond: 'Bonds', cash: 'Cash', crypto: 'Crypto', realestate: 'Real estate',
+}
+
+/** Colour token per asset class — the only place these are assigned. */
+export const ASSET_CLASS_COLORS: Record<AssetClass, string> = {
+  stock: 'var(--c-stocks)', etf: 'var(--c-etf)', bond: 'var(--c-bond)',
+  cash: 'var(--c-cash)', crypto: 'var(--c-crypto)', realestate: 'var(--c-realestate)',
 }

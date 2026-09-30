@@ -1,4 +1,5 @@
 'use client'
+import { ErrorBox } from '@/components/FormFields'
 import { useEffect, useMemo, useState } from 'react'
 import Badge from '@/components/Badge'
 import { PageShell, PageHeader, LoadingShell, EmptyState, Panel } from '@/components/PageShell'
@@ -9,7 +10,7 @@ import { useMarketData } from '@/hooks/useMarketData'
 import { useCryptoPrices } from '@/hooks/useCryptoPrices'
 import { useProfile } from '@/lib/profile'
 import { buildPositions } from '@/lib/portfolio'
-import { computeDrift, allocateContribution, fullRebalanceTrades, targetsSum } from '@/lib/rebalance'
+import { computeDrift, allocateContribution, fullRebalanceTrades, targetsStatus, TARGET_SUM_TOLERANCE } from '@/lib/rebalance'
 import { supabase, type TargetScope } from '@/lib/supabase'
 import { fmtCZK } from '@/lib/fx'
 import { tdR, tdL, th, btnStyle, actionBtn, inputStyle } from '@/lib/ui'
@@ -38,6 +39,7 @@ export default function RebalancePage() {
   const [draft, setDraft] = useState<Record<string, string>>({})
   const [saving, setSaving] = useState(false)
   const [newBucket, setNewBucket] = useState('')
+  const [error, setError] = useState<string | null>(null)
 
   const symbolKey = data.holdings.map(h => h.symbol).join(',')
   const coinKey = data.cryptoHoldings.map(c => c.coin_id).join(',')
@@ -64,8 +66,11 @@ export default function RebalancePage() {
     [drift, amount]
   )
   const trades = useMemo(() => fullRebalanceTrades(drift), [drift])
-  const sum = targetsSum(data.allocationTargets, scope)
-  const hasTargets = data.allocationTargets.some(t => t.scope === scope)
+  const plan = targetsStatus(data.allocationTargets, scope)
+  const sum = plan.sum
+  // All-zero rows are not a plan: they came from saving the targets form
+  // without typing anything, and measured against 0 % everything "breaches".
+  const hasTargets = plan.status !== 'none'
 
   // Buckets worth offering even when you hold none of them yet — you cannot set
   // a target for an asset class you are trying to start building otherwise.
@@ -85,17 +90,35 @@ export default function RebalancePage() {
     if (!activeProfile) return
     setSaving(true)
     try {
-      const rows = Object.entries(draft)
-        .map(([bucket, pct]) => ({ bucket, value: parseFloat(pct) }))
-        .filter(r => isFinite(r.value) && r.value >= 0)
-        .map(r => ({
-          profile_id: activeProfile.id, scope, bucket: r.bucket,
-          target_pct: r.value / 100, band_pct: 0.05, updated_at: new Date().toISOString(),
-        }))
-      if (rows.length === 0) { setEditTargets(false); return }
-      const { error } = await supabase.from('allocation_targets')
-        .upsert(rows, { onConflict: 'profile_id,scope,bucket' })
-      if (error) { alert(`Could not save targets: ${error.message}`); return }
+      // Only what was typed is saved; a blank field means "no target".
+      const entered = Object.entries(draft)
+        .filter(([, pct]) => pct.trim() !== '')
+        .map(([bucket, pct]) => ({ bucket, value: parseFloat(pct.replace(',', '.')) }))
+      if (entered.some(r => !isFinite(r.value) || r.value < 0 || r.value > 100)) {
+        setError('Each target must be a percentage between 0 and 100.'); return
+      }
+      const total = entered.reduce((s, r) => s + r.value, 0) / 100
+      if (entered.length > 0 && Math.abs(total - 1) > TARGET_SUM_TOLERANCE) {
+        setError(`Targets add up to ${(total * 100).toFixed(1)} % — they need to total 100 %.`); return
+      }
+      const rows = entered.map(r => ({
+        profile_id: activeProfile.id, scope, bucket: r.bucket,
+        target_pct: r.value / 100, band_pct: 0.05, updated_at: new Date().toISOString(),
+      }))
+      if (rows.length > 0) {
+        const { error } = await supabase.from('allocation_targets')
+          .upsert(rows, { onConflict: 'profile_id,scope,bucket' })
+        if (error) { setError(`Could not save targets: ${error.message}`); return }
+      }
+      // Rows left blank are cleared, including stale 0 % rows from an earlier save.
+      const kept = new Set(rows.map(r => r.bucket))
+      const stale = data.allocationTargets.filter(t => t.scope === scope && !kept.has(t.bucket)).map(t => t.bucket)
+      if (stale.length > 0) {
+        const { error } = await supabase.from('allocation_targets').delete()
+          .eq('profile_id', activeProfile.id).eq('scope', scope).in('bucket', stale)
+        if (error) { setError(`Could not clear old targets: ${error.message}`); return }
+      }
+      setError('')
       setEditTargets(false)
       setDraft({})
       data.reload()
@@ -108,7 +131,7 @@ export default function RebalancePage() {
     if (!activeProfile) return
     const { error } = await supabase.from('allocation_targets').delete()
       .eq('profile_id', activeProfile.id).eq('scope', scope).eq('bucket', bucket)
-    if (error) { alert(`Could not remove: ${error.message}`); return }
+    if (error) { setError(`Could not remove: ${error.message}`); return }
     data.reload()
   }
 
@@ -116,7 +139,13 @@ export default function RebalancePage() {
 
   const startEditing = () => {
     const initial: Record<string, string> = {}
-    for (const row of drift) initial[row.bucket] = (row.targetPct * 100).toFixed(1)
+    // Start blank where no real target exists — prefilling "0.0" is how
+    // saving an untouched form used to store a 0 % plan.
+    const existing = new Map(data.allocationTargets.filter(t => t.scope === scope).map(t => [t.bucket, t.target_pct]))
+    for (const row of drift) {
+      const t = existing.get(row.bucket)
+      initial[row.bucket] = hasTargets && t != null ? (t * 100).toFixed(1) : ''
+    }
     setDraft(initial)
     setEditTargets(true)
   }
@@ -138,7 +167,10 @@ export default function RebalancePage() {
   const addBucket = (bucket: string) => {
     const clean = bucket.trim()
     if (!clean) return
-    setDraft(d => ({ ...d, [clean]: d[clean] ?? '0' }))
+    // Enter edit mode with the existing targets loaded first — otherwise they
+    // show blank and saving would clear them.
+    if (!editTargets) startEditing()
+    setDraft(d => ({ ...d, [clean]: d[clean] ?? '' }))
     setNewBucket('')
     setEditTargets(true)
   }
@@ -146,6 +178,7 @@ export default function RebalancePage() {
   return (
     <PageShell maxWidth={1100}>
       <PageHeader
+        eyebrow="Analysis"
         title="Rebalance"
         subtitle="Drift against target weights, and where to put new money"
         actions={
@@ -155,6 +188,7 @@ export default function RebalancePage() {
           </button>
         }
       />
+      {error && <ErrorBox msg={error} />}
 
       <SetupNotice tables={missingTables} />
 
@@ -165,7 +199,7 @@ export default function RebalancePage() {
             padding: '6px 16px', border: 'none', cursor: 'pointer', fontSize: 12,
             background: scope === s.key ? 'var(--green-bg)' : 'var(--bg2)',
             color: scope === s.key ? 'var(--green)' : 'var(--text3)',
-            fontFamily: "'Geist', sans-serif",
+            fontFamily: "'Inter', sans-serif",
             borderRight: s.key !== 'symbol' ? '1px solid var(--border2)' : 'none',
           }}>{s.label}</button>
         ))}
@@ -309,7 +343,7 @@ export default function RebalancePage() {
                           width: `${Math.min(Math.abs(row.driftPct) * 100 * 2, 50)}%`,
                         }} />
                       </div>
-                      <div style={{ fontSize: 9, textAlign: 'center', marginTop: 3, color: STATUS_COLORS[row.status] }}>
+                      <div style={{ fontSize: 10, textAlign: 'center', marginTop: 3, color: STATUS_COLORS[row.status] }}>
                         {row.driftPct >= 0 ? '+' : ''}{(row.driftPct * 100).toFixed(1)}pp
                       </div>
                     </td>

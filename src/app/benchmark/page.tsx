@@ -2,19 +2,21 @@
 import { useEffect, useMemo, useState } from 'react'
 import Badge from '@/components/Badge'
 import { PageShell, PageHeader, LoadingShell, EmptyState, MetricCards, Panel, orDash, DASH } from '@/components/PageShell'
-import { useAppData, isMissingTable } from '@/hooks/useAppData'
+import { useAppData } from '@/hooks/useAppData'
 import { usePortfolioSnapshots } from '@/hooks/usePortfolioSnapshots'
-import { supabase, type BenchmarkPrice } from '@/lib/supabase'
+import { useBenchmarkPrices } from '@/hooks/useBenchmarkPrices'
+import { RouteTabs, RETURNS_TABS } from '@/components/Sidebar'
 import {
   shadowPortfolio, buyAndHold, fxByDateFromSnapshots, commonWindow, clipSeries,
-  trackingDifference, windowStart, BENCHMARK_OPTIONS, type BenchmarkWindow,
+  trackingDifference, windowStart, benchmarkReturn, BENCHMARK_OPTIONS, type BenchmarkWindow,
 } from '@/lib/benchmark'
 import SetupNotice from '@/components/SetupNotice'
 import { useFx } from '@/hooks/useFx'
 import { fxRate } from '@/lib/fx'
-import { indexTo100, twr, xirr, maxDrawdown, type ValuePoint } from '@/lib/returns'
+import { twr, twrIndex, xirr, maxDrawdown, type ValuePoint } from '@/lib/returns'
 import { externalFlows } from '@/lib/transactions'
-import { fmtCZK } from '@/lib/fx'
+import { fmtCZK, fmtSignedCZK, fmtPct } from '@/lib/fx'
+import { signColor } from '@/lib/ui'
 import { todayISO, fmtISODate, fmtISODateShort } from '@/lib/date'
 import { tdR, tdL, th, btnStyle } from '@/lib/ui'
 import {
@@ -34,29 +36,12 @@ export default function BenchmarkPage() {
   // global inside this component, so any future `typeof window` guard here would
   // silently read React state instead.
   const [range, setRange] = useState<BenchmarkWindow>('ALL')
-  const [prices, setPrices] = useState<BenchmarkPrice[]>([])
   const [syncing, setSyncing] = useState(false)
-  const [loadingPrices, setLoadingPrices] = useState(true)
   const [syncError, setSyncError] = useState('')
-  const [priceTableMissing, setPriceTableMissing] = useState(false)
-  const [priceError, setPriceError] = useState('')
-
-  useEffect(() => {
-    let cancelled = false
-    setLoadingPrices(true)
-    supabase.from('benchmark_prices').select('*').eq('symbol', symbol).order('price_date')
-      .then(({ data, error }) => {
-        if (cancelled) return
-        // The error used to be destructured away, so a missing table looked
-        // exactly like "no price history yet — click Sync", and Sync then
-        // appeared to do nothing. Route it to the SetupNotice instead.
-        setPriceTableMissing(isMissingTable(error))
-        setPriceError(error && !isMissingTable(error) ? error.message : '')
-        setPrices((data ?? []) as BenchmarkPrice[])
-        setLoadingPrices(false)
-      })
-    return () => { cancelled = true }
-  }, [symbol])
+  // Paged: a five-year daily history is more than PostgREST's 1 000-row cap,
+  // and a single select silently dropped the most recent years.
+  const { prices, loading: loadingPrices, error: priceError, missingTable: priceTableMissing, reload: reloadPrices } =
+    useBenchmarkPrices(symbol)
 
   const sync = async () => {
     setSyncing(true)
@@ -73,9 +58,7 @@ export default function BenchmarkPage() {
         setSyncError(result?.error ?? json?.error ?? 'Sync failed')
         return
       }
-      const { data } = await supabase.from('benchmark_prices').select('*')
-        .eq('symbol', symbol).order('price_date')
-      setPrices((data ?? []) as BenchmarkPrice[])
+      await reloadPrices()
     } catch (e) {
       setSyncError(String(e))
     } finally {
@@ -107,9 +90,14 @@ export default function BenchmarkPage() {
   // this page usable before any transactions have been entered.
   const hasFlows = flows.length > 0
 
+  // Seeded with what you already owned at your first snapshot, then your
+  // flows replayed on top — otherwise the shadow started at the first logged
+  // deposit while your side started at your whole net worth.
   const shadow = useMemo(
-    () => hasFlows ? shadowPortfolio(flows, prices, fxByDate) : [],
-    [hasFlows, flows, prices, fxByDate]
+    () => hasFlows && mySeries.length > 0
+      ? shadowPortfolio(flows, prices, fxByDate, { openingValueCZK: mySeries[0].value, from: mySeries[0].date })
+      : [],
+    [hasFlows, flows, prices, fxByDate, mySeries]
   )
 
   const lumpSum = useMemo(() => {
@@ -142,8 +130,19 @@ export default function BenchmarkPage() {
     [benchSeries, from, to]
   )
 
-  const indexedMine = indexTo100(clippedMine)
-  const indexedBench = indexTo100(clippedBench)
+  // Both lines are performance, not balances: your time-weighted return (so a
+  // deposit is not a jump) against the index's own price-and-FX return.
+  const indexedMine = useMemo(() => twrIndex(clippedMine, flows), [clippedMine, flows])
+  const indexedBench = useMemo(() => {
+    if (!from || !to) return []
+    const px = prices.filter(p => p.price_date >= from && p.price_date <= to)
+      .map(p => {
+        const r = benchmarkReturn(prices, fxByDate, from, p.price_date)
+        return r == null ? null : { date: p.price_date, value: 100 * (1 + r) }
+      })
+      .filter((p): p is ValuePoint => p != null)
+    return px.length ? [{ date: from, value: 100 }, ...px.filter(p => p.date > from)] : []
+  }, [prices, fxByDate, from, to])
 
   const chartData = useMemo(() => {
     const benchByDate: Record<string, number> = {}
@@ -154,9 +153,7 @@ export default function BenchmarkPage() {
   }, [indexedMine, indexedBench])
 
   const myTwr = twr(clippedMine, flows)
-  const benchTwr = clippedBench.length >= 2 && clippedBench[0].value > 0
-    ? clippedBench[clippedBench.length - 1].value / clippedBench[0].value - 1
-    : null
+  const benchTwr = from && to ? benchmarkReturn(prices, fxByDate, from, to) : null
   const myDd = maxDrawdown(clippedMine)
   const benchDd = maxDrawdown(clippedBench)
   const diff = trackingDifference(indexedMine, indexedBench)
@@ -192,22 +189,25 @@ export default function BenchmarkPage() {
   return (
     <PageShell maxWidth={1100}>
       <PageHeader
-        title="Benchmark"
-        subtitle="Your cash flows replayed into an index — the only comparison that is not rigged by timing"
+        eyebrow="Analysis"
+        title="Returns vs benchmark"
+        subtitle="Your time-weighted return against an index, and your cash flows replayed into it"
         actions={
           <>
-            <select value={symbol} onChange={e => setSymbol(e.target.value)} style={{
+            <select aria-label="Benchmark" value={symbol} onChange={e => setSymbol(e.target.value)} style={{
               padding: '7px 12px', borderRadius: 6, background: 'var(--bg2)',
               border: '1px solid var(--border2)', color: 'var(--text2)', fontSize: 12,
             }}>
               {BENCHMARK_OPTIONS.map(b => <option key={b.symbol} value={b.symbol}>{b.label}</option>)}
             </select>
-            <button onClick={sync} disabled={syncing} style={btnStyle('secondary')}>
+            <button type="button" onClick={sync} disabled={syncing} style={btnStyle('secondary')}>
               {syncing ? 'Syncing…' : '↻ Sync prices'}
             </button>
           </>
         }
       />
+
+      <RouteTabs tabs={RETURNS_TABS} />
 
       <SetupNotice
         tables={[
@@ -234,7 +234,8 @@ export default function BenchmarkPage() {
         }}>
           {hasFlows
             ? <>Comparing with <strong>your actual cash flows</strong> replayed into {symbol} — {flows.length} external movements from the ledger.</>
-            : <>No external cash flows in the ledger, so this compares <strong>buy-and-hold</strong>: your first snapshot invested in {symbol} on that date. Add deposits and withdrawals on <code>/transactions</code> for a flow-adjusted comparison.</>}
+            : <>No deposits or withdrawals in the ledger, so the “what if” below is <strong>buy-and-hold</strong>: your first snapshot invested in {symbol} on that date. Record deposits (Record → Deposit) for a flow-adjusted comparison.</>}
+          {' '}Index prices include reinvested dividends (adjusted close).
           {usingFallbackFx && <> · Historical FX rates are missing from your snapshots, so today&rsquo;s rate is used throughout — the currency component of the comparison is approximate.</>}
         </div>
       )}
@@ -278,10 +279,10 @@ export default function BenchmarkPage() {
       {!noPrices && !noHistory && (
         <div style={{ display: 'flex', border: '1px solid var(--border2)', borderRadius: 6, overflow: 'hidden', marginBottom: 14, width: 'fit-content' }}>
           {WINDOWS.map(w => (
-            <button key={w} onClick={() => setRange(w)} style={{
+            <button key={w} type="button" aria-pressed={range === w} onClick={() => setRange(w)} style={{
               padding: '5px 14px', border: 'none', cursor: 'pointer', fontSize: 11,
-              background: range === w ? 'var(--green-bg)' : 'var(--bg2)',
-              color: range === w ? 'var(--green)' : 'var(--text3)',
+              background: range === w ? 'var(--bg4)' : 'var(--bg2)',
+              color: range === w ? 'var(--text)' : 'var(--text3)',
               borderRight: w !== 'ALL' ? '1px solid var(--border2)' : 'none',
             }}>{w}</button>
           ))}
@@ -319,23 +320,23 @@ export default function BenchmarkPage() {
             cards={[
               {
                 label: 'Your return (TWR)',
-                value: orDash(myTwr, n => `${(n * 100).toFixed(2)}%`),
-                accent: (myTwr ?? 0) >= 0 ? 'var(--green)' : 'var(--red)',
-                color: (myTwr ?? 0) >= 0 ? 'var(--green)' : 'var(--red)',
-                note: 'time-weighted',
+                value: fmtPct(myTwr != null ? myTwr * 100 : null),
+                accent: signColor(myTwr),
+                color: signColor(myTwr),
+                note: 'time-weighted — deposits excluded',
               },
               {
-                label: 'Benchmark return',
-                value: orDash(benchTwr, n => `${(n * 100).toFixed(2)}%`),
+                label: 'Index return',
+                value: fmtPct(benchTwr != null ? benchTwr * 100 : null),
                 accent: 'var(--blue)',
-                note: symbol,
+                note: `${symbol} in CZK, same window`,
               },
               {
                 label: 'Difference',
-                value: orDash(diff, n => `${n >= 0 ? '+' : ''}${n.toFixed(1)} pts`),
-                accent: (diff ?? 0) >= 0 ? 'var(--green)' : 'var(--red)',
-                color: (diff ?? 0) >= 0 ? 'var(--green)' : 'var(--red)',
-                note: 'indexed to 100',
+                value: orDash(diff, n => `${n >= 0 ? '+' : '−'}${Math.abs(n).toFixed(1)} pts`),
+                accent: signColor(diff),
+                color: signColor(diff),
+                note: 'you minus index, indexed to 100',
               },
               {
                 label: 'Your XIRR',
@@ -353,25 +354,27 @@ export default function BenchmarkPage() {
             ]}
           />
 
-          <Panel title={`You vs ${symbol}, indexed to 100`}>
+          <Panel title={`You vs ${symbol}, performance indexed to 100`}>
+            <div role="img" aria-label={`Indexed performance: you ${chartData[chartData.length - 1].mine.toFixed(1)}, ${symbol} ${chartData[chartData.length - 1].bench.toFixed(1)}`}>
             <ResponsiveContainer width="100%" height={260}>
               <LineChart data={chartData} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
-                <XAxis dataKey="date" tick={{ fontSize: 9, fill: 'var(--text3)' }}
+                <XAxis dataKey="date" tick={{ fontSize: 11, fill: 'var(--text3)' }}
                   tickFormatter={fmtISODateShort} interval="preserveStartEnd" />
-                <YAxis tick={{ fontSize: 9, fill: 'var(--text3)' }} width={44} domain={['auto', 'auto']} />
+                <YAxis tick={{ fontSize: 11, fill: 'var(--text3)' }} width={44} domain={['auto', 'auto']} />
                 <Tooltip
                   formatter={(v: number) => v.toFixed(1)}
                   labelFormatter={fmtISODate}
                   contentStyle={{ background: 'var(--bg2)', border: '1px solid var(--border2)', borderRadius: 8, fontSize: 11 }}
                 />
-                <Legend wrapperStyle={{ fontSize: 10 }} />
-                <Line type="monotone" dataKey="mine" name="You" stroke="var(--green)" strokeWidth={2} dot={false} />
+                <Legend wrapperStyle={{ fontSize: 11 }} />
+                <Line type="monotone" dataKey="mine" name="You (time-weighted)" stroke="var(--green)" strokeWidth={2} dot={false} />
                 <Line type="monotone" dataKey="bench" name={symbol} stroke="var(--blue)" strokeWidth={2} strokeDasharray="4 4" dot={false} />
               </LineChart>
             </ResponsiveContainer>
+            </div>
             {from && to && (
-              <div style={{ marginTop: 8, fontSize: 10, color: 'var(--text4)' }}>
+              <div style={{ marginTop: 8, fontSize: 11, color: 'var(--text3)' }}>
                 Comparing {fmtISODate(from)} – {fmtISODate(to)}, the period where both series have data.
               </div>
             )}
@@ -381,7 +384,7 @@ export default function BenchmarkPage() {
           <Panel title="What if you had just bought the index?">
             <div style={{ display: 'flex', gap: 32, flexWrap: 'wrap' }}>
               <div>
-                <div style={{ fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--text4)', marginBottom: 6 }}>
+                <div style={{ fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--text3)', marginBottom: 6 }}>
                   Your portfolio today
                 </div>
                 <div style={{ fontFamily: "'Instrument Serif', serif", fontSize: 24, color: 'var(--green)' }}>
@@ -389,7 +392,7 @@ export default function BenchmarkPage() {
                 </div>
               </div>
               <div>
-                <div style={{ fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--text4)', marginBottom: 6 }}>
+                <div style={{ fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--text3)', marginBottom: 6 }}>
                   {hasFlows ? `Same money in ${symbol}` : `Buy-and-hold ${symbol}`}
                 </div>
                 <div style={{ fontFamily: "'Instrument Serif', serif", fontSize: 24, color: 'var(--blue)' }}>
@@ -398,21 +401,21 @@ export default function BenchmarkPage() {
               </div>
               {mineToday != null && shadowToday != null && (
                 <div>
-                  <div style={{ fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--text4)', marginBottom: 6 }}>
+                  <div style={{ fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--text3)', marginBottom: 6 }}>
                     Difference
                   </div>
                   <div style={{
                     fontFamily: "'Instrument Serif', serif", fontSize: 24,
-                    color: mineToday >= shadowToday ? 'var(--green)' : 'var(--red)',
+                    color: signColor(mineToday - shadowToday),
                   }}>
-                    {mineToday >= shadowToday ? '+' : ''}{fmtCZK(mineToday - shadowToday)}
+                    {fmtSignedCZK(mineToday - shadowToday)}
                   </div>
                 </div>
               )}
             </div>
             <div style={{ marginTop: 14, fontSize: 11, color: 'var(--text3)', lineHeight: 1.7 }}>
               {hasFlows
-                ? <>Every external contribution you made was bought into {symbol} on the same day, at that day&rsquo;s price and exchange rate.</>
+                ? <>What you owned at your first snapshot, plus every deposit since, bought into {symbol} on the same day at that day&rsquo;s price and exchange rate (withdrawals sold).</>
                 : <>Your portfolio&rsquo;s value at the first snapshot, invested in {symbol} on that date and held. This ignores anything you paid in since — add transactions for a flow-adjusted comparison.</>}
               {' '}A Czech investor&rsquo;s index return includes the currency move, and it is
               included here.

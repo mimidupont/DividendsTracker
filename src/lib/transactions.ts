@@ -32,10 +32,12 @@ export interface RealizedLot {
   gainCZK: number
   /** The CZK gain the currency move alone contributed. */
   fxGainCZK: number
+  /** Proceeds in CZK at the sell-date rate (what the Czech 100 000 CZK test counts). */
+  proceedsCZK: number
   currency: string
   /** Days held — matters for the Czech 3-year time test. */
   holdingDays: number
-  /** True when the lot was held ≥ 3 calendar years (Czech time-test exemption). */
+  /** True when the lot was held more than 3 calendar years (Czech time-test exemption). */
   passesTimeTest: boolean
   /**
    * True when no buy lot could be matched to these shares, so `costLocal` is 0
@@ -62,15 +64,19 @@ const daysBetween = (a: string, b: string) =>
  * so a day count reports a lot as exempt when it is a day short. Being wrong in
  * the permissive direction on a tax figure is the bad direction.
  *
+ * §4(1)(w) ZDP requires the holding period to *exceed* three years
+ * ("přesáhne"), so a sale on the anniversary itself is still taxable; the
+ * earliest exempt date is the day after.
+ *
  * 29 February + 3 years has no counterpart date; JavaScript rolls it to 1 March,
  * which is the conservative reading and the one used here.
  */
-function passesThreeYearTest(buyDate: string, sellDate: string): boolean {
+export function passesThreeYearTest(buyDate: string, sellDate: string): boolean {
   const buy = new Date(`${buyDate}T00:00:00Z`)
   if (isNaN(buy.getTime())) return false
-  const eligible = new Date(buy)
-  eligible.setUTCFullYear(eligible.getUTCFullYear() + 3)
-  return sellDate >= eligible.toISOString().slice(0, 10)
+  const anniversary = new Date(buy)
+  anniversary.setUTCFullYear(anniversary.getUTCFullYear() + 3)
+  return sellDate > anniversary.toISOString().slice(0, 10)
 }
 
 const byDate = (a: Transaction, b: Transaction) =>
@@ -107,6 +113,22 @@ function weightedFx(lots: Lot[]): number {
   return lots.reduce((s, l) => s + l.shares * l.price * l.fxRateCZK, 0) / cost
 }
 
+/** A ratio-for-1 split: shares × ratio, per-share price ÷ ratio. */
+const applySplit = (lots: Lot[], ratio: number): Lot[] =>
+  lots.map(l => ({ ...l, shares: l.shares * ratio, price: l.price / ratio }))
+
+/**
+ * Re-price every open lot at the pool's average cost and average FX, keeping
+ * each lot's own date and share count.
+ */
+function averageLots(lots: Lot[]): Lot[] {
+  const shares = lots.reduce((s, l) => s + l.shares, 0)
+  if (shares <= 0) return lots
+  const avg = lots.reduce((s, l) => s + l.shares * l.price, 0) / shares
+  const avgFx = weightedFx(lots)
+  return lots.map(l => ({ ...l, price: avg, fxRateCZK: avgFx }))
+}
+
 /**
  * Running cost basis for one symbol.
  *
@@ -119,7 +141,7 @@ export function costBasis(
   method: 'fifo' | 'avg' = 'fifo'
 ): CostBasis {
   const rows = txns
-    .filter(t => t.symbol === symbol && (t.type === 'buy' || t.type === 'sell'))
+    .filter(t => t.symbol === symbol && (t.type === 'buy' || t.type === 'sell' || t.type === 'split'))
     .sort(byDate)
 
   let lots: Lot[] = []
@@ -128,6 +150,7 @@ export function costBasis(
   for (const t of rows) {
     const qty = Math.abs(t.quantity ?? 0)
     if (qty <= 0) continue
+    if (t.type === 'split') { lots = applySplit(lots, qty); continue }
     currency = t.currency
 
     if (t.type === 'buy') {
@@ -141,19 +164,9 @@ export function costBasis(
 
     // Sell: consume lots
     let remaining = qty
-    if (method === 'avg') {
-      const totalShares = lots.reduce((s, l) => s + l.shares, 0)
-      const totalCost = lots.reduce((s, l) => s + l.shares * l.price, 0)
-      const avg = totalShares > 0 ? totalCost / totalShares : 0
-      // Averaging the cost has to average the rate it was struck at too, or the
-      // remaining lot would carry the newest rate for money spent years ago.
-      const avgFx = weightedFx(lots)
-      const left = Math.max(0, totalShares - remaining)
-      lots = left > 0
-        ? [{ date: t.txn_date, shares: left, price: avg, currency: t.currency, fxRateCZK: avgFx }]
-        : []
-      continue
-    }
+    // Average-cost mode prices every share at the pool average but still
+    // consumes shares oldest-first, so each keeps its own acquisition date.
+    if (method === 'avg') lots = averageLots(lots)
     while (remaining > 0 && lots.length > 0) {
       const lot = lots[0]
       const take = Math.min(lot.shares, remaining)
@@ -183,7 +196,7 @@ export function realizedPL(txns: Transaction[], method: 'fifo' | 'avg' = 'fifo')
 
   for (const symbol of symbols) {
     const rows = txns
-      .filter(t => t.symbol === symbol && (t.type === 'buy' || t.type === 'sell'))
+      .filter(t => t.symbol === symbol && (t.type === 'buy' || t.type === 'sell' || t.type === 'split'))
       .sort(byDate)
 
     let lots: Lot[] = []
@@ -191,6 +204,9 @@ export function realizedPL(txns: Transaction[], method: 'fifo' | 'avg' = 'fifo')
     for (const t of rows) {
       const qty = Math.abs(t.quantity ?? 0)
       if (qty <= 0) continue
+      // A split changes the share count and per-share cost, never the total
+      // cost or the acquisition dates.
+      if (t.type === 'split') { lots = applySplit(lots, qty); continue }
 
       if (t.type === 'buy') {
         const gross = Math.abs(t.amount) + (t.fee ?? 0)
@@ -220,6 +236,7 @@ export function realizedPL(txns: Transaction[], method: 'fifo' | 'avg' = 'fifo')
           proceedsLocal, costLocal, gainLocal: proceedsLocal - costLocal,
           gainCZK,
           fxGainCZK: gainCZK - (proceedsLocal - costLocal) * sellFx,
+          proceedsCZK: proceedsLocal * sellFx,
           currency: t.currency,
           holdingDays: buyDate ? daysBetween(buyDate, t.txn_date) : 0,
           // Unmatched shares have no purchase date, so no exemption can be
@@ -229,25 +246,10 @@ export function realizedPL(txns: Transaction[], method: 'fifo' | 'avg' = 'fifo')
         })
       }
 
-      if (method === 'avg') {
-        const totalShares = lots.reduce((s, l) => s + l.shares, 0)
-        const totalCost = lots.reduce((s, l) => s + l.shares * l.price, 0)
-        const avg = totalShares > 0 ? totalCost / totalShares : 0
-        const avgFx = weightedFx(lots)
-        const matched = Math.min(remaining, totalShares)
-        const oldest = lots[0]?.date ?? null
-        if (matched > 0) {
-          record(matched, avg * matched, proceedsPerShare * matched, avgFx, oldest)
-        }
-        if (remaining - matched > 1e-9) {
-          record(remaining - matched, 0, proceedsPerShare * (remaining - matched), sellFx, null)
-        }
-        const left = Math.max(0, totalShares - matched)
-        lots = left > 0 && oldest
-          ? [{ date: oldest, shares: left, price: avg, currency: t.currency, fxRateCZK: avgFx }]
-          : []
-        continue
-      }
+      // Average cost may set the *amount* of the basis, but the time test is
+      // per acquired share: collapsing the pool onto its oldest date reported
+      // shares bought last year as exempt. Price at the average, consume FIFO.
+      if (method === 'avg') lots = averageLots(lots)
 
       while (remaining > 0 && lots.length > 0) {
         const lot = lots[0]
@@ -377,8 +379,8 @@ export function summarise(txns: Transaction[], year?: number): LedgerSummary {
     totalWithdrawnCZK: withdrawn,
     netContributedCZK: contributed - withdrawn,
     realizedPLCZK: realizedCZK,
-    feesCZK: rows.reduce((s, t) => s + (t.fee ?? 0) * t.fx_rate_czk, 0),
-    taxCZK: rows.reduce((s, t) => s + (t.tax ?? 0) * t.fx_rate_czk, 0),
+    feesCZK: rows.reduce((s, t) => s + (t.fee ?? 0) * fxOf(t), 0),
+    taxCZK: rows.reduce((s, t) => s + (t.tax ?? 0) * fxOf(t), 0),
     incomeCZK: rows
       .filter(t => incomeTypes.includes(t.type))
       .reduce((s, t) => s + Math.abs(czk(t)), 0),
@@ -404,4 +406,78 @@ export function runningBalance(txns: Transaction[]): Map<string, number> {
     out.set(t.id, balance)
   }
   return out
+}
+
+export interface BackfillInput {
+  holdings: { id: string; symbol: string; shares: number; avg_price: number; currency: string; purchase_date: string | null }[]
+  lots: { holding_id: string | null; symbol: string; shares: number; purchase_price: number; purchase_date: string | null; fx_rate_czk?: number | null }[]
+  dividends: { symbol: string; payment_date: string; shares_held: number; amount_per_share: number; gross_amount: number; withholding_tax: number | null; currency: string; fx_rate_czk?: number | null }[]
+  /** Already-backfilled keys (see backfillKey), skipped for idempotency. */
+  existingKeys: Set<string>
+  /** CZK per unit of currency on a date, or null when unknown. */
+  rateOn: (currency: string, date: string) => number | null
+  today: string
+}
+
+/** Identity of a backfilled row: two lots bought the same day differ by quantity. */
+export const backfillKey = (type: string, symbol: string | null, date: string, quantity: number | null | undefined) =>
+  `${type}::${symbol ?? ''}::${date}::${quantity != null ? Number(quantity).toFixed(6) : ''}`
+
+export interface BackfillResult {
+  rows: Record<string, unknown>[]
+  /** Rows that could not be written because no historical rate was available. */
+  skipped: { what: string; date: string; currency: string }[]
+}
+
+/**
+ * Ledger rows reconstructed from what is already recorded, one buy per
+ * purchase lot on its own date at that date's rate (not one lump at today's
+ * rate, which dated every share to the first purchase and froze the wrong FX).
+ * Shares a holding has beyond its recorded lots become one residual buy at the
+ * average price on the holding's purchase date, labelled as such.
+ */
+export function backfillRows(input: BackfillInput): BackfillResult {
+  const rows: Record<string, unknown>[] = []
+  const skipped: BackfillResult['skipped'] = []
+  const push = (type: string, symbol: string, date: string, currency: string, row: Record<string, unknown>, rateHint?: number | null) => {
+    const key = backfillKey(type, symbol, date, row.quantity as number | null)
+    if (input.existingKeys.has(key)) return
+    const rate = rateHint != null && rateHint > 0 ? rateHint : input.rateOn(currency, date)
+    if (rate == null) { skipped.push({ what: `${type} ${symbol}`, date, currency }); return }
+    input.existingKeys.add(key)
+    rows.push({ ...row, txn_date: date, symbol, currency, fx_rate_czk: rate, is_external: false })
+  }
+
+  for (const h of input.holdings) {
+    const lots = input.lots
+      .filter(l => l.holding_id === h.id || (l.holding_id == null && l.symbol === h.symbol))
+      .filter(l => l.shares > 0)
+    let covered = 0
+    for (const l of lots) {
+      const date = l.purchase_date ?? h.purchase_date ?? input.today
+      covered += l.shares
+      push('buy', h.symbol, date, h.currency, {
+        type: 'buy', asset_class: 'stock', asset_id: h.id, quantity: l.shares, price: l.purchase_price,
+        amount: -(l.shares * l.purchase_price), notes: 'backfilled',
+      }, l.fx_rate_czk)
+    }
+    const residual = h.shares - covered
+    if (residual > 1e-9) {
+      const earliest = lots.map(l => l.purchase_date).filter((d): d is string => !!d).sort()[0]
+      const date = h.purchase_date ?? earliest ?? input.today
+      push('buy', h.symbol, date, h.currency, {
+        type: 'buy', asset_class: 'stock', asset_id: h.id, quantity: residual, price: h.avg_price,
+        amount: -(residual * h.avg_price), notes: 'backfilled (shares without a recorded lot, at average cost)',
+      })
+    }
+  }
+
+  for (const d of input.dividends) {
+    push('dividend', d.symbol, d.payment_date, d.currency, {
+      type: 'dividend', asset_class: 'stock', quantity: d.shares_held, price: d.amount_per_share,
+      amount: d.gross_amount, tax: d.withholding_tax ?? 0, notes: 'backfilled',
+    }, d.fx_rate_czk)
+  }
+
+  return { rows, skipped }
 }

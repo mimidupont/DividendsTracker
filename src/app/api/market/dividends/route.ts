@@ -1,7 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getYahooSession, toYahoo, fetchYahooQuoteSummary, batchedMap } from '@/lib/yahoo'
+import { getYahooSession, toYahoo, fetchYahooQuoteSummary, batchedMap, skipStockAnalysis } from '@/lib/yahoo'
 import { batchFetchSAQuotes } from '@/lib/stockanalysis'
-import { unixToISODate } from '@/lib/date'
+import { unixToISODate, todayInZone } from '@/lib/date'
+
+/** Same cap as /api/market: each symbol is one or two scrapes. */
+const MAX_SYMBOLS = 100
 
 export interface DividendSummary {
   symbol: string
@@ -31,18 +34,19 @@ export interface DividendSummaryResponse {
 
 async function fetchYahooDividendSummary(
   symbol: string,
+  exchange: string | undefined,
   crumb: string,
   cookie: string
 ): Promise<DividendSummary> {
   const empty: DividendSummary = {
     symbol, exDividendDate: null, dividendRate: null,
     trailingAnnualDividendRate: null, lastDividendValue: null,
-    lastDividendDate: null, payoutFrequency: null, currency: 'USD',
+    lastDividendDate: null, payoutFrequency: null, currency: '',
     dataSource: 'yahoo',
   }
   try {
     const result = await fetchYahooQuoteSummary(
-      toYahoo(symbol),
+      toYahoo(symbol, exchange),
       'summaryDetail,calendarEvents,defaultKeyStatistics',
       crumb,
       cookie
@@ -68,7 +72,9 @@ async function fetchYahooDividendSummary(
       lastDividendDate: lastDivTs,
       lastDividendDateISO: unixToISODate(lastDivTs),
       payoutFrequency: estimateFrequency(annualRate, lastDiv),
-      currency: sd.currency ?? 'USD',
+      // Empty when unknown — never guessed. A CZK dividend logged as USD is
+      // ~20× too large and permanently corrupts the DRIP cost basis.
+      currency: sd.currency ?? '',
       dataSource: 'yahoo',
     }
   } catch (e) {
@@ -106,7 +112,13 @@ function lastPaidDate(payDateISO: string | null | undefined, todayISO: string): 
 
 export async function POST(req: NextRequest) {
   try {
-    const body = (await req.json()) as { symbols?: unknown }
+    const body = (await req.json()) as { symbols?: unknown; exchanges?: unknown }
+    const exchanges: Record<string, string> = {}
+    if (body.exchanges && typeof body.exchanges === 'object') {
+      for (const [k, v] of Object.entries(body.exchanges as Record<string, unknown>)) {
+        if (typeof v === 'string' && v.trim()) exchanges[k] = v.trim()
+      }
+    }
     const symbols = Array.isArray(body.symbols)
       ? Array.from(new Set(
           body.symbols.filter((s): s is string => typeof s === 'string' && s.trim().length > 0)
@@ -115,11 +127,15 @@ export async function POST(req: NextRequest) {
     if (!symbols.length) {
       return NextResponse.json({ error: 'symbols array required' }, { status: 400 })
     }
+    if (symbols.length > MAX_SYMBOLS) {
+      return NextResponse.json({ error: `at most ${MAX_SYMBOLS} symbols per request` }, { status: 400 })
+    }
 
-    const today = new Date().toISOString().slice(0, 10)
+    // The user's calendar day, not the server's UTC one.
+    const today = todayInZone()
 
     // 1. StockAnalysis pass — reliable ex-dates and dividend amounts
-    const saResults = await batchFetchSAQuotes(symbols, 6)
+    const saResults = await batchFetchSAQuotes(symbols.filter(s => !skipStockAnalysis(s, exchanges[s])), 6)
 
     // 2. Which symbols still need Yahoo?
     //    Also ask Yahoo whenever SA gave us no *paid* dividend date, since the
@@ -139,7 +155,7 @@ export async function POST(req: NextRequest) {
         const results = await batchedMap(
           needsYahoo,
           8,
-          s => fetchYahooDividendSummary(s, session.crumb, session.cookie)
+          s => fetchYahooDividendSummary(s, exchanges[s], session.crumb, session.cookie)
         )
         yahooMap = Object.fromEntries(results.map(r => [r.symbol, r]))
       } else {
@@ -147,7 +163,7 @@ export async function POST(req: NextRequest) {
           yahooMap[s] = {
             symbol: s, exDividendDate: null, dividendRate: null,
             trailingAnnualDividendRate: null, lastDividendValue: null,
-            lastDividendDate: null, payoutFrequency: null, currency: 'USD',
+            lastDividendDate: null, payoutFrequency: null, currency: '',
             error: 'No Yahoo session',
           }
         }
@@ -186,7 +202,7 @@ export async function POST(req: NextRequest) {
           payoutFrequency:          freq,
           // SA_SYMBOL_MAP knows the native trading currency — the old code
           // hardcoded USD, which mispriced every CZK and EUR listing.
-          currency:                 sa.currency || yahoo?.currency || 'USD',
+          currency:                 sa.currency || yahoo?.currency || '',
           dataSource:               'stockanalysis',
         }
       } else if (yahoo) {
@@ -196,7 +212,7 @@ export async function POST(req: NextRequest) {
           symbol,
           exDividendDate: null, dividendRate: null,
           trailingAnnualDividendRate: null, lastDividendValue: null,
-          lastDividendDate: null, payoutFrequency: null, currency: 'USD',
+          lastDividendDate: null, payoutFrequency: null, currency: '',
           error: 'No data from either source',
         }
       }

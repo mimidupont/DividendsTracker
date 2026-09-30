@@ -1,15 +1,66 @@
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 
+/** Every outbound call is bounded: one hung scrape used to stall a whole batch. */
+const FETCH_TIMEOUT_MS = 8000
+
+/**
+ * Tickers whose Yahoo symbol is not just "ticker + exchange suffix". CSG1 is
+ * the broker's (IBKR) code for CSG N.V.; Euronext lists it as CSG.
+ */
 export const YAHOO_SYMBOL_MAP: Record<string, string> = {
   SPY5:  'SPY5.L',
   SPYW:  'SPYW.DE',
-  CSG1:  'CSG1.AS',
+  CSG1:  'CSG.AS',
   ERBAG: 'ERBAG.PR',
   MONET: 'MONET.PR',
   BNP: 'BNP.PA',
 }
 
-export const toYahoo = (symbol: string) => YAHOO_SYMBOL_MAP[symbol] ?? symbol
+/**
+ * Broker exchange codes (as IBKR exports them, plus common names) → Yahoo
+ * suffix. A bare ticker on a European exchange otherwise resolves to its US
+ * listing: TTE on SBF (Paris, EUR) was being priced as the NYSE ADR in USD.
+ * US venues map to '' (no suffix).
+ */
+export const EXCHANGE_SUFFIX: Record<string, string> = {
+  NYSE: '', NASDAQ: '', ARCA: '', AMEX: '', BATS: '', ISLAND: '', SMART: '',
+  AEB: '.AS', AMS: '.AS', EURONEXT_AMSTERDAM: '.AS',
+  SBF: '.PA', EPA: '.PA', PAR: '.PA',
+  'ENEXT.BE': '.BR', EBR: '.BR',
+  IBIS: '.DE', IBIS2: '.DE', XETRA: '.DE', FWB: '.F', FWB2: '.F',
+  LSE: '.L', LSEETF: '.L', LON: '.L',
+  // Not PSE: for IBKR that is the US Pacific exchange, not Prague.
+  PRA: '.PR',
+  BVME: '.MI', BIT: '.MI',
+  BM: '.MC', BME: '.MC',
+  EBS: '.SW', SWX: '.SW', VIRTX: '.SW',
+  VSE: '.VI', WSE: '.WA',
+  SFB: '.ST', CPH: '.CO', OSE: '.OL', HEX: '.HE',
+  TSE: '.TO', TSX: '.TO',
+}
+
+/**
+ * The symbol to ask Yahoo for. An explicit mapping wins; a ticker that already
+ * carries a suffix (BNP.PA) is used as is; otherwise the exchange decides.
+ */
+export function toYahoo(symbol: string, exchange?: string | null): string {
+  const s = symbol.trim().toUpperCase()
+  if (YAHOO_SYMBOL_MAP[s]) return YAHOO_SYMBOL_MAP[s]
+  if (s.includes('.')) return s
+  const suffix = exchange ? EXCHANGE_SUFFIX[exchange.trim().toUpperCase()] : undefined
+  return suffix ? s + suffix : s
+}
+
+/**
+ * StockAnalysis is keyed on the bare ticker and knows nothing about the
+ * exchange. When the exchange points somewhere other than the listing it would
+ * scrape (TTE on SBF), skip it and let Yahoo price the home listing.
+ */
+export function skipStockAnalysis(symbol: string, exchange: string | null | undefined): boolean {
+  if (!exchange) return false
+  const y = toYahoo(symbol, exchange)
+  return y !== toYahoo(symbol) && y !== symbol.trim().toUpperCase()
+}
 
 export interface YahooSession { crumb: string; cookie: string }
 
@@ -47,6 +98,7 @@ export async function getYahooSession(force = false): Promise<YahooSession | nul
 async function createYahooSession(): Promise<YahooSession | null> {
   try {
     const homeRes = await fetch('https://finance.yahoo.com/quote/AAPL/', {
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
       headers: { 'User-Agent': UA, Accept: 'text/html' },
       redirect: 'follow',
     })
@@ -57,6 +109,7 @@ async function createYahooSession(): Promise<YahooSession | null> {
     const cookie = setCookies.map(c => c.split(';')[0].trim()).filter(c => c.includes('=')).join('; ')
 
     const crumbRes = await fetch('https://query2.finance.yahoo.com/v1/test/getcrumb', {
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
       headers: { 'User-Agent': UA, Cookie: cookie },
     })
     if (!crumbRes.ok) return null
@@ -79,6 +132,7 @@ export async function fetchYahooQuoteSummary(
     `?modules=${modules}&crumb=${encodeURIComponent(crumb)}`
 
   const res = await fetch(url, {
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     headers: { 'User-Agent': UA, Accept: 'application/json', Cookie: cookie },
     next: { revalidate: 0 },
   })

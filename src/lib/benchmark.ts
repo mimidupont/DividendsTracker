@@ -63,18 +63,34 @@ function priceOn(prices: BenchmarkPrice[], date: string): number | null {
 export function shadowPortfolio(
   flows: Flow[],
   prices: BenchmarkPrice[],
-  fxByDate: FxByDate
+  fxByDate: FxByDate,
+  opts: { openingValueCZK?: number; from?: string } = {}
 ): ShadowPoint[] {
-  const sortedPrices = [...prices].sort((a, b) => a.price_date.localeCompare(b.price_date))
+  const from = opts.from
+  const sortedPrices = [...prices]
+    .filter(p => from == null || p.price_date >= from)
+    .sort((a, b) => a.price_date.localeCompare(b.price_date))
   if (sortedPrices.length === 0) return []
 
+  // Flows on or before the opening date are already inside the opening value.
   const sortedFlows = [...flows]
-    .filter(f => isFinite(f.amountCZK))
+    .filter(f => isFinite(f.amountCZK) && (from == null || f.date > from))
     .sort((a, b) => a.date.localeCompare(b.date))
 
   const out: ShadowPoint[] = []
   let units = 0
   let flowIdx = 0
+
+  // Seed with what you already owned when the comparison starts. Without it
+  // the shadow began at the first logged deposit (10k) while your side began
+  // at your whole net worth (1M), and the two indexed lines diverged by the
+  // ratio of those starting points rather than by performance.
+  const opening = opts.openingValueCZK ?? 0
+  if (opening > 0) {
+    const first = sortedPrices[0]
+    const fx0 = rateOn(fxByDate, first.price_date)
+    if (fx0 != null && first.close * fx0 > 0) units = opening / (first.close * fx0)
+  }
 
   for (const p of sortedPrices) {
     // Apply every flow up to and including this price date
@@ -100,6 +116,25 @@ export function shadowPortfolio(
   }
 
   return out
+}
+
+/**
+ * The benchmark's own return over a window, in CZK: price ratio × FX ratio.
+ * This — not the shadow portfolio's end/start value, which includes every
+ * contribution replayed into it — is what "the index returned" means.
+ */
+export function benchmarkReturn(
+  prices: BenchmarkPrice[], fxByDate: FxByDate, from: string, to: string
+): number | null {
+  const sorted = [...prices].sort((a, b) => a.price_date.localeCompare(b.price_date))
+  const start = sorted.find(p => p.price_date >= from)
+  const end = [...sorted].reverse().find(p => p.price_date <= to)
+  if (!start || !end || end.price_date <= start.price_date) return null
+  const fx0 = rateOn(fxByDate, start.price_date)
+  const fx1 = rateOn(fxByDate, end.price_date)
+  if (fx0 == null || fx1 == null || start.close <= 0) return null
+  const r = (end.close * fx1) / (start.close * fx0) - 1
+  return isFinite(r) ? r : null
 }
 
 /** Difference between two indexed series at their last common date, in points. */
