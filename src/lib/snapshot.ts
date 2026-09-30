@@ -49,6 +49,17 @@ export function snapshotValues(positions: Position[], fx: Record<string, number>
 }
 
 /**
+ * True for a position valued at cost because no market price exists today: a
+ * stock or fund with no quote and no manual price, or a coin with no price.
+ * Bonds and property are valued from entered figures by design.
+ */
+export function isValuedAtCost(p: Position): boolean {
+  return !p.isLivePrice && !p.isManualPrice && !p.isLiability &&
+    (p.assetClass === 'stock' || p.assetClass === 'etf' || p.assetClass === 'crypto' ||
+     (p.assetClass === 'bond' && !!p.isFund))
+}
+
+/**
  * Positions whose market value is missing today — a stock with no quote or a
  * coin with no price, valued at cost instead. A snapshot written with any of
  * these records a step change that never happened (a 200k position saved at
@@ -56,9 +67,7 @@ export function snapshotValues(positions: Position[], fx: Record<string, number>
  * property are valued from entered figures by design and do not count.
  */
 export function snapshotBlockers(positions: Position[]): string[] {
-  return positions
-    .filter(p => !p.isLivePrice && !p.isLiability &&
-      (p.assetClass === 'stock' || p.assetClass === 'etf' || p.assetClass === 'crypto' ||
-       (p.assetClass === 'bond' && p.isFund)))
-    .map(p => p.label)
+  // A manual price is the user's statement of value and does not flip back
+  // and forth with a provider's availability, so it does not block.
+  return Array.from(new Set(positions.filter(isValuedAtCost).map(p => p.label)))
 }

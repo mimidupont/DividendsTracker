@@ -89,7 +89,7 @@ export default function PerformancePage() {
       render: r => <>{fmtNum(r.holding.avg_price, 2)} <span style={{ fontSize: 10, color: 'var(--text3)' }}>{r.holding.currency}</span></> },
     { key: 'last', label: 'Last price', numeric: true, sortValue: r => r.price,
       render: r => <>{fmtNum(r.price, 2)} <span style={{ fontSize: 10, color: 'var(--text3)' }}>{r.priceCurrency}</span>
-        {!r.isLivePrice && <> <Badge variant="amber">at cost</Badge></>}</> },
+        {r.isManualPrice ? <> <Badge variant="gray">manual</Badge></> : !r.isLivePrice && <> <Badge variant="amber">at cost</Badge></>}</> },
     { key: 'value', label: 'Value (CZK)', numeric: true, sortValue: r => r.marketCZK, render: r => fmtCZK(r.marketCZK) },
     { key: 'pl', label: 'Unrealised', numeric: true, sortValue: r => r.plCZK,
       render: r => <span style={{ color: signColor(r.plCZK) }}>{fmtSignedCZK(r.plCZK)}</span> },

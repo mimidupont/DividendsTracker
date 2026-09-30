@@ -71,8 +71,8 @@ const SA_SYMBOL_MAP: Record<string, {
   SPYW: { slug: 'spyw', type: 'etf',    currency: 'EUR' },
 
   // ── International stocks ───────────────────────────────────────────────────
-  // CSG1 = CSG NV (Amsterdam, EUR)
-  CSG1:  { slug: 'csg1',  type: 'stocks', currency: 'EUR' },
+  // CSG1 (CSG N.V., Amsterdam) is priced by Yahoo as CSG.AS — StockAnalysis
+  // has no /stocks/csg1/ page, so mapping it here only cost a failed scrape.
   // ERBAG = Erste Group Bank AG (Prague Stock Exchange, CZK)
   ERBAG: { slug: 'erbag', type: 'stocks', currency: 'CZK' },
   // MONET = Moneta Money Bank AS (Prague Stock Exchange, CZK)

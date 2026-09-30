@@ -5,6 +5,7 @@ import { useProfile } from '@/lib/profile'
 import { updateScoped } from '@/lib/db'
 import { parseDecimal } from '@/lib/parse'
 import { historicalRate, normalizeCurrencyCode } from '@/lib/fx'
+import { todayISO } from '@/lib/date'
 import Modal from './Modal'
 import { Field, FormGrid, FormActions, ErrorBox, NumberInput, Checkbox, Notice, inputStyle } from './FormFields'
 
@@ -31,6 +32,8 @@ export default function EditPositionModal({
     exchange: holding.exchange ?? '',
     purchase_date: holding.purchase_date ?? '',
     is_dividend_payer: holding.is_dividend_payer,
+    manual_price: holding.manual_price != null ? String(holding.manual_price) : '',
+    manual_price_date: holding.manual_price_date ?? '',
   })
   const [saving, setSaving] = useState(false)
   const [lookingUp, setLookingUp] = useState(false)
@@ -54,8 +57,14 @@ export default function EditPositionModal({
     const price  = parseDecimal(form.avg_price)
     const fx     = form.avg_fx_czk.trim() ? parseDecimal(form.avg_fx_czk) : null
     if (!form.name.trim()) { setError('Name is required.'); return }
-    if (shares == null || shares <= 0 || price == null || price <= 0) {
-      setError('Shares and average price must be positive numbers.')
+    // A zero average price is real: RSUs or shares received for free.
+    if (shares == null || shares <= 0 || price == null || price < 0) {
+      setError('Shares must be positive and the average price zero or more.')
+      return
+    }
+    const manual = form.manual_price.trim() ? parseDecimal(form.manual_price) : null
+    if (form.manual_price.trim() && (manual == null || manual < 0)) {
+      setError('The manual price must be zero or more (or left empty).')
       return
     }
     if (form.avg_fx_czk.trim() && (fx == null || fx <= 0)) {
@@ -76,6 +85,11 @@ export default function EditPositionModal({
       exchange: form.exchange.trim() || null,
       purchase_date: form.purchase_date || null,
       is_dividend_payer: form.is_dividend_payer,
+      manual_price: manual,
+      // A new price without a new date is today's price, not the old date's.
+      manual_price_date: manual == null ? null
+        : form.manual_price_date && (manual === holding.manual_price || form.manual_price_date !== (holding.manual_price_date ?? ''))
+          ? form.manual_price_date : todayISO(),
       updated_at: new Date().toISOString(),
     })
     setSaving(false)
@@ -125,8 +139,14 @@ export default function EditPositionModal({
             <NumberInput value={form.avg_fx_czk} onChange={v => set('avg_fx_czk', v)} placeholder="e.g. 23,45" />
           </Field>
         )}
-        <Field label="Exchange">
+        <Field label="Exchange" hint="Decides which listing is priced, e.g. AEB = Amsterdam, SBF = Paris, IBIS2 = Xetra.">
           <input style={inputStyle} value={form.exchange} onChange={e => set('exchange', e.target.value)} />
+        </Field>
+        <Field label="Manual price" hint="Only used when no live quote arrives (delisted or unquoted ticker). Empty = value at cost.">
+          <NumberInput value={form.manual_price} onChange={v => set('manual_price', v)} suffix={holding.currency} placeholder="—" />
+        </Field>
+        <Field label="Manual price date">
+          <input style={inputStyle} type="date" value={form.manual_price_date} onChange={e => set('manual_price_date', e.target.value)} />
         </Field>
         <Field label="" span="2">
           <Checkbox checked={form.is_dividend_payer} onChange={v => set('is_dividend_payer', v)} label="Pays dividends" />

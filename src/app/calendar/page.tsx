@@ -1,4 +1,5 @@
 'use client'
+import { exchangesFor } from '@/hooks/useMarketData'
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import Link from 'next/link'
 import { useAppData } from '@/hooks/useAppData'
@@ -57,7 +58,7 @@ export default function CalendarPage() {
       const res = await fetch('/api/market/dividends', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ symbols: payers.map(h => h.symbol) }),
+        body: JSON.stringify({ symbols: payers.map(h => h.symbol), exchanges: exchangesFor(payers.map(h => h.symbol)) }),
       })
       if (!res.ok) {
         const err = await res.json().catch(() => ({}))

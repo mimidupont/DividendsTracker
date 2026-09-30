@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
-import { getYahooSession, toYahoo, fetchYahooQuoteSummary, batchedMap } from '@/lib/yahoo'
+import { getYahooSession, toYahoo, fetchYahooQuoteSummary, batchedMap, skipStockAnalysis } from '@/lib/yahoo'
 import { batchFetchSAQuotes } from '@/lib/stockanalysis'
 import { DEFAULT_FX } from '@/lib/fx'
 import { todayInZone } from '@/lib/date'
@@ -43,11 +43,13 @@ const RUN_DEADLINE_MS = 50_000
 
 interface Quote { price: number; currency: string }
 
-async function fetchQuotes(symbols: string[]): Promise<Record<string, Quote>> {
+async function fetchQuotes(rows: { symbol: string; exchange: string | null }[]): Promise<Record<string, Quote>> {
   const out: Record<string, Quote> = {}
+  const exchange: Record<string, string | null> = Object.fromEntries(rows.map(r => [r.symbol, r.exchange]))
+  const symbols = Array.from(new Set(rows.map(r => r.symbol)))
   if (symbols.length === 0) return out
 
-  const sa = await batchFetchSAQuotes(symbols, 6)
+  const sa = await batchFetchSAQuotes(symbols.filter(s => !skipStockAnalysis(s, exchange[s])), 6)
   for (const s of symbols) {
     const q = sa[s]
     if (q && !q.error && q.price) out[s] = { price: q.price, currency: q.currency }
@@ -60,7 +62,7 @@ async function fetchQuotes(symbols: string[]): Promise<Record<string, Quote>> {
       const results = await batchedMap(needsYahoo, 8, async (symbol) => {
         try {
           const r = await fetchYahooQuoteSummary(
-            toYahoo(symbol), 'price', session.crumb, session.cookie)
+            toYahoo(symbol, exchange[symbol]), 'price', session.crumb, session.cookie)
           const price = r.price?.regularMarketPrice?.raw ?? 0
           return { symbol, price, currency: r.price?.currency ?? '' }
         } catch {
@@ -209,7 +211,7 @@ async function snapshotProfile(
     return { skipped: 'no positions' }
   }
 
-  const quotes = await fetchQuotes(holdings.map(x => x.symbol))
+  const quotes = await fetchQuotes(holdings)
   const coinPrices = await fetchCryptoPrices(crypto.map(x => x.coin_id))
 
   // The same position model the dashboard uses — the two writers used to have

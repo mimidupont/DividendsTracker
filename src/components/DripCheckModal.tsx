@@ -5,7 +5,7 @@ import { useProfile } from '@/lib/profile'
 import { fxRate, fetchHistoricalFx, normalizeCurrencyCode, fmtNum } from '@/lib/fx'
 import { todayISO, addDays, unixToISODate, fmtISODate } from '@/lib/date'
 import { useFx } from '@/hooks/useFx'
-import { useMarketData } from '@/hooks/useMarketData'
+import { useMarketData, exchangesFor } from '@/hooks/useMarketData'
 import { recordEvent } from '@/lib/db'
 import { whtRateFor } from '@/lib/tax'
 import { sharesAsOf } from '@/lib/dividends'
@@ -79,7 +79,7 @@ export default function DripCheckModal({
       const res = await fetch('/api/market/dividends', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ symbols: divPayers.map(h => h.symbol) }),
+        body: JSON.stringify({ symbols: divPayers.map(h => h.symbol), exchanges: exchangesFor(divPayers.map(h => h.symbol)) }),
       })
       if (!res.ok) {
         const err = await res.json().catch(() => ({}))

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getYahooSession, toYahoo, fetchYahooQuoteSummary, batchedMap } from '@/lib/yahoo'
+import { getYahooSession, toYahoo, fetchYahooQuoteSummary, batchedMap, skipStockAnalysis } from '@/lib/yahoo'
 import { batchFetchSAQuotes, type SAQuote } from '@/lib/stockanalysis'
 
 export interface MarketQuote {
@@ -73,12 +73,13 @@ function changeToPercent(
 
 async function fetchYahooQuote(
   symbol: string,
+  exchange: string | undefined,
   crumb: string,
   cookie: string
 ): Promise<[string, MarketQuote]> {
   try {
     const result = await fetchYahooQuoteSummary(
-      toYahoo(symbol),
+      toYahoo(symbol, exchange),
       'price,summaryDetail',
       crumb,
       cookie
@@ -159,11 +160,14 @@ const MAX_SYMBOLS = 100
 
 const quoteCache = new Map<string, { quote: MarketQuote; at: number }>()
 
-function cachedQuote(symbol: string): MarketQuote | null {
-  const hit = quoteCache.get(symbol)
+/** The same ticker on two exchanges is two different quotes. */
+const cacheKey = (symbol: string, exchange?: string) => `${symbol}|${exchange ?? ''}`
+
+function cachedQuote(key: string): MarketQuote | null {
+  const hit = quoteCache.get(key)
   if (!hit) return null
   if (Date.now() - hit.at > QUOTE_TTL) {
-    quoteCache.delete(symbol)
+    quoteCache.delete(key)
     return null
   }
   return hit.quote
@@ -173,7 +177,15 @@ function cachedQuote(symbol: string): MarketQuote | null {
 
 export async function POST(req: NextRequest) {
   try {
-    const body = (await req.json()) as { symbols?: unknown }
+    const body = (await req.json()) as { symbols?: unknown; exchanges?: unknown }
+    // Optional symbol → exchange code, so a bare European ticker resolves to
+    // its home listing (TTE on SBF → TTE.PA) instead of a US namesake.
+    const exchanges: Record<string, string> = {}
+    if (body.exchanges && typeof body.exchanges === 'object') {
+      for (const [k, v] of Object.entries(body.exchanges as Record<string, unknown>)) {
+        if (typeof v === 'string' && v.trim()) exchanges[k] = v.trim()
+      }
+    }
     const requested = Array.isArray(body.symbols)
       ? Array.from(new Set(
           body.symbols.filter((s): s is string => typeof s === 'string' && s.trim().length > 0)
@@ -193,7 +205,7 @@ export async function POST(req: NextRequest) {
     const fromCache: Record<string, MarketQuote> = {}
     const symbols: string[] = []
     for (const s of requested) {
-      const hit = cachedQuote(s)
+      const hit = cachedQuote(cacheKey(s, exchanges[s]))
       if (hit) fromCache[s] = hit
       else symbols.push(s)
     }
@@ -206,7 +218,7 @@ export async function POST(req: NextRequest) {
     }
 
     // 1. StockAnalysis for all mapped symbols (null for unmapped ones)
-    const saResults = await batchFetchSAQuotes(symbols, 6)
+    const saResults = await batchFetchSAQuotes(symbols.filter(s => !skipStockAnalysis(s, exchanges[s])), 6)
 
     // 2. Which symbols still need Yahoo?
     const needsYahoo = symbols.filter(s => {
@@ -223,7 +235,7 @@ export async function POST(req: NextRequest) {
         const pairs = await batchedMap(
           needsYahoo,
           8,
-          s => fetchYahooQuote(s, session.crumb, session.cookie)
+          s => fetchYahooQuote(s, exchanges[s], session.crumb, session.cookie)
         )
         yahooMap = Object.fromEntries(pairs)
       } else {
@@ -242,7 +254,7 @@ export async function POST(req: NextRequest) {
       quotes[symbol] = merged
       // Only a real quote is cached. Caching an empty one would pin a failed
       // lookup in place for the whole window.
-      if (merged.price > 0) quoteCache.set(symbol, { quote: merged, at: Date.now() })
+      if (merged.price > 0) quoteCache.set(cacheKey(symbol, exchanges[symbol]), { quote: merged, at: Date.now() })
     }
 
     return NextResponse.json({

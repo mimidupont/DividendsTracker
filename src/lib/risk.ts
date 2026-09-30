@@ -213,7 +213,14 @@ export const SEED_SECTORS: Record<string, { sector: string; region: string }> = 
   JPM:   { sector: 'Financials', region: 'US' },
   ERBAG: { sector: 'Financials', region: 'EU' },
   MONET: { sector: 'Financials', region: 'CZ' },
-  CSG1:  { sector: 'Financials', region: 'EU' },
+  // CSG N.V. (Czechoslovak Group) — defence manufacturer, not a bank.
+  CSG1:  { sector: 'Industrials', region: 'EU' },
+  CSG:   { sector: 'Industrials', region: 'EU' },
+  BNP:   { sector: 'Financials', region: 'EU' },
+  TTE:   { sector: 'Energy', region: 'EU' },
+  FDJU:  { sector: 'Consumer Discretionary', region: 'EU' },
+  VCT:   { sector: 'Materials', region: 'EU' },
+  HPQ:   { sector: 'Technology', region: 'US' },
   KPLT:  { sector: 'Financials', region: 'US' },
   KO:    { sector: 'Consumer Staples', region: 'US' },
   PEP:   { sector: 'Consumer Staples', region: 'US' },
@@ -230,6 +237,15 @@ export const SEED_SECTORS: Record<string, { sector: string; region: string }> = 
   RIO:   { sector: 'Materials', region: 'Global' },
   ICL:   { sector: 'Materials', region: 'EM' },
   PSNY:  { sector: 'Industrials', region: 'EU' },
+}
+
+/**
+ * Seed classification for a held ticker. Looks up the bare ticker, so a
+ * suffixed symbol (BNP.PA, FDJU.PA) finds its entry too.
+ */
+export function seedFor(symbol: string): { sector: string; region: string } | undefined {
+  const s = symbol.trim().toUpperCase()
+  return SEED_SECTORS[s] ?? SEED_SECTORS[s.split('.')[0]]
 }
 
 export const ASSET_CLASS_LABELS: Record<AssetClass, string> = {

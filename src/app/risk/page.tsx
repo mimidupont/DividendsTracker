@@ -13,7 +13,7 @@ import {
   topFiveBand, effectiveNBand, unhedgedFxBand, liquidityBand, ASSET_CLASS_LABELS, ASSET_CLASS_COLORS,
 } from '@/lib/risk'
 import { effectiveAnnualExpenses, DEFAULT_PLAN } from '@/lib/fire'
-import { SEED_SECTORS } from '@/lib/risk'
+import { seedFor } from '@/lib/risk'
 import { useProfile } from '@/lib/profile'
 import { supabase, type AssetMetadata } from '@/lib/supabase'
 import { btnStyle } from '@/lib/ui'
@@ -77,22 +77,32 @@ export default function RiskPage() {
     if (!activeProfile) return
     setSeeding(true)
     try {
-      const known = new Set(data.assetMetadata.map(m => m.symbol.toUpperCase()))
-      const rows = data.holdings
-        .filter(h => !known.has(h.symbol.toUpperCase()))
-        .map(h => {
-          const seed = SEED_SECTORS[h.symbol.toUpperCase()]
-          return {
-            profile_id: activeProfile.id,
-            symbol: h.symbol.toUpperCase(),
-            sector: seed?.sector ?? null,
-            region: seed?.region ?? null,
-            asset_type: seed?.sector === 'ETF' ? 'etf' : seed ? 'stock' : null,
-            liquidity_tier: 'week',
-            is_hedged: false,
-          }
-        })
-      if (rows.length === 0) { setNotice('Every holding already has a classification row.'); return }
+      // "Known" means actually classified: an empty row left by an earlier
+      // run must not stop the seed from filling it in.
+      const known = new Set(data.assetMetadata.filter(m => m.sector || m.asset_type).map(m => m.symbol.toUpperCase()))
+      // One row per ticker — two holdings rows of the same symbol (e.g. an RSU
+      // grant and a later purchase) in one upsert made Postgres reject it.
+      const symbols = Array.from(new Set(data.holdings.map(h => h.symbol.toUpperCase())))
+        .filter(sym => !known.has(sym))
+      const unseeded = symbols.filter(sym => !seedFor(sym))
+      const rows = symbols
+        .map(sym => ({ sym, seed: seedFor(sym) }))
+        .filter((x): x is { sym: string; seed: { sector: string; region: string } } => !!x.seed)
+        .map(({ sym, seed }) => ({
+          profile_id: activeProfile.id,
+          symbol: sym,
+          sector: seed.sector,
+          region: seed.region,
+          asset_type: seed.sector === 'ETF' ? 'etf' : 'stock',
+          // liquidity_tier / is_hedged are left out: new rows take the column
+          // defaults ('week', false) and an existing row keeps what was set.
+        }))
+      if (rows.length === 0) {
+        setNotice(unseeded.length
+          ? `No default classification for ${unseeded.join(', ')} — set their type and sector below.`
+          : 'Every holding is already classified.')
+        return
+      }
       let { error } = await supabase.from('asset_metadata')
         .upsert(rows, { onConflict: 'profile_id,symbol' })
       if (error && /asset_type/.test(error.message)) {
@@ -100,15 +110,18 @@ export default function RiskPage() {
           .upsert(rows.map(({ asset_type: _t, ...r }) => { void _t; return r }), { onConflict: 'profile_id,symbol' }))
       }
       if (error) { setNotice(`Could not seed classifications: ${error.message}`); return }
-      setNotice(`Added ${rows.length} rows — ${rows.filter(r => !r.sector).length} still need a sector; fill them in below.`)
+      setNotice(`Classified ${rows.length} holding${rows.length === 1 ? '' : 's'}.` +
+        (unseeded.length ? ` ${unseeded.join(', ')} still need a type and sector — set them below.` : ''))
       data.reload()
     } finally {
       setSeeding(false)
     }
   }
 
-  const unclassified = data.holdings.filter(h =>
-    !data.assetMetadata.some(m => m.symbol.toUpperCase() === h.symbol.toUpperCase() && (m.sector || m.asset_type)))
+  // One entry per ticker, matching the dashboard alert's count.
+  const unclassified = Array.from(new Map(data.holdings
+    .filter(h => h.shares > 0 && !data.assetMetadata.some(m => m.symbol.toUpperCase() === h.symbol.toUpperCase() && (m.sector || m.asset_type)))
+    .map(h => [h.symbol.toUpperCase(), h])).values())
 
   if (data.loading) return <LoadingShell label="Loading risk profile…" />
 

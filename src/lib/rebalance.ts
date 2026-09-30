@@ -201,5 +201,25 @@ export function fullRebalanceTrades(rows: DriftRow[], minTicketCZK = 2000): Trad
 
 /** Targets within a scope should sum to 1. Warn, don't block. */
 export function targetsSum(targets: AllocationTarget[], scope: TargetScope): number {
-  return targets.filter(t => t.scope === scope).reduce((s, t) => s + t.target_pct, 0)
+  return targets.filter(t => t.scope === scope).reduce((s, t) => s + (isFinite(t.target_pct) ? t.target_pct : 0), 0)
+}
+
+/** How far off 100 % a set of targets may be and still count as a plan. */
+export const TARGET_SUM_TOLERANCE = 0.005
+
+/**
+ * Whether a scope's targets form a plan that drift can be measured against.
+ *
+ * - `none`: no rows, or rows that are all 0 % (an opened-and-saved empty
+ *   form). Measuring drift against 0 % flags every holding as a "breach" and
+ *   suggests selling the whole portfolio.
+ * - `incomplete`: some weights set, but they do not add up to 100 %.
+ * - `ok`: they add up to 100 % (± 0.5 pp).
+ */
+export function targetsStatus(
+  targets: AllocationTarget[], scope: TargetScope
+): { status: 'none' | 'incomplete' | 'ok'; sum: number } {
+  const sum = targetsSum(targets, scope)
+  if (sum <= 1e-9) return { status: 'none', sum: 0 }
+  return { status: Math.abs(sum - 1) <= TARGET_SUM_TOLERANCE ? 'ok' : 'incomplete', sum }
 }

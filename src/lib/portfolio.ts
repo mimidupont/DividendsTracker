@@ -45,6 +45,11 @@ export interface PositionMetrics {
   /** Currency the price above is expressed in. */
   priceCurrency: string
   isLivePrice: boolean
+  /**
+   * No live quote, but the user entered a price (delisted or unquoted ticker).
+   * Valued at that price instead of cost; still not a live price.
+   */
+  isManualPrice: boolean
   changePercent: number | null
   marketCZK: number
   /** Cost at the FX rate it was paid (today's rate when that is unknown — see costFxFrozen). */
@@ -77,7 +82,9 @@ export function positionMetrics(
   allHoldings: Holding[] = []
 ): PositionMetrics {
   const isLivePrice = market.hasPrice(holding.symbol)
-  const price = market.getPrice(holding.symbol, holding.avg_price)
+  const manual = holding.manual_price
+  const isManualPrice = !isLivePrice && manual != null && isFinite(manual) && manual >= 0
+  const price = isManualPrice ? manual! : market.getPrice(holding.symbol, holding.avg_price)
 
   // A quote can come back in a different currency than the position is booked
   // in (an ADR, a dual listing, or a London line quoted in pence). Convert the
@@ -122,6 +129,7 @@ export function positionMetrics(
     price,
     priceCurrency,
     isLivePrice,
+    isManualPrice,
     changePercent: market.quotes[holding.symbol]?.changePercent ?? null,
     marketCZK,
     costCZK,
@@ -163,9 +171,13 @@ export interface PortfolioTotals {
   fxProblems: string[]
   /** Dividend payers whose income is unknown (no live rate, no projection) — excluded from annualDivCZK. */
   incomeUnknown: string[]
-  /** Symbols valued at cost because no live quote arrived. */
+  /** Symbols valued at cost because no live quote (and no manual price) arrived. */
   atCost: string[]
-  /** Foreign-currency symbols whose cost uses today's FX because the purchase rate is unknown. */
+  /**
+   * Foreign-currency symbols whose cost uses today's FX because the purchase
+   * rate is unknown. A zero-cost position (RSUs, a gift) has no currency
+   * effect to lose and is not listed.
+   */
   costFxUnknown: string[]
 }
 
@@ -187,10 +199,11 @@ export function portfolioTotals(rows: PositionMetrics[]): PortfolioTotals {
     incomeUnknown: rows
       .filter(r => r.holding.is_dividend_payer && r.annualDivCZK == null)
       .map(r => r.holding.symbol),
-    atCost: rows.filter(r => !r.isLivePrice).map(r => r.holding.symbol),
-    costFxUnknown: rows
-      .filter(r => !r.costFxFrozen && normalizeCurrencyCode(r.holding.currency) !== 'CZK')
-      .map(r => r.holding.symbol),
+    atCost: rows.filter(r => !r.isLivePrice && !r.isManualPrice).map(r => r.holding.symbol),
+    costFxUnknown: Array.from(new Set(rows
+      .filter(r => !r.costFxFrozen && normalizeCurrencyCode(r.holding.currency) !== 'CZK' &&
+        r.holding.avg_price * r.holding.shares > 0)
+      .map(r => r.holding.symbol))),
   }
 }
 
@@ -241,6 +254,8 @@ export interface Position {
    * are true (their value *is* the entered figure).
    */
   isLivePrice: boolean
+  /** Valued at a price the user entered because no quote exists (stocks only). */
+  isManualPrice?: boolean
   /** Modified duration, for bonds with a known yield — drives rate-shock scenarios. */
   duration?: number | null
   /** A fund (ETF, bond ETF): one line here, many underlying holdings. */
@@ -342,6 +357,7 @@ export function buildPositions(
       annualIncomeCZK: m.annualDivCZK ?? 0,
       isLiability: false,
       isLivePrice: m.isLivePrice,
+      isManualPrice: m.isManualPrice,
     })
   }
 

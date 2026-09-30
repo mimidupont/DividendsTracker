@@ -16,16 +16,33 @@ import { useMarketData } from '@/hooks/useMarketData'
 import { useAppData } from '@/hooks/useAppData'
 import { useProfile } from '@/lib/profile'
 import { positionsMetrics, portfolioTotals, holdingAssetClass, type PositionMetrics } from '@/lib/portfolio'
-import { deleteScoped } from '@/lib/db'
+import { deleteScoped, updateScoped } from '@/lib/db'
+import { fetchHistoricalFx, normalizeCurrencyCode } from '@/lib/fx'
+import { purchaseFxPlan, datesNeeded, SKIP_LABEL } from '@/lib/purchasefx'
+
+type RowFilter = 'all' | 'at-cost' | 'fx-unknown'
+const FILTERS: { key: RowFilter; label: string }[] = [
+  { key: 'all', label: 'All' }, { key: 'at-cost', label: 'No live price' }, { key: 'fx-unknown', label: 'No purchase FX' },
+]
 import { btnStyle, actionBtn, signColor } from '@/lib/ui'
 
 export default function HoldingsPage() {
-  const { holdings, projections, assetMetadata, loading, reload, error } = useAppData()
+  const { holdings, holdingLots, projections, assetMetadata, loading, reload, error } = useAppData()
   const { activeProfile } = useProfile()
   const [record, setRecord]     = useState<RecordPreset | null>(null)
   const [showDrip, setShowDrip] = useState(false)
   const [editHolding, setEditHolding] = useState<Holding | null>(null)
   const { schedule, pendingIds, toast } = useUndoableDelete()
+  const [filter, setFilter] = useState<RowFilter>('all')
+  const [filling, setFilling] = useState(false)
+  const [fillNotice, setFillNotice] = useState<string | null>(null)
+
+  // Dashboard alerts link here with ?filter=… so only the rows to fix show.
+  // Read once from the URL (useSearchParams would force a Suspense boundary).
+  useEffect(() => {
+    const f = new URLSearchParams(window.location.search).get('filter')
+    if (f === 'at-cost' || f === 'fx-unknown') setFilter(f)
+  }, [])
 
   const { fx, fxLive, fxLoading, fxTs, refresh: refreshFx } = useFx()
   const market = useMarketData()
@@ -42,6 +59,53 @@ export default function HoldingsPage() {
   const totals  = portfolioTotals(rows)
   const divPayers = visible.filter(h => h.is_dividend_payer).length
   const metaBy = new Map(assetMetadata.map(m => [m.symbol.toUpperCase(), m]))
+  const costFxMissing = (r: PositionMetrics) =>
+    !r.costFxFrozen && r.holding.currency.toUpperCase() !== 'CZK' && r.holding.avg_price * r.holding.shares > 0
+  const shownRows = filter === 'at-cost'
+    ? rows.filter(r => !r.isLivePrice && !r.isManualPrice)
+    : filter === 'fx-unknown' ? rows.filter(costFxMissing) : rows
+
+  /**
+   * Fill the purchase rate of every position that lacks one from the ECB rate
+   * on its purchase (and lot) dates, cost-weighted. 1 January dates are
+   * treated as placeholders and skipped rather than guessed.
+   */
+  const fillPurchaseFx = async () => {
+    if (!activeProfile) return
+    setFilling(true)
+    setFillNotice(null)
+    try {
+      const tables: Record<string, Record<string, number> | null> = {}
+      const dates = datesNeeded(visible, holdingLots)
+      for (let i = 0; i < dates.length; i += 6) {
+        await Promise.all(dates.slice(i, i + 6).map(async d => { tables[d] = (await fetchHistoricalFx(d))?.rates ?? null }))
+      }
+      const plan = purchaseFxPlan({
+        holdings: visible, lots: holdingLots,
+        // Only the day's actual ECB rate — never fxRate()'s built-in fallback,
+        // which would be stored permanently as if it were the rate paid.
+        rateOn: (ccy, d) => tables[d]?.[normalizeCurrencyCode(ccy)] ?? null,
+      })
+      const failures: string[] = []
+      let filled = 0
+      for (const l of plan.lots) {
+        const { error: e } = await updateScoped('holding_lots', l.id, activeProfile.id, { fx_rate_czk: l.fx })
+        if (e) failures.push(`lot: ${e}`)
+      }
+      for (const h of plan.holdings) {
+        const { error: e } = await updateScoped('holdings', h.id, activeProfile.id, { avg_fx_czk: h.avgFx, updated_at: new Date().toISOString() })
+        if (e) failures.push(`${h.symbol}: ${e}`); else filled++
+      }
+      const skipped = plan.skipped.map(sk => `${sk.symbol} (${SKIP_LABEL[sk.reason]})`)
+      setFillNotice(
+        `Filled ${filled} position${filled === 1 ? '' : 's'}.` +
+        (skipped.length ? ` Not filled: ${skipped.join('; ')}.` : '') +
+        (failures.length ? ` Errors: ${failures.join('; ')}` : ''))
+      reload()
+    } finally {
+      setFilling(false)
+    }
+  }
 
   const deleteHolding = (h: Holding) =>
     schedule(h.id, `${h.symbol}`, () => deleteScoped('holdings', h.id, activeProfile?.id), reload)
@@ -77,7 +141,9 @@ export default function HoldingsPage() {
       render: r => market.state === 'loading' && !r.isLivePrice ? <span style={{ color: 'var(--text3)' }}>…</span> : <>
         {fmtNum(r.price, 2)}
         <span style={{ fontSize: 10, color: 'var(--text3)' }}> {r.priceCurrency}</span>
-        {!r.isLivePrice && <> <Badge variant="amber" style={{ marginLeft: 4 }}>at cost</Badge></>}
+        {r.isManualPrice
+          ? <> <span title={`Entered by hand${r.holding.manual_price_date ? ` on ${r.holding.manual_price_date}` : ''} — no quote source has this ticker`}><Badge variant="gray" style={{ marginLeft: 4 }}>manual</Badge></span></>
+          : !r.isLivePrice && <> <Badge variant="amber" style={{ marginLeft: 4 }}>at cost</Badge></>}
       </>,
     },
     {
@@ -88,12 +154,12 @@ export default function HoldingsPage() {
     {
       key: 'pl', label: 'Unrealised P&L', numeric: true, sortValue: r => r.plCZK,
       render: r => (
-        <span style={{ color: signColor(r.plCZK) }} title={r.costFxFrozen ? undefined : 'Purchase FX rate unknown — cost converted at today\'s rate, so the currency effect is not included'}>
+        <span style={{ color: signColor(r.plCZK) }} title={costFxMissing(r) ? 'Purchase FX rate unknown — cost converted at today\'s rate, so the currency effect is not included' : undefined}>
           {fmtSignedCZK(r.plCZK)}
           <div style={{ fontSize: 10, color: 'var(--text3)' }}>
             {fmtPct(r.plPct, 1)}
             {r.fxPLCZK != null && Math.abs(r.fxPLCZK) >= 1 && ` · FX ${fmtSignedCZK(r.fxPLCZK)}`}
-            {!r.costFxFrozen && r.holding.currency.toUpperCase() !== 'CZK' && ' · FX ?'}
+            {costFxMissing(r) && ' · FX ?'}
           </div>
         </span>
       ),
@@ -172,16 +238,37 @@ export default function HoldingsPage() {
         />
       ) : <>
         <MarketStatusCards totals={totals} rowsLive={rows.some(r => r.isLiveIncome)} count={visible.length} />
-        {totals.costFxUnknown.length > 0 && (
-          <div style={{ fontSize: 11, color: 'var(--text3)', marginBottom: 12, lineHeight: 1.6 }}>
-            ⓘ The purchase exchange rate is unknown for {totals.costFxUnknown.join(', ')} (“FX ?”) — their cost is converted at
-            today&apos;s rate, so their P&amp;L leaves out what the currency did. Add the rate with ✎.
+        {totals.atCost.length > 0 && (
+          <div id="at-cost" style={{ fontSize: 11, color: 'var(--text3)', marginBottom: 8, lineHeight: 1.6 }}>
+            ⚠ No live price for {Array.from(new Set(totals.atCost)).join(', ')} — valued at cost, and today&apos;s history point
+            is held back until every position is priced. With ✎, check the exchange (it decides which listing is quoted), or
+            enter a manual price for a delisted ticker.
+          </div>
+        )}
+        {(totals.costFxUnknown.length > 0 || fillNotice) && (
+          <div id="fx" style={{ fontSize: 11, color: 'var(--text3)', marginBottom: 12, lineHeight: 1.6 }}>
+            {totals.costFxUnknown.length > 0 && <>
+              ⓘ The purchase exchange rate is unknown for {totals.costFxUnknown.join(', ')} (“FX ?”) — their cost is converted at
+              today&apos;s rate, so their P&amp;L leaves out what the currency did.{' '}
+              <button type="button" onClick={fillPurchaseFx} disabled={filling} style={{
+                background: 'none', border: 'none', color: 'var(--blue)', cursor: 'pointer', padding: 0, fontSize: 11, textDecoration: 'underline',
+              }}>{filling ? 'Filling…' : 'Fill from ECB rates on the purchase dates'}</button>
+              {' '}or add a rate with ✎.
+            </>}
+            {fillNotice && <div role="status" style={{ marginTop: 4, color: 'var(--text2)' }}>{fillNotice}</div>}
           </div>
         )}
         <Panel
           title="All positions"
           padded={false}
-          right={<span style={{ display: 'flex', gap: 6 }}>
+          right={<span style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+            <span role="group" aria-label="Show" style={{ display: 'flex', gap: 4 }}>
+              {FILTERS.map(f => (
+                <button key={f.key} type="button" aria-pressed={filter === f.key} onClick={() => setFilter(f.key)} style={{
+                  ...btnStyle(filter === f.key ? 'primary' : 'secondary'), padding: '2px 8px', fontSize: 10,
+                }}>{f.label}</button>
+              ))}
+            </span>
             <Badge variant="green">{divPayers} dividend payers</Badge>
             {totals.atCost.length > 0 && <Badge variant="amber">{totals.atCost.length} at cost</Badge>}
           </span>}
@@ -189,7 +276,7 @@ export default function HoldingsPage() {
           <DataTable
             caption="Stock and ETF positions"
             columns={columns}
-            rows={rows}
+            rows={shownRows}
             rowKey={r => r.holding.id}
             initialSort={{ key: 'mkt', dir: 'desc' }}
           />

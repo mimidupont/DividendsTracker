@@ -7,6 +7,7 @@
  * invalidated and data is re-fetched automatically.
  */
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
+import { registerExchanges } from './useMarketData'
 import {
   supabase, supabaseConfigError,
   Holding, DividendProjection, DividendReceived, BankAccount, CryptoHolding, RealEstate,
@@ -189,6 +190,10 @@ export function useAppData(): UseAppData {
   // profile, so reading one during the first client render desynchronises
   // hydration. The effect below fills it in immediately after mount.
   const [data, setData]       = useState<AppData>(EMPTY)
+  // Quotes are requested by ticker from many pages; tell the market hook which
+  // exchange each ticker trades on so it prices the right listing. Runs for
+  // cached and fresh data alike, and before the page's own quote effects.
+  useEffect(() => { registerExchanges(data.holdings) }, [data.holdings])
   const [loading, setLoading] = useState(true)
   const activeProfileRef      = useRef<string | null>(null)
 

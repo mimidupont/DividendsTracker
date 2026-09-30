@@ -62,7 +62,15 @@ unconverted and flagged, never converted at some other currency's rate.
 the live price converted with *the currency the quote came back in* (which is not
 always the currency the position was booked in); cost basis uses the currency you
 recorded. If a symbol has no live quote, it is valued at average cost and marked
-"at cost".
+"at cost" — unless you entered a **manual price** (✎ on Positions, migration 015),
+which is then used and marked "manual" (flagged after 30 days). A position valued
+at cost holds back that day's history point; a manual one does not.
+
+**Which listing is priced** is decided by the position's exchange: a bare ticker
+gets the exchange's Yahoo suffix (`SBF` → `.PA`, `AEB` → `.AS`, `IBIS2` → `.DE`,
+`LSEETF` → `.L`, `PRA` → `.PR`; US venues none — `EXCHANGE_SUFFIX` in
+`src/lib/yahoo.ts`). `YAHOO_SYMBOL_MAP` overrides broker codes that differ from
+the exchange's ticker (IBKR's `CSG1` is Euronext's `CSG`).
 
 **Income** is the declared forward annual dividend rate × shares. When no live
 rate is available it falls back to your saved projection for the nearest
@@ -97,8 +105,15 @@ before the window start; with no history yet they report "no data" rather than 0
 own date (`fx_rate_czk`), and holdings keep a blended `avg_fx_czk`. Cost is
 converted at that frozen rate, so the P&L splits into price and currency parts.
 Rows recorded before migration 010 have no rate — the UI says "purchase FX
-unknown" for them until you run **Activity → Backfill from holdings**, which
-looks up the historical rate for each lot date.
+unknown" for them until you click **Fill from ECB rates** on Positions
+(`src/lib/purchasefx.ts`): it writes each lot's rate and the position's
+cost-weighted `avg_fx_czk`. Purchase dates of 1 January are treated as
+placeholders and skipped — set the real date first. Zero-cost positions (RSUs,
+gifts) have no currency effect and are not flagged.
+
+**Allocation targets** only count once they add up to 100 % (± 0.5 pp). All-zero
+rows are treated as "no targets" rather than as a 0 % plan that every holding
+breaches.
 
 **Bonds** (`src/lib/bonds.ts`) are valued at clean price + accrued interest
 (ACT/ACT ICMA, ACT/365 or 30E/360). Without a quote they fall back to cost and are
@@ -181,8 +196,9 @@ idempotent (`create table if not exists`, `add column if not exists`) and none
 drops or rewrites an existing column.
 
 **Upgrading to this version:** run `supabase/migrations/010_frozen_fx.sql`,
-`011_bonds.sql`, `012_record_event.sql` and `013_property_details.sql` **in that
-order** (SQL Editor), then open Activity → *Backfill from holdings* once to create
+`011_bonds.sql`, `012_record_event.sql`, `013_property_details.sql`,
+`014_bank_interest_profile.sql` and
+`015_manual_price.sql` **in that order** (SQL Editor), then open Activity → *Backfill from holdings* once to create
 ledger rows and historical FX rates for positions entered before the ledger existed.
 Until 012 is run, the Record button reports that `record_event()` is missing.
 

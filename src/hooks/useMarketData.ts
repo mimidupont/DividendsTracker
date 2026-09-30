@@ -21,6 +21,35 @@ let inFlightSymbols: Set<string> | null = null
 // Subscribers so all mounted hook instances re-render when cache updates
 const subscribers = new Set<() => void>()
 
+/**
+ * Exchange per ticker, registered once by useAppData when holdings load, so
+ * every page's refresh(symbols) resolves European tickers to their home
+ * listing without each caller having to pass it.
+ */
+let exchangeBySymbol: Record<string, string> = {}
+export function registerExchanges(rows: { symbol: string; exchange: string | null }[]): void {
+  const next: Record<string, string> = {}
+  for (const r of rows) if (r.exchange) next[r.symbol] = r.exchange
+  const prev = exchangeBySymbol
+  exchangeBySymbol = next
+  // A changed exchange means a different listing: drop the cached quote (it
+  // may be the wrong currency, or a failed lookup) and fetch the right one,
+  // since pages only refetch when their symbol list changes.
+  const changed = Object.keys({ ...prev, ...next }).filter(s => prev[s] !== next[s] && cache && s in cache.quotes)
+  if (changed.length > 0 && cache) {
+    const quotes = { ...cache.quotes }
+    for (const s of changed) delete quotes[s]
+    cache = { ...cache, quotes }
+    notify()
+    fetchMarketData(changed).catch(() => undefined)
+  }
+}
+
+/** The registered exchange of each symbol that has one (for other quote routes). */
+export function exchangesFor(symbols: string[]): Record<string, string> {
+  return Object.fromEntries(symbols.filter(s => exchangeBySymbol[s]).map(s => [s, exchangeBySymbol[s]]))
+}
+
 function notify() {
   subscribers.forEach(fn => fn())
 }
@@ -52,7 +81,10 @@ async function fetchMarketData(symbols: string[]): Promise<void> {
     fetch('/api/market', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ symbols }),
+      body: JSON.stringify({
+        symbols,
+        exchanges: exchangesFor(symbols),
+      }),
     }).then(async res => {
       if (!res.ok) {
         const err = await res.json().catch(() => ({}))

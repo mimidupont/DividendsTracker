@@ -14,7 +14,7 @@ import {
   positionsMetrics, portfolioTotals, buildPositions, unconvertibleCurrencies,
   totalsByClass, netWorthCZK, incomeByClass, investedCostAndValue, type AssetClass,
 } from '@/lib/portfolio'
-import { snapshotValues, snapshotBlockers } from '@/lib/snapshot'
+import { snapshotValues, snapshotBlockers, isValuedAtCost } from '@/lib/snapshot'
 import { contributionsVsGrowth, externalFlows } from '@/lib/transactions'
 import { attentionItems } from '@/lib/alerts'
 import { ASSET_CLASS_LABELS, ASSET_CLASS_COLORS } from '@/lib/risk'
@@ -165,7 +165,7 @@ export default function Dashboard() {
       ...c, value, count: ps.filter(p => !p.isLiability).length,
       pl: c.key === 'cash' || cost <= 0 ? null : gross - cost,
       plPct: c.key === 'cash' || cost <= 0 ? null : ((gross - cost) / cost) * 100,
-      atCost: ps.filter(p => !p.isLivePrice && !p.isLiability).length,
+      atCost: ps.filter(isValuedAtCost).length,
     }
   }).filter(c => c.count > 0 || c.key === 'equity' || c.key === 'cash')
 
@@ -305,7 +305,10 @@ export default function Dashboard() {
               {alerts.map(a => (
                 <li key={a.id} style={{ fontSize: 12, lineHeight: 1.5, display: 'flex', gap: 8 }}>
                   <span aria-hidden="true" style={{ color: a.level === 'warn' ? 'var(--amber)' : 'var(--blue)' }}>{a.level === 'warn' ? '⚠' : 'ⓘ'}</span>
-                  <Link href={a.href} style={{ color: 'var(--text2)', textDecoration: 'none' }}>{a.text} →</Link>
+                  <span style={{ color: 'var(--text2)' }}>
+                    {a.text}{' '}
+                    <Link href={a.href} style={{ color: 'var(--blue)', whiteSpace: 'nowrap' }}>{a.action ?? 'Open'} →</Link>
+                  </span>
                 </li>
               ))}
             </ul>

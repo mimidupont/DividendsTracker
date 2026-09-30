@@ -40,6 +40,12 @@ export interface Holding {
    * entered before migration 010; cost then falls back to today's rate.
    */
   avg_fx_czk?: number | null
+  /**
+   * Price in `currency` entered by hand for a ticker no provider quotes
+   * (delisted, unlisted). Used only when no live quote arrives. Migration 015.
+   */
+  manual_price?: number | null
+  manual_price_date?: string | null
   created_at: string
   updated_at: string
 }
