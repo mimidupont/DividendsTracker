@@ -1102,3 +1102,27 @@ $$;
 alter table real_estate add column if not exists valuation_date date;
 -- Annual running costs at 100 % ownership, in the property's currency.
 alter table real_estate add column if not exists annual_costs numeric not null default 0;
+
+-- ── 014 bank_interest_received.profile_id (older installs) ──
+
+alter table bank_interest_received
+  add column if not exists profile_id uuid references profiles(id) on delete cascade;
+
+update bank_interest_received i
+   set profile_id = b.profile_id
+  from bank_accounts b
+ where i.profile_id is null and i.account_id = b.id;
+
+-- Only enforce NOT NULL once every row has a profile (rows with no account can't be placed).
+do $$
+begin
+  if not exists (select 1 from bank_interest_received where profile_id is null) then
+    alter table bank_interest_received alter column profile_id set not null;
+  else
+    raise notice 'bank_interest_received has rows with no account/profile - profile_id left nullable; fix those rows and re-run.';
+  end if;
+end $$;
+
+create index if not exists bank_interest_profile_idx on bank_interest_received (profile_id);
+
+notify pgrst, 'reload schema';
